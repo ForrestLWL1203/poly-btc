@@ -13,12 +13,15 @@ SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.ser
                  "execution_control": "hl-execution-control.service",
                  "scan": "hl-scan.service", "timer": "hl-scan.timer",
                  "challenger_scan": "hl-challenger-refresh.service",
-                 "challenger_timer": "hl-challenger-refresh.timer"}
+                 "challenger_timer": "hl-challenger-refresh.timer",
+                 "finalize_resume": "hl-finalize-resume.service",
+                 "finalize_timer": "hl-finalize-resume.timer"}
 # procman pidfile basenames (data/run/<name>.pid|.log) — used by the local backend
 PID_NAMES = {"dashboard": "dashboard", "observe": "observer", "scan": "scan"}
 TIMER_UNITS = {
     "timer": "hl-scan.timer",
     "challenger_timer": "hl-challenger-refresh.timer",
+    "finalize_timer": "hl-finalize-resume.timer",
 }
 
 
@@ -73,6 +76,8 @@ class SystemdServices:
         )
         emit("禁用 observe 开机自启(仍可由 dashboard 手动启动)…")
         self.ex.run("systemctl disable hl-observe.service", on_line=emit)
+        emit("启用资源延期恢复定时器…")
+        self.ex.run("systemctl enable --now hl-finalize-resume.timer", on_line=emit)
 
     def start(self, unit):   return self.ex.run(f"systemctl start {SYSTEMD_UNITS[unit]}")
     def stop(self, unit):    return self.ex.run(f"systemctl stop {SYSTEMD_UNITS[unit]}")

@@ -10,6 +10,7 @@ deployed system auditable and lets `ops.update` diff/re-push a unit without touc
 UNITS = (
     "hl-dashboard", "hl-observe", "hl-execution-control.service", "hl-scan.service", "hl-scan.timer",
     "hl-challenger-refresh.service", "hl-challenger-refresh.timer",
+    "hl-finalize-resume.service", "hl-finalize-resume.timer",
 )
 
 
@@ -87,7 +88,7 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} scan --days {days} --scan-interval {scan_interval}
-TimeoutStartSec=14h
+TimeoutStartSec=infinity
 MemoryHigh=1100M
 MemoryMax=1400M
 MemorySwapMax=512M
@@ -120,7 +121,7 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} challenger-refresh --scan-interval {scan_interval}
-TimeoutStartSec=8h
+TimeoutStartSec=infinity
 MemoryHigh=1100M
 MemoryMax=1400M
 MemorySwapMax=512M
@@ -136,6 +137,39 @@ Description=Refresh frozen HL Challengers on non-full-scan days
 
 [Timer]
 OnCalendar={on_calendar}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def finalize_resume_service(app_dir, py, db):
+    return f"""[Unit]
+Description=Resume resource-deferred HL Core formation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory={app_dir}
+ExecStart={py} -m hyper.cli.discover --db {db} finalize-profiled --if-ready
+TimeoutStartSec=infinity
+MemoryHigh=1100M
+MemoryMax=1400M
+MemorySwapMax=512M
+"""
+
+
+def finalize_resume_timer():
+    return """[Unit]
+Description=Retry deferred HL Core formation until atomic publication
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
 Persistent=true
 
 [Install]
@@ -170,6 +204,10 @@ def render_all(cfg):
         "/etc/systemd/system/hl-challenger-refresh.timer": challenger_refresh_timer(
             cfg.challenger_calendar,
         ),
+        "/etc/systemd/system/hl-finalize-resume.service": finalize_resume_service(
+            cfg.app_dir, cfg.py, cfg.db,
+        ),
+        "/etc/systemd/system/hl-finalize-resume.timer": finalize_resume_timer(),
     }
     if cfg.domain:
         out["/etc/caddy/Caddyfile"] = caddyfile(cfg.domain, cfg.port)

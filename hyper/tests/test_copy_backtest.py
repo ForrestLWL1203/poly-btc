@@ -9,6 +9,7 @@ from hyper.copy.copy_backtest import (
     run_backtest,
     slice_backtest_result,
     subset_price_path,
+    tier_economics,
 )
 
 
@@ -33,6 +34,34 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_tier_economics_attributes_profit_capacity_and_deployment_without_replay(self):
+        closed = [
+            {"tier": "mid", "net_pnl": 120.0, "fee_drag": 5.0, "margin": 100.0,
+             "leverage": 5.0, "status": "closed", "target_adds": 2,
+             "followed_adds": 1, "missed_adds": 1},
+            {"tier": "mid", "net_pnl": -40.0, "fee_drag": 2.0, "margin": 80.0,
+             "leverage": 4.0, "status": "liquidated", "target_adds": 0,
+             "followed_adds": 0, "missed_adds": 0},
+        ]
+        result = tier_economics(
+            closed, [],
+            open_events=[
+                {"tier": "mid", "outcome": "opened"},
+                {"tier": "mid", "outcome": "skip_no_cash"},
+            ],
+            tier_deploy_samples={"mid": [
+                {"time": 1, "pct": .2}, {"time": 2, "pct": .4},
+            ]},
+        )
+
+        mid = result["mid"]
+        self.assertEqual(mid["netPnl"], 80.0)
+        self.assertEqual(mid["liquidations"], 1)
+        self.assertEqual(mid["openCaptureRate"], .5)
+        self.assertEqual(mid["addCaptureRate"], .5)
+        self.assertAlmostEqual(mid["avgDeployPct"], .3)
+        self.assertEqual(mid["profitFactor"], 3.0)
+
     def test_liquidation_loss_is_normalized_to_episode_open_equity(self):
         metrics = liquidation_loss_metrics(
             [

@@ -332,6 +332,10 @@ def main() -> int:
     fg.add_argument("--stamp")
     fg.add_argument("--no-retune", action="store_true",
                     help="seal the active parameter surface while retaining strict path/portfolio gates")
+    fg.add_argument("--if-ready", action="store_true",
+                    help="exit successfully when no resource-deferred generation is ready to resume")
+    fg.add_argument("--offline", action="store_true",
+                    help="validate only the frozen generation cache; never fetch missing price paths")
     reset = sub.add_parser("reset-paper", help="clear discovery/Paper state while preserving operator params")
     reset.add_argument("--factory-params", action="store_true",
                        help="also restore all params to code defaults")
@@ -598,6 +602,13 @@ def main() -> int:
             raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "finalize-profiled":
+        if args.if_ready and not db.execute(
+            "SELECT 1 FROM scan_generation WHERE status='ready' AND leaderboard_valid=1 "
+            "AND complete=0 ORDER BY id DESC LIMIT 1"
+        ).fetchone():
+            print(json.dumps({"status": "idle", "reason": "no_ready_generation"}, sort_keys=True))
+            db.close()
+            return 0
         try:
             with scan_lock.acquire(args.db):
                 with scanner._ScannerHeartbeat(db):
@@ -605,6 +616,7 @@ def main() -> int:
                         result = scanner.finalize_profiled_generation(
                             db, generation_id=args.generation, stamp=args.stamp,
                             retune=not bool(args.no_retune),
+                            offline=bool(args.offline),
                         )
                     except resource_guard.ResourceDeferred as exc:
                         generation_id = args.generation or db.execute(

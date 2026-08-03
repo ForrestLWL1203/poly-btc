@@ -12,7 +12,7 @@ import json
 import sqlite3
 import time
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 
 from hyper import config, params
 from hyper.copy.copy_backtest import (
@@ -626,13 +626,9 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int, *, include_watch=
     fills = prepare_replay_fills(
         _load_portfolio_fills(db, addrs, start_ms, include_watch=include_watch)
     )
-    windows = {}
-    for day in days:
-        start_ms = now_ms - (day + warmup_days) * 86400_000
-        windows[day] = slice_prepared_replay_fills(
-            fills, start_ms=start_ms,
-        )
-    return windows
+    # Keep one immutable longest prepared sequence.  Every 30/14/7 result is a view sliced from the one
+    # continuous capital path in ``_candidate_windows``; materializing three fill lists only tripled RSS.
+    return {max_days: fills}
 
 
 def _filter_window_fills_by_addr(window_fills: dict[int, list[dict]], addrs: Iterable[str]) -> dict[int, list[dict]]:
@@ -1353,6 +1349,7 @@ def _compact_backtest(result: dict) -> dict:
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
         "ambiguous_liquidations", "price_path_boundary_skips", "continuous_replay_days",
+        "tier_economics",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
@@ -1869,6 +1866,398 @@ def _formation_model_validation(validation: dict) -> dict:
     }
 
 
+def _local_surface_marker(surface: dict) -> tuple:
+    return tuple(
+        round(float(surface.get(key, 0.0)), 12)
+        for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+    )
+
+
+def _local_complete_surface(follow: dict, surface: dict | None = None) -> dict:
+    values = dict(surface or {})
+    return {
+        key: float(values.get(key, follow.get(key, getattr(config, key))))
+        for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+    }
+
+
+def _local_breakout_margin_surface(
+    follow: dict, base: dict, tier_economics: dict | None,
+) -> tuple[dict | None, str | None]:
+    """Offer one evidence-backed probe beyond the four-add-safe research ceiling.
+
+    The exchange/account coin cap remains the hard risk boundary. This probe merely lets a profitable,
+    signal-heavy but chronically under-deployed tier prove that reserving four future adds is too conservative.
+    It never creates more than one extra surface and still requires normal strict portfolio validation.
+    """
+    economics = dict(tier_economics or {})
+    margin_equity_pct = max(1e-9, float(
+        follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    ))
+    ceilings = margin_add_capacity_ceilings(follow)
+    tier_rows = []
+    for tier, margin_key, cap_key in zip(
+        ("stable", "mid", "high"), MARGIN_KEYS, COIN_CAP_KEYS,
+    ):
+        row = dict(economics.get(tier) or {})
+        signal_share = float(row.get("signalShare") or 0.0)
+        net_pnl = float(row.get("netPnl") or 0.0)
+        average_deploy = float(row.get("avgDeployPct") or 0.0)
+        if signal_share < 0.30 or net_pnl <= 0.0 or average_deploy >= 0.50:
+            continue
+        tier_rows.append((
+            signal_share * max(1.0, net_pnl), signal_share, net_pnl,
+            tier, margin_key, cap_key,
+        ))
+    if not tier_rows:
+        return None, None
+    _score, _share, _net, tier, margin_key, cap_key = max(tier_rows)
+    hard_coin_margin = float(
+        follow.get(cap_key, getattr(config, cap_key))
+    ) / margin_equity_pct
+    proposal = dict(base)
+    proposal[margin_key] = min(
+        hard_coin_margin,
+        max(float(base[margin_key]) * 1.15, float(ceilings[margin_key]) * 1.10),
+    )
+    if proposal[margin_key] <= float(ceilings[margin_key]) + 1e-12:
+        return None, None
+    return proposal, tier
+
+
+def local_shared_margin_surfaces(
+    follow: dict, base_surface: dict, *, tier_economics: dict | None = None,
+) -> list[dict]:
+    """Baseline plus symmetric per-tier/global probes, hard-capped at nine surfaces."""
+    base = _local_complete_surface(follow, base_surface)
+    sizing = enforce_margin_add_capacity(base, follow)
+    ceilings = margin_add_capacity_ceilings(follow)
+    surfaces = [dict(base)]
+    for key in MARGIN_KEYS:
+        floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+        floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
+        for factor in (0.85, 1.15):
+            proposal = dict(base)
+            proposal[key] = min(
+                ceilings[key], max(floor, float(sizing[key]) * factor),
+            )
+            surfaces.append(proposal)
+    for factor in (0.85, 1.15):
+        proposal = dict(base)
+        for key in MARGIN_KEYS:
+            floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+            floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
+            proposal[key] = min(
+                ceilings[key], max(floor, float(sizing[key]) * factor),
+            )
+        surfaces.append(proposal)
+    breakout, _tier = _local_breakout_margin_surface(
+        follow, base, tier_economics,
+    )
+    if breakout is not None:
+        # The ordinary list has nine entries. Replace the low-information global contraction while retaining
+        # every tier's own up/down proof and the global expansion opportunity.
+        surfaces[-2] = breakout
+    unique = {}
+    for surface in surfaces:
+        unique.setdefault(_local_surface_marker(surface), surface)
+    return list(unique.values())[:9]
+
+
+def _nearest_axis_neighbours(values, current: float) -> tuple[float | None, float | None]:
+    axis = sorted({float(value) for value in values} | {float(current)})
+    index = axis.index(float(current))
+    return (
+        axis[index - 1] if index > 0 else None,
+        axis[index + 1] if index + 1 < len(axis) else None,
+    )
+
+
+def local_leverage_surfaces(follow: dict, seed_surface: dict) -> list[dict]:
+    """At most two adjacent, notional-paired probes for each volatility tier."""
+    seed = _local_complete_surface(follow, seed_surface)
+    configured = {
+        "STABLE_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_STABLE_LEV_CAPS", (35, 32, 30, 28, 25)),
+        "MID_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_MID_LEV_CAPS", (12, 11, 10, 9)),
+        "HIGH_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_HIGH_LEV_CAPS", (4, 5, 6)),
+    }
+    surfaces = []
+    for key in LEV_KEYS:
+        for value in _nearest_axis_neighbours(configured[key], seed[key]):
+            if value is None:
+                continue
+            surfaces.append(_local_complete_surface(
+                follow,
+                _pair_margins_for_leverage(seed, {key: value}, follow),
+            ))
+    return surfaces[:6]
+
+
+def local_add_surfaces(follow: dict, seed_surface: dict) -> list[dict]:
+    """One more conservative and one more aggressive smart-add neighbour."""
+    seed = _local_complete_surface(follow, seed_surface)
+    axes = {
+        "ADD_GAP_K": getattr(config, "AUTO_TUNE_ADD_GAP_KS", (0.04, 0.06, 0.08, 0.10, 0.12)),
+        "POS_ADD_GAP_K": getattr(config, "AUTO_TUNE_POS_ADD_GAP_KS", (0.06, 0.08, 0.10, 0.12)),
+        "ADD_GAP_SHRINK_G": getattr(config, "AUTO_TUNE_ADD_SHRINK_GS", (1.1, 1.2, 1.3, 1.5)),
+        "ADD_MAX_HARD": getattr(config, "AUTO_TUNE_ADD_MAX_HARDS", (4, 6, 8, 10)),
+    }
+    lower = {}
+    upper = {}
+    for key, values in axes.items():
+        lo, hi = _nearest_axis_neighbours(values, seed[key])
+        lower[key] = seed[key] if lo is None else lo
+        upper[key] = seed[key] if hi is None else hi
+    # Wider gaps/fewer adds are conservative; narrower gaps/more adds are aggressive.
+    conservative = {
+        **seed,
+        "ADD_GAP_K": upper["ADD_GAP_K"],
+        "POS_ADD_GAP_K": upper["POS_ADD_GAP_K"],
+        "ADD_GAP_SHRINK_G": upper["ADD_GAP_SHRINK_G"],
+        "ADD_MAX_HARD": lower["ADD_MAX_HARD"],
+    }
+    aggressive = {
+        **seed,
+        "ADD_GAP_K": lower["ADD_GAP_K"],
+        "POS_ADD_GAP_K": lower["POS_ADD_GAP_K"],
+        "ADD_GAP_SHRINK_G": lower["ADD_GAP_SHRINK_G"],
+        "ADD_MAX_HARD": upper["ADD_MAX_HARD"],
+    }
+    return [conservative, aggressive]
+
+
+def tune_local_prefix_surfaces(
+    *,
+    candidate_count: int,
+    center_count: int,
+    follow: dict,
+    evaluate: Callable[[int, dict, str], dict],
+    validate: Callable[[int, dict], dict] | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
+    """Count-first bounded local tuning with ±2 guards and at most three strict finalists.
+
+    ``evaluate`` owns replay/cache I/O and returns a compact dict containing at least ``netPnl`` and
+    ``feasible``.  The orchestration is pure and bounded, so the scanner can resume cached candidates
+    without recreating an old per-count tuner or exact-membership closure.
+    """
+    candidate_count = max(1, int(candidate_count))
+    center_count = max(1, min(candidate_count, int(center_count)))
+    base = _local_complete_surface(follow)
+    primary_counts = sorted({
+        count for count in (center_count - 1, center_count, center_count + 1)
+        if 1 <= count <= candidate_count
+    })
+    guard_counts = sorted({
+        count for count in (center_count - 2, center_count + 2)
+        if 1 <= count <= candidate_count and count not in primary_counts
+    })
+    cache = {}
+    stage_counts = {}
+    stage_durations = {}
+    cache_hit_count = 0
+
+    def run(count: int, surface: dict, stage: str) -> dict:
+        nonlocal cache_hit_count
+        surface = _local_complete_surface(follow, surface)
+        key = (int(count), _local_surface_marker(surface))
+        if key not in cache:
+            resource_guard.require_replay_budget()
+            started = time.monotonic()
+            value = dict(evaluate(int(count), surface, stage) or {})
+            value.update(count=int(count), surface=surface, stage=stage)
+            cache[key] = value
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            stage_durations[stage] = stage_durations.get(stage, 0.0) + (
+                time.monotonic() - started
+            )
+            if progress:
+                progress(stage, len(cache), 1)
+        else:
+            cache_hit_count += 1
+        return cache[key]
+
+    def rank(row: dict) -> tuple:
+        return (
+            int(bool(row.get("feasible"))),
+            float(row.get("netPnl") or 0.0),
+            -int(row.get("liquidations") or 0),
+            float(row.get("capacityFit") or 0.0),
+            float(row.get("openRate") or 0.0),
+            float(row.get("addCaptureRate") or 0.0),
+            -sum(
+                abs(float(row["surface"][key]) - float(base[key]))
+                for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+            ),
+        )
+
+    center_baseline = run(center_count, base, "tier_baseline")
+    shared_surfaces = local_shared_margin_surfaces(
+        follow, base,
+        tier_economics=center_baseline.get("tierEconomics") or {},
+    )
+    _breakout_surface, breakout_tier = _local_breakout_margin_surface(
+        follow, base, center_baseline.get("tierEconomics") or {},
+    )
+    shared_rows = [
+        run(count, surface, "tier_shared_candidates")
+        for count in primary_counts for surface in shared_surfaces
+    ]
+    seeds = []
+    for count in primary_counts:
+        rows = [row for row in shared_rows if row["count"] == count]
+        seeds.append(max(rows, key=rank))
+    seeds.sort(key=rank, reverse=True)
+    best_seed_profit = float(seeds[0].get("netPnl") or 0.0) if seeds else 0.0
+    leverage_seeds = list(seeds[:2])
+    if len(seeds) > 2 and float(seeds[2].get("netPnl") or 0.0) >= (
+        best_seed_profit - max(1.0, abs(best_seed_profit) * 0.02)
+    ):
+        leverage_seeds.append(seeds[2])
+    refined_rows = list(shared_rows)
+    for seed in leverage_seeds[:3]:
+        refined_rows.extend(
+            run(seed["count"], surface, "local_leverage_refine")
+            for surface in local_leverage_surfaces(follow, seed["surface"])
+        )
+    ranked_refined = sorted(refined_rows, key=rank, reverse=True)
+    add_bases = []
+    seen_pairs = set()
+    for row in ranked_refined:
+        pair = (row["count"], _local_surface_marker(row["surface"]))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        add_bases.append(row)
+        if len(add_bases) >= 2:
+            break
+    for seed in add_bases:
+        refined_rows.extend(
+            run(seed["count"], surface, "local_add_refine")
+            for surface in local_add_surfaces(follow, seed["surface"])
+        )
+
+    # Keep at most four distinct parameter surfaces and cross them over the three primary counts.
+    finalist_surfaces = []
+    seen_surfaces = set()
+    for row in sorted(refined_rows, key=rank, reverse=True):
+        marker = _local_surface_marker(row["surface"])
+        if marker in seen_surfaces:
+            continue
+        seen_surfaces.add(marker)
+        finalist_surfaces.append(row["surface"])
+        if len(finalist_surfaces) >= 4:
+            break
+    cross_rows = [
+        run(count, surface, "primary_finalist_cross")
+        for count in primary_counts for surface in finalist_surfaces
+    ]
+    primary_best = max(cross_rows, key=rank)
+
+    guard_rows = []
+    for count in guard_counts:
+        for surface in [base, *finalist_surfaces]:
+            guard_rows.append(run(count, surface, "guard_validation"))
+    promotable = []
+    primary_profit = float(primary_best.get("netPnl") or 0.0)
+    for row in guard_rows:
+        if not row.get("feasible"):
+            continue
+        profit = float(row.get("netPnl") or 0.0)
+        if row["count"] < center_count and profit >= primary_profit * 0.98:
+            promotable.append(row)
+        elif row["count"] > center_count and profit >= primary_profit * 1.02:
+            promotable.append(row)
+    promoted = max(promotable, key=rank) if promotable else None
+    if promoted is not None:
+        promotion_rows = [
+            run(promoted["count"], surface, "guard_promotion_refine")
+            for surface in local_shared_margin_surfaces(follow, promoted["surface"])
+        ]
+        promoted = max([promoted, *promotion_rows], key=rank)
+
+    strict_pool = [*cross_rows, *([promoted] if promoted is not None else [])]
+    strict_candidates = []
+    seen_pairs = set()
+    for row in sorted(strict_pool, key=rank, reverse=True):
+        pair = (row["count"], _local_surface_marker(row["surface"]))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        strict_candidates.append(row)
+        if len(strict_candidates) >= 3:
+            break
+    baseline_pair = (center_count, _local_surface_marker(base))
+    if baseline_pair not in {
+        (row["count"], _local_surface_marker(row["surface"]))
+        for row in strict_candidates
+    }:
+        baseline_row = run(center_count, base, "strict_baseline_control")
+        strict_candidates = [*strict_candidates[:2], baseline_row]
+    strict_rows = []
+    for row in strict_candidates:
+        validation = dict(validate(row["count"], row["surface"]) or {}) if validate else {
+            "eligible": bool(row.get("feasible")),
+        }
+        strict_rows.append({**row, "validation": validation})
+    audit_finalists = [{
+        "count": int(row["count"]),
+        "params": dict(row["surface"]),
+        "netPnl": float(row.get("netPnl") or 0.0),
+        "feasible": bool(row.get("feasible")),
+        "liquidations": int(row.get("liquidations") or 0),
+        "openRate": float(row.get("openRate") or 0.0),
+        "capacityFit": float(row.get("capacityFit") or 0.0),
+        "tierEconomics": dict(row.get("tierEconomics") or {}),
+        "validation": dict(row.get("validation") or {}),
+        "eligible": bool((row.get("validation") or {}).get("eligible")),
+    } for row in strict_rows]
+    eligible = [row for row in strict_rows if (row.get("validation") or {}).get("eligible")]
+    if not eligible:
+        return {
+            "status": "failed", "eligible_to_apply": False,
+            "reason": "no_validated_local_finalist", "proposal": base,
+            "validation": {"eligible": False, "reasons": ["no_validated_local_finalist"]},
+            "search_profile": "local", "algorithm": "count_first_local_surface_v1",
+            "count_center": center_count, "primary_counts": primary_counts,
+            "guard_counts": guard_counts, "guard_promoted": None,
+            "shared_surface_count": len(shared_surfaces),
+            "breakout_tier": breakout_tier,
+            "quick_replay_count": len(cache), "stage_counts": stage_counts,
+            "cache_hit_count": cache_hit_count,
+            "stage_durations": {key: round(value, 3) for key, value in stage_durations.items()},
+            "finalists": audit_finalists,
+        }
+    best_profit = max(float(row.get("netPnl") or 0.0) for row in eligible)
+    near_best = [
+        row for row in eligible
+        if float(row.get("netPnl") or 0.0) >= best_profit - max(1.0, abs(best_profit) * 0.08)
+    ]
+    winner = max(near_best, key=rank)
+    validation = dict(winner.get("validation") or {})
+    return {
+        "status": "ok", "eligible_to_apply": True,
+        "proposal": dict(winner["surface"]), "params": {
+            key: winner["surface"][key] for key in TUNE_KEYS
+        }, "add_params": {
+            key: winner["surface"][key] for key in ADD_TUNE_KEYS
+        },
+        "baseline_proposal": base,
+        "validation": validation,
+        "search_profile": "local", "algorithm": "count_first_local_surface_v1",
+        "count_center": center_count, "selected_count": int(winner["count"]),
+        "primary_counts": primary_counts, "guard_counts": guard_counts,
+        "guard_promoted": int(promoted["count"]) if promoted is not None else None,
+        "shared_surface_count": len(shared_surfaces),
+        "breakout_tier": breakout_tier,
+        "quick_replay_count": len(cache), "stage_counts": stage_counts,
+        "cache_hit_count": cache_hit_count,
+        "stage_durations": {key: round(value, 3) for key, value in stage_durations.items()},
+        "tier_economics": winner.get("tierEconomics") or {},
+        "finalists": audit_finalists,
+    }
+
+
 def _maybe_rollback_applied(db, follow: dict, now_ms: int,
                             expected_generation: str | None = None,
                             expected_strategy_revision: str | None = None) -> dict | None:
@@ -1987,25 +2376,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     coarse_search = search_profile == "coarse"
     efficient_search = search_profile == "efficient"
     tune_started = time.monotonic()
-    time_budget_s = float(
-        getattr(
-            config,
-            (
-                "AUTO_TUNE_COARSE_TIME_BUDGET_SEC" if coarse_search
-                else "AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC" if efficient_search
-                else "AUTO_TUNE_TIME_BUDGET_SEC"
-            ),
-            600 if coarse_search else 1200 if efficient_search else 1800,
-        )
-        if time_budget_s is None else time_budget_s
-    )
-    deadline = (
-        float("inf") if time_budget_s <= 0 else tune_started + time_budget_s
-    )
-
     def check_budget(stage):
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"auto_tune_time_budget:{stage}")
+        # Candidate counts bound the work.  Wall-clock time never invalidates a generation;
+        # only the resource guard may defer it for a smaller resumable batch.
+        resource_guard.require_replay_budget()
 
     stamp = stamp or now_iso()
     params.seed_params(db)

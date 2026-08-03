@@ -631,6 +631,7 @@ class Backtest:
         self.maintenance_margin_known = 0
         self.maintenance_margin_missing = 0
         self.deploy_samples = []
+        self.tier_deploy_samples = {"stable": [], "mid": [], "high": []}
         self.path_equity_samples = []
         self.path_liquidation_times = []
         self.track_price_path = False
@@ -670,10 +671,21 @@ class Backtest:
         # Deployment limits are defined against contemporaneous risk equity.  Dividing by the initial
         # balance made a profitable compounding replay report impossible values such as 468% deployed even
         # though the engine was respecting its configured cap, which in turn falsely blocked every later selection.
-        self.deploy_samples.append((
-            int(t or 0),
-            self.locked_margin() / max(1.0, self.risk_equity()),
-        ))
+        stamp = int(t or 0)
+        risk_equity = max(1.0, self.risk_equity())
+        self.deploy_samples.append((stamp, self.locked_margin() / risk_equity))
+        tier_locked = {"stable": 0.0, "mid": 0.0, "high": 0.0}
+        for position in self.open.values():
+            tier = str(position.get("tier") or self.tier(
+                self.sigma(position.get("coin")), position.get("coin"),
+            ))
+            if tier not in tier_locked:
+                continue
+            tier_locked[tier] += f(position.get("margin")) * (
+                f(position.get("rem_size")) / max(config.FLAT, f(position.get("size")))
+            )
+        for tier, locked in tier_locked.items():
+            self.tier_deploy_samples[tier].append((stamp, locked / risk_equity))
 
     def unrealized(self):
         total = 0.0
@@ -1015,6 +1027,7 @@ class Backtest:
             "addr": addr,
             "coin": coin,
             "side": side,
+            "tier": tier,
             "sign": sign,
             "opened_at": t,
             "master_open_px": px,
@@ -1104,7 +1117,14 @@ class Backtest:
             )
         event = self.add_event_by_order.get(event_key) if event_key is not None else None
         if event is None:
-            event = {"time": int(f(t)), "outcome": outcome}
+            event = {
+                "time": int(f(t)),
+                "outcome": outcome,
+                "coin": ep.get("coin"),
+                "tier": ep.get("tier") or self.tier(
+                    self.sigma(ep.get("coin")), ep.get("coin"),
+                ),
+            }
             self.add_events.append(event)
             if event_key is not None:
                 self.add_event_by_order[event_key] = event
@@ -1677,6 +1697,13 @@ class Backtest:
                 {"time": int(stamp), "pct": float(value)}
                 for stamp, value in self.deploy_samples
             ],
+            "tier_deploy_samples": {
+                tier: [
+                    {"time": int(stamp), "pct": float(value)}
+                    for stamp, value in samples
+                ]
+                for tier, samples in self.tier_deploy_samples.items()
+            },
             "fee_slippage_drag": self.fee_drag,
             "pnl_concentration": {
                 "wallet": concentration(lambda p: p.get("addr")),
@@ -1713,6 +1740,12 @@ class Backtest:
         result.update(add_metrics)
         result.update(profit_metrics)
         result.update(path_metrics)
+        result["tier_economics"] = tier_economics(
+            closed_positions, open_positions,
+            open_events=self.open_events,
+            add_events=self.add_events,
+            tier_deploy_samples=result["tier_deploy_samples"],
+        )
         return result
 
 
@@ -1720,6 +1753,11 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
     out = {
         "addr": p.get("addr"),
         "coin": p["coin"],
+        "tier": p.get("tier") or tier_for_sigma(
+            f(sigma) if sigma is not None else config.VOL_FALLBACK_SIGMA,
+            config.HIGH_SIGMA_MIN,
+            p.get("coin"),
+        ),
         "side": p["side"],
         "status": p.get("status", "open"),
         "opened_at": p.get("opened_at"),
@@ -1765,6 +1803,113 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
     if valuation_complete is not None:
         out["valuation_complete"] = bool(valuation_complete)
     return out
+
+
+def tier_economics(closed_positions, open_positions, *, open_events=(), add_events=(),
+                   tier_deploy_samples=None) -> dict:
+    """Compact economic attribution for each volatility tier from an existing replay.
+
+    This is deliberately derived from the replay's already-materialized endpoints and event streams;
+    it never starts another replay and never persists per-trade detail.
+    """
+    tiers = {
+        tier: {
+            "closedEpisodes": 0, "openEpisodes": 0, "wins": 0,
+            "liquidations": 0, "realizedNetPnl": 0.0, "unrealizedPnl": 0.0,
+            "netPnl": 0.0, "fees": 0.0, "grossProfit": 0.0, "grossLoss": 0.0,
+            "losses": 0,
+            "worstLoss": 0.0,
+            "marginSum": 0.0, "notionalSum": 0.0, "positionSamples": 0,
+            "targetOpens": 0, "opened": 0, "missedOpens": 0,
+            "targetAdds": 0, "followedAdds": 0, "missedAdds": 0,
+            "avgDeployPct": 0.0, "peakDeployPct": 0.0,
+        }
+        for tier in ("stable", "mid", "high")
+    }
+    for is_open, rows in ((False, closed_positions or ()), (True, open_positions or ())):
+        for position in rows:
+            tier = str(position.get("tier") or "")
+            if tier not in tiers:
+                continue
+            item = tiers[tier]
+            item["openEpisodes" if is_open else "closedEpisodes"] += 1
+            endpoint = f(position.get("net_pnl")) + (
+                f(position.get("unrealized_pnl")) if is_open else 0.0
+            )
+            item["realizedNetPnl"] += f(position.get("net_pnl"))
+            item["unrealizedPnl"] += f(position.get("unrealized_pnl")) if is_open else 0.0
+            item["netPnl"] += endpoint
+            item["fees"] += f(position.get("fee_drag"))
+            item["grossProfit"] += max(0.0, endpoint)
+            item["grossLoss"] += max(0.0, -endpoint)
+            item["worstLoss"] = min(item["worstLoss"], endpoint)
+            item["wins"] += int(endpoint > 0.0)
+            item["losses"] += int(endpoint < 0.0)
+            item["liquidations"] += int(position.get("status") == "liquidated")
+            margin = f(position.get("margin"))
+            leverage = f(position.get("leverage"))
+            item["marginSum"] += margin
+            item["notionalSum"] += margin * leverage
+            item["positionSamples"] += 1
+            item["targetAdds"] += int(position.get("target_adds") or 0)
+            item["followedAdds"] += int(position.get("followed_adds") or 0)
+            item["missedAdds"] += int(position.get("missed_adds") or 0)
+    for event in open_events or ():
+        tier = str(event.get("tier") or "")
+        if tier not in tiers:
+            continue
+        tiers[tier]["targetOpens"] += 1
+        if event.get("outcome") == "opened":
+            tiers[tier]["opened"] += 1
+        else:
+            tiers[tier]["missedOpens"] += 1
+    # Add events are retained for future outcome expansion; position aggregates remain the canonical
+    # deduplicated add counts because one OID can be reclassified by later fill slices.
+    for tier, item in tiers.items():
+        samples = list((tier_deploy_samples or {}).get(tier) or ())
+        values = [f(row.get("pct")) for row in samples]
+        n = int(item.pop("positionSamples"))
+        item["averageMargin"] = item.pop("marginSum") / n if n else 0.0
+        item["averageNotional"] = item.pop("notionalSum") / n if n else 0.0
+        item["profitFactor"] = (
+            item["grossProfit"] / item["grossLoss"]
+            if item["grossLoss"] > 0.0 else None
+        )
+        item["payoffRatio"] = (
+            (item["grossProfit"] / item["wins"])
+            / (item["grossLoss"] / item["losses"])
+            if item["wins"] and item["losses"] and item["grossLoss"] > 0.0
+            else None
+        )
+        item["openCaptureRate"] = (
+            item["opened"] / item["targetOpens"] if item["targetOpens"] else 1.0
+        )
+        item["addCaptureRate"] = (
+            item["followedAdds"] / item["targetAdds"] if item["targetAdds"] else 1.0
+        )
+        weighted_total = weighted_time = 0.0
+        ordered_samples = sorted(samples, key=lambda row: int(row.get("time") or 0))
+        deltas = [
+            max(1, int(right.get("time") or 0) - int(left.get("time") or 0))
+            for left, right in zip(ordered_samples, ordered_samples[1:])
+        ]
+        tail_weight = deltas[-1] if deltas else 1
+        for index, row in enumerate(ordered_samples):
+            weight = deltas[index] if index < len(deltas) else tail_weight
+            weighted_total += f(row.get("pct")) * weight
+            weighted_time += weight
+        item["avgDeployPct"] = weighted_total / weighted_time if weighted_time else 0.0
+        item["peakDeployPct"] = max(values, default=0.0)
+    total_signals = sum(item["targetOpens"] for item in tiers.values())
+    total_net = sum(item["netPnl"] for item in tiers.values())
+    total_deploy = sum(item["avgDeployPct"] for item in tiers.values())
+    for item in tiers.values():
+        item["signalShare"] = item["targetOpens"] / total_signals if total_signals else 0.0
+        item["profitContribution"] = item["netPnl"] / total_net if total_net else 0.0
+        item["capitalContribution"] = (
+            item["avgDeployPct"] / total_deploy if total_deploy else 0.0
+        )
+    return tiers
 
 
 def liquidation_loss_metrics(positions, *, fallback_equity):
@@ -1993,6 +2138,13 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         if int(row.get("time") or 0) >= int(start_ms)
     ]
     deploy_values = [f(row.get("pct")) for row in deploy_samples]
+    tier_deploy_samples = {
+        tier: [
+            dict(row) for row in rows
+            if int(row.get("time") or 0) >= int(start_ms)
+        ]
+        for tier, rows in dict(out.get("tier_deploy_samples") or {}).items()
+    }
     out.update({
         "closed_n": len(positions),
         "wins": wins,
@@ -2045,6 +2197,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
             sum(deploy_values) / len(deploy_values) if deploy_values else 0.0
         ),
         "deploy_samples": deploy_samples,
+        "tier_deploy_samples": tier_deploy_samples,
         "positions": positions,
         "open_positions": open_positions,
         "pnl_concentration": {
@@ -2061,4 +2214,10 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     out.update(add_metrics)
     out.update(profit_structure_metrics(positions, total_net=closed_net))
     out.update(path_risk)
+    out["tier_economics"] = tier_economics(
+        positions, open_positions,
+        open_events=window_open_events,
+        add_events=window_add_events,
+        tier_deploy_samples=tier_deploy_samples,
+    )
     return out

@@ -43,6 +43,7 @@ from hyper.copy.sector import (
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.market import generation_market, price_path, rest
 from hyper.execution.mode import selected_book
+from hyper.ops import resource_guard
 from hyper.selection import (
     auto_tune,
     core_retention,
@@ -2220,7 +2221,7 @@ def _portfolio_selection_metrics(windows, selected_n=0):
     )
 
 
-_FORMATION_PREFIX_CACHE_POLICY = "portfolio-prefix-compact-v1"
+_FORMATION_PREFIX_CACHE_POLICY = "count-first-local-surface-v1"
 
 
 def _formation_prefix_membership_hash(addrs) -> str:
@@ -3320,7 +3321,6 @@ def _select_formation_finalist_surface(
         finalist_path_meta = price_path.coverage(
             db, finalist_fills, path_start, int(now_ms),
         )
-    paper_start_equity = _paper_account_equity(db)
     audits = []
     for item in unique:
         follow = {
@@ -3395,45 +3395,6 @@ def _select_formation_finalist_surface(
             )
             open_rate = f(portfolio_metrics.actionable_open_rate)
             capacity_fit = f(portfolio_metrics.capacity_fit)
-            if abs(paper_start_equity - float(config.INITIAL_BALANCE)) <= 1e-9:
-                paper_primary = primary
-                paper_recent = recent
-                paper_return_30d = return_30d
-                paper_return_7d = return_7d
-            else:
-                paper_windows = auto_tune._candidate_windows(
-                    db, qualified, sigmas, follow, now_ms,
-                    window_fills=filtered, market_ctx=market_ctx,
-                    path_rows=finalist_path, path_meta=finalist_path_meta,
-                    initial_balance=paper_start_equity,
-                    compact=True,
-                )
-                paper_primary = (
-                    paper_windows.get(30)
-                    or paper_windows.get(max(paper_windows))
-                    or {}
-                )
-                paper_recent = paper_windows.get(7) or {}
-                paper_equity_30d = f(
-                    paper_primary.get("window_start_equity")
-                    or paper_primary.get("initial_margin_equity")
-                    or paper_start_equity
-                )
-                paper_equity_7d = f(
-                    paper_recent.get("window_start_equity")
-                    or paper_recent.get("initial_margin_equity")
-                )
-                paper_primary_economics = replay_result_profitability(paper_primary)
-                paper_recent_economics = replay_result_profitability(paper_recent)
-                paper_return_30d = (
-                    f(paper_primary_economics.get("qualificationPnl")) / paper_equity_30d
-                    if paper_equity_30d > 0.0 else float("-inf")
-                )
-                paper_return_7d = (
-                    f(paper_recent_economics.get("qualificationPnl")) / paper_equity_7d
-                    if paper_equity_7d > 0.0 else float("-inf")
-                )
-                del paper_windows
             path_complete = bool(
                 finalist_path is None
                 or (
@@ -3449,12 +3410,7 @@ def _select_formation_finalist_surface(
                 and return_30d >= policy.portfolio_min_return_30d
                 and return_7d >= policy.portfolio_min_return_7d
                 and open_rate >= policy.min_actionable_open_rate
-                and f(replay_result_profitability(paper_primary).get("qualificationPnl")) > 0.0
-                and f(replay_result_profitability(paper_recent).get("qualificationPnl")) > 0.0
                 and open_loss_ratio_within_limit(primary_economics)
-                and open_loss_ratio_within_limit(replay_result_profitability(paper_primary))
-                and paper_return_30d >= policy.portfolio_min_return_30d
-                and paper_return_7d >= policy.portfolio_min_return_7d
                 and path_complete
             )
             del windows
@@ -3468,8 +3424,9 @@ def _select_formation_finalist_surface(
             "return7d": return_7d,
             "openRate": open_rate,
             "capacityFit": capacity_fit,
-            "paperReturn30d": paper_return_30d if qualified else float("-inf"),
-            "paperReturn7d": paper_return_7d if qualified else float("-inf"),
+            "paperReturn30d": return_30d if qualified else float("-inf"),
+            "paperReturn7d": return_7d if qualified else float("-inf"),
+            "paperBasis": "standardized_projection",
             "strictPath": bool(finalist_path is not None),
             "liquidations": int(item["liquidations"]),
             "feasible": feasible,
@@ -3583,7 +3540,7 @@ def _formation_prepath_candidate(row) -> bool:
 
 
 def _bounded_formation_candidates(rows, limit) -> list[dict]:
-    """Return Top-N entry wallets plus the independent existing-Core retention lane."""
+    """Return one frozen Top-N pool, with retained Core consuming normal seats."""
     candidates = [
         row for row in rows if _formation_prepath_candidate(row)
     ]
@@ -3594,7 +3551,9 @@ def _bounded_formation_candidates(rows, limit) -> list[dict]:
     retention = [row for row in candidates if row.get("retention_lane")]
     retained_addrs = {row.get("addr") for row in retention}
     entrants = [row for row in candidates if row.get("addr") not in retained_addrs]
-    return retention + entrants[:max(0, int(limit))]
+    limit = max(0, int(limit))
+    retained = retention[:limit]
+    return retained + entrants[:max(0, limit - len(retained))]
 
 
 def _core_prefix_retention() -> dict:
@@ -3686,7 +3645,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
         "scores": scores,
         "policies": policies,
         "search": {
-            "algorithm": "profit_priority_then_unified_tune_v1",
+            "algorithm": "count_first_local_surface_v1",
             "initialCount": len(rows),
             "selectedCount": 0,
             "explicitEmptyCore": True,
@@ -3728,7 +3687,6 @@ def _retune_exact_membership_surface(
         data_complete=True, addrs_override=list(ordered_addrs),
         record_run=False, formation_admission=True,
         market_generation=generation_id, search_profile="efficient",
-        time_budget_s=float(config.AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC),
     )
     if full_run.get("status") != "ok":
         raise RuntimeError(
@@ -3768,6 +3726,35 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         _follow_override=None) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
+    resource_peak = {
+        "processTreeRssBytes": 0,
+        "processTreeSwapBytes": 0,
+        "cgroupMemoryCurrentBytes": 0,
+        "availableMemoryFloorBytes": None,
+    }
+
+    def sample_resource_peak():
+        detail = resource_guard.assess_replay_budget()
+        resource_peak["processTreeRssBytes"] = max(
+            int(resource_peak["processTreeRssBytes"] or 0),
+            int(detail.get("processTreeRssBytes") or 0),
+        )
+        resource_peak["processTreeSwapBytes"] = max(
+            int(resource_peak["processTreeSwapBytes"] or 0),
+            int(detail.get("processTreeSwapBytes") or 0),
+        )
+        resource_peak["cgroupMemoryCurrentBytes"] = max(
+            int(resource_peak["cgroupMemoryCurrentBytes"] or 0),
+            int(detail.get("cgroupMemoryCurrentBytes") or 0),
+        )
+        available = detail.get("availableMemoryBytes")
+        if available is not None:
+            previous = resource_peak.get("availableMemoryFloorBytes")
+            resource_peak["availableMemoryFloorBytes"] = (
+                int(available) if previous is None else min(int(previous), int(available))
+            )
+
+    sample_resource_peak()
     base_follow = params.load_follow(db)
     scanner_values = params.load_category(db, "scanner")
     base_follow.update({
@@ -3790,70 +3777,25 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
         ) or config.CORE_INITIAL_MAX_N),
     ))
-    queue_upper = max(core_upper, int(config.PRE_STRICT_QUEUE_MAX_N))
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
     )
+    # Top32 remains the rough/Challenger evidence pool.  Automatic formation freezes one bounded Top16
+    # before any parameter work; ranks 17-32 are never reabsorbed after seeing a tuned surface.
     pre_strict_candidates = _bounded_formation_candidates(
         all_ranked_candidates,
-        queue_upper,
+        core_upper,
     )
-    # First strict pass owns path/data/market validity and the strict profit rerank, but intentionally does
-    # not pre-reject return magnitude, normal liquidation count, capacity or open-rate misses which unified
-    # tuning may repair. It is the only bridge from the generation-frozen Top32 into the bounded Top16.
-    prepath_rows = []
+    prepath_rows = list(pre_strict_candidates)
     prepath_rejected = []
-    prepath_results = _parallel_effective_follow_replays(
-        db, pre_strict_candidates, now_ms,
-        generation_id=generation_id, follow=base_follow,
-        valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-        strict_path=True, qualification_stage="strict",
-    )
-    for row, effective in zip(pre_strict_candidates, prepath_results):
-        qualification = dict(effective.get("qualification") or {})
-        status = str(qualification.get("status") or "strict_current_surface_unknown")
-        hard_invalid = bool(
-            qualification.get("deferred")
-            or qualification.get("role") == "quarantine"
-            or status in {
-                "copy_single_liquidation_loss_over_8pct",
-                "historical_major_liquidation",
-                "source_account_liquidated_zero",
-                "sector_not_executable",
-                "effective_sector_policy_missing",
-                "add_metrics_version_mismatch",
-            }
-        )
-        addr = row["addr"]
+    for row in prepath_rows:
         db.execute(
-            "UPDATE pre_strict_evidence SET strict_status=?,strict_first_failure=? "
+            "UPDATE pre_strict_evidence SET strict_status=?,strict_first_failure=NULL "
             "WHERE generation=? AND lower(addr)=?",
-            (
-                "deferred" if qualification.get("deferred") else
-                    "current_surface_hard_rejected" if hard_invalid else "current_surface_path_valid",
-                status if not qualification.get("eligible") else None,
-                generation_id, addr,
-            ),
+            ("frozen_top16", generation_id, row["addr"]),
         )
-        # Each path replay may take seconds and the next wallet must not inherit this writer transaction.
-        # Observer keeps publishing fills/heartbeats while cached Strict/Core formation runs beside it.
-        db.commit()
-        if hard_invalid:
-            prepath_rejected.append(addr)
-            continue
-        metrics_ = dict(effective.get("metrics") or {})
-        prepath_rows.append({
-            **row,
-            **metrics_,
-            "follow_score": f(effective.get("score")),
-            "_current_surface_qualification": qualification,
-        })
-    prepath_rows.sort(key=lambda row: follow_score.follow_score_sort_key(
-        row,
-        follow_score_value=f(row.get("follow_score")),
-        addr=row.get("addr") or "",
-    ))
-    ranked_candidates = prepath_rows[:core_upper]
+    db.commit()
+    ranked_candidates = list(prepath_rows)
     rebalance_interval = max(1, int(params.get(
         db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
     ) or 1))
@@ -3863,7 +3805,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # Every complete generation may publish the membership proven by its current strict replay. The expensive
     # parameter grid remains periodic; it must not also freeze wallet membership or overwrite a newly proven
     # set with the previous Core merely because the parameter-retune interval has not elapsed.
-    retune = bool(retune and (force_retune or rebalance_due))
+    # The visible switch/caller mode is authoritative.  A complete generation no longer silently skips
+    # local tuning merely because a historical rebalance interval has not elapsed.
+    retune = bool(retune)
     # Profile construction already performed the cheap profitability, evidence and valuation checks that
     # establish this rough profit-aligned score order. Do not run a path-complete individual replay on the active/default surface:
     # that duplicated the expensive work and could reject a wallet for parameters the following tuner exists
@@ -3896,42 +3840,79 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     winning_count = len(tune_ordered)
     finalist_admission_audit = []
     retention = _core_prefix_retention()
-    if retune:
-        # Count discovery is replay-only on the active surface. The old implementation launched a separate
-        # process pool for every 16/8/12/... count and then launched another exact-membership pool; that is
-        # the OOM path. Use the same bounded binary count search, then pay for exactly one efficient tune on
-        # the winning neighbourhood.
-        def current_surface_evaluate(count):
-            count = int(count)
+    local_eval_cache = {}
+    local_cache_stats = {"hits": 0, "persistentHits": 0, "writes": 0}
+
+    def quick_surface_evaluate(count, surface, stage):
+        count = max(1, min(len(tune_ordered), int(count)))
+        surface = {
+            key: f(surface.get(key, base_follow.get(key)))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+        surface_hash = hashlib.sha256(json.dumps(
+            surface, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
+        cache_params_hash = f"quick:{surface_hash}"
+        addrs = tuple(tune_ordered[:count])
+        cache_key = (count, surface_hash)
+        if cache_key in local_eval_cache:
+            local_cache_stats["hits"] += 1
+            return local_eval_cache[cache_key]
+        cached = _load_formation_prefix_evidence(
+            db, generation_id, cache_params_hash, addrs,
+        )
+        if cached is not None:
+            local_cache_stats["hits"] += 1
+            local_cache_stats["persistentHits"] += 1
+            value, replay_summary = cached
+        else:
             _set_scan_progress(
-                db, stage="portfolio_count_search", candidates_scanned=count,
+                db, stage=stage, candidates_scanned=count,
                 candidates_total=len(tune_ordered),
             )
             filtered = auto_tune._filter_window_fills_by_addr(
-                tune_window_fills, tune_ordered[:count],
+                tune_window_fills, addrs,
             )
             windows = auto_tune._candidate_windows(
-                db, list(tune_ordered[:count]), sigmas,
-                {**base_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
-                window_fills=filtered, market_ctx=market_ctx,
+                db, list(addrs), sigmas,
+                {**base_follow, **surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
+                now_ms, window_fills=filtered, market_ctx=market_ctx,
                 path_rows=None, path_meta=None, compact=True,
             )
             metrics_ = _portfolio_selection_metrics(windows, selected_n=count)
             primary = windows.get(30) or windows.get(max(windows)) or {}
             recent = windows.get(7) or {}
-            initial = f(
+            start_equity = f(
                 primary.get("window_start_equity")
                 or primary.get("initial_margin_equity")
-                or base_follow.get("INITIAL_BALANCE")
                 or config.INITIAL_BALANCE
             )
-            recent_initial = f(
+            recent_start_equity = f(
                 recent.get("window_start_equity")
                 or recent.get("initial_margin_equity")
             )
             primary_economics = replay_result_profitability(primary)
             recent_economics = replay_result_profitability(recent)
-            return core_formation.PrefixEvaluation(
+            return_30d = (
+                f(primary_economics.get("qualificationPnl")) / start_equity
+                if start_equity > 0.0 else float("-inf")
+            )
+            return_7d = (
+                f(recent_economics.get("qualificationPnl")) / recent_start_equity
+                if recent_start_equity > 0.0 else float("-inf")
+            )
+            replay_summary = {
+                "return30d": return_30d,
+                "return7d": return_7d,
+                "openLossRatio30d": primary_economics.get("openLossRatio"),
+                "tierEconomics": primary.get("tier_economics") or {},
+                "addCaptureRate": f(
+                    primary.get("actionable_add_capture_rate")
+                    if primary.get("actionable_add_capture_rate") is not None else 1.0
+                ),
+                "pnlConcentration": primary.get("pnl_concentration") or {},
+            }
+            value = core_formation.PrefixEvaluation(
                 count=count,
                 net_pnl=f(metrics_.net_pnl),
                 stress_net_pnl=f(metrics_.net_pnl),
@@ -3939,83 +3920,228 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 actionable_open_rate=f(metrics_.actionable_open_rate),
                 capacity_fit=f(metrics_.capacity_fit),
                 liquidations=int(metrics_.liquidations),
-                params={},
+                params=surface,
                 payload={
-                    "initialBalance": initial,
-                    "recentStartEquity": recent_initial,
-                    "return30d": (
-                        f(primary_economics.get("qualificationPnl")) / initial
-                        if initial > 0 else float("-inf")
-                    ),
-                    "return7d": (
-                        f(recent_economics.get("qualificationPnl")) / recent_initial
-                        if recent_initial > 0 else float("-inf")
-                    ),
+                    "initialBalance": start_equity,
+                    "recentStartEquity": recent_start_equity,
+                    "return30d": return_30d,
+                    "return7d": return_7d,
+                    "openLossRatio30d": primary_economics.get("openLossRatio"),
                     "requireCongestionFit": True,
+                    "requireReturnFit": True,
+                    "tierEconomics": replay_summary["tierEconomics"],
                 },
             )
+            _store_formation_prefix_evidence(
+                db, generation_id, cache_params_hash, addrs, value, replay_summary,
+            )
+            local_cache_stats["writes"] += 1
+            del windows
+            gc.collect()
+            sample_resource_peak()
+        row = {
+            "count": count,
+            "netPnl": f(value.net_pnl),
+            "feasible": bool(value.feasible),
+            "liquidations": int(value.liquidations),
+            "maxDrawdown": f(value.max_drawdown),
+            "openRate": f(value.actionable_open_rate),
+            "capacityFit": f(value.capacity_fit),
+            "addCaptureRate": f(replay_summary.get("addCaptureRate") or 0.0),
+            "return30d": replay_summary.get("return30d"),
+            "return7d": replay_summary.get("return7d"),
+            "tierEconomics": replay_summary.get("tierEconomics") or {},
+            "prefixEvaluation": value,
+            "paramsHash": surface_hash,
+        }
+        local_eval_cache[cache_key] = row
+        return row
 
-        tune_search_floor = 1 if len(tune_ordered) <= 8 else 8
+    if retune:
+        # Locate the count first on the active surface.  The bounded search probes N -> N/2 -> midpoint and
+        # boundary neighbours, with no historical eight-wallet floor.
+        count_rows = {}
+
+        def current_surface_evaluate(count):
+            row = quick_surface_evaluate(
+                count,
+                {
+                    key: f(base_follow.get(key))
+                    for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+                },
+                "portfolio_count_search",
+            )
+            count_rows[int(count)] = row
+            return row["prefixEvaluation"]
+
         try:
             tune_search = core_formation.search_quality_prefix(
                 len(tune_ordered), current_surface_evaluate,
                 retention_kwargs=retention,
                 tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
-                exhaustive_below=int(
-                    getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0
-                ),
-                required_count=tune_search_floor,
+                exhaustive_below=0,
+                required_count=0,
             )
             winning_count = int(tune_search.selected.count)
         except RuntimeError as exc:
             if str(exc) != "no_feasible_quality_prefix":
                 raise
-            # The one tune may repair active-surface congestion at the smallest bounded bracket.
-            winning_count = max(1, tune_search_floor)
-            tune_reason = "active_surface_congestion_fallback"
+            # Keep the best repairable count as the local-search center; it cannot publish until a strict
+            # finalist passes below.
+            repairable = list(count_rows.values())
+            if not repairable:
+                repairable.append(quick_surface_evaluate(
+                    1,
+                    {
+                        key: f(base_follow.get(key))
+                        for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+                    },
+                    "portfolio_count_search",
+                ))
+            repair_center = max(repairable, key=lambda row: (
+                f(row.get("openRate")) + f(row.get("capacityFit")),
+                f(row.get("netPnl")), -int(row.get("count") or 0),
+            ))
+            winning_count = int(repair_center["count"])
+            tune_reason = "active_surface_repair_center"
 
-        _set_scan_progress(
-            db, stage="portfolio_tune_once", candidates_scanned=winning_count,
-            candidates_total=len(tune_ordered),
+        validation_fills = list(tune_window_fills.get(max(tune_window_fills)) or [])
+        validation_path_start = now_ms - (
+            max(tune_window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+        ) * 86_400_000
+        validation_path = prepare_price_path(price_path.load_refined(
+            db, validation_fills, validation_path_start, now_ms,
+        ))
+        validation_path_meta = price_path.coverage(
+            db, validation_fills, validation_path_start, now_ms,
         )
-        try:
-            full_run = auto_tune.maybe_tune_margins(
-                db, source="core_formation_full", stamp=f"{stamp}:full:k{winning_count}",
-                dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
-                addrs_override=list(tune_ordered[:winning_count]), record_run=False,
-                formation_admission=True, market_generation=generation_id,
-                search_profile="efficient",
-                time_budget_s=float(config.AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC),
-                window_fills_override=auto_tune._filter_window_fills_by_addr(
-                    tune_window_fills, tune_ordered[:winning_count],
-                ),
+        policy = load_copy_policy(base_follow)
+
+        def strict_local_validate(count, surface):
+            _set_scan_progress(
+                db, stage="local_finalist_validation",
+                candidates_scanned=int(count), candidates_total=len(tune_ordered),
             )
-            if full_run.get("status") != "ok":
-                raise RuntimeError(
-                    "core_full_tune_failed:"
-                    + str(full_run.get("reason") or full_run.get("status"))
-                )
-            db.commit()
-            finalist_surface, finalist_admission_audit = (
-                _select_formation_finalist_surface(
-                    db, full_run, tune_ranked,
-                    base_follow=base_follow, generation_id=generation_id,
-                    now_ms=now_ms, valuation_marks=valuation_marks,
-                    sigmas=sigmas, market_ctx=market_ctx,
-                    window_fills=tune_window_fills,
-                )
+            addrs = tuple(tune_ordered[:int(count)])
+            strict_surface_hash = hashlib.sha256(json.dumps(
+                surface, sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8")).hexdigest()
+            strict_cache_hash = f"strict-finalist:{strict_surface_hash}"
+            cached = _load_formation_prefix_evidence(
+                db, generation_id, strict_cache_hash, addrs,
             )
-            chosen_run = {**full_run, "proposal": finalist_surface}
-            tuned_params, tune_eligible, tune_reason = _formation_param_surface(
-                base_follow, chosen_run, retune=True,
+            if cached is not None:
+                _cached_value, replay_summary = cached
+                if replay_summary.get("validationMode") == "strict-finalist":
+                    local_cache_stats["hits"] += 1
+                    local_cache_stats["persistentHits"] += 1
+                    return dict(replay_summary.get("validation") or {})
+            filtered = auto_tune._filter_window_fills_by_addr(
+                tune_window_fills, addrs,
             )
-        except TimeoutError as exc:
-            db.rollback()
-            tuned_params, tune_eligible, _unused = _formation_param_surface(
-                base_follow, None, retune=False,
+            windows = auto_tune._candidate_windows(
+                db, list(addrs), sigmas,
+                {**base_follow, **surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
+                now_ms, window_fills=filtered, market_ctx=market_ctx,
+                path_rows=validation_path, path_meta=validation_path_meta,
+                initial_balance=float(config.INITIAL_BALANCE), compact=True,
             )
-            tune_eligible = False
-            tune_reason = f"single_tune_timeout:{exc}"
+            primary = windows.get(30) or windows.get(max(windows)) or {}
+            recent = windows.get(7) or {}
+            metrics_ = _portfolio_selection_metrics(windows, selected_n=len(addrs))
+            primary_economics = replay_result_profitability(primary)
+            recent_economics = replay_result_profitability(recent)
+            start_30 = f(
+                primary.get("window_start_equity")
+                or primary.get("initial_margin_equity")
+                or config.INITIAL_BALANCE
+            )
+            start_7 = f(
+                recent.get("window_start_equity")
+                or recent.get("initial_margin_equity")
+            )
+            return_30 = (
+                f(primary_economics.get("qualificationPnl")) / start_30
+                if start_30 > 0.0 else float("-inf")
+            )
+            return_7 = (
+                f(recent_economics.get("qualificationPnl")) / start_7
+                if start_7 > 0.0 else float("-inf")
+            )
+            reasons = []
+            if f(primary_economics.get("qualificationPnl")) <= 0.0:
+                reasons.append("net_not_positive")
+            if f(recent_economics.get("qualificationPnl")) <= 0.0:
+                reasons.append("recent_net_not_positive")
+            if return_30 < policy.portfolio_min_return_30d:
+                reasons.append("dynamic_return_30d")
+            if return_7 < policy.portfolio_min_return_7d:
+                reasons.append("dynamic_return_7d")
+            if not open_loss_ratio_within_limit(primary_economics):
+                reasons.append("open_loss_over_50pct")
+            if f(metrics_.actionable_open_rate) < policy.min_actionable_open_rate:
+                reasons.append("open_follow_rate")
+            if f(metrics_.capacity_fit) < policy.min_capacity_fit:
+                reasons.append("capacity_fit")
+            if f(primary.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
+                reasons.append("path_coverage")
+            if f(primary.get("maintenance_margin_coverage")) < float(
+                config.CORE_MAINTENANCE_META_MIN_COVERAGE
+            ):
+                reasons.append("maintenance_coverage")
+            result = {
+                "eligible": not reasons, "reasons": reasons,
+                "netPnl30d": f(primary_economics.get("qualificationPnl")),
+                "netPnl7d": f(recent_economics.get("qualificationPnl")),
+                "dynamicReturn30d": return_30, "dynamicReturn7d": return_7,
+                "liquidations": int(metrics_.liquidations),
+                "openRate": f(metrics_.actionable_open_rate),
+                "capacityFit": f(metrics_.capacity_fit),
+                "tierEconomics": primary.get("tier_economics") or {},
+                "pricePathCoverage": f(primary.get("price_path_coverage")),
+                "maintenanceMarginCoverage": f(primary.get("maintenance_margin_coverage")),
+            }
+            evidence = core_formation.PrefixEvaluation(
+                count=len(addrs),
+                net_pnl=f(primary_economics.get("qualificationPnl")),
+                stress_net_pnl=f(primary_economics.get("qualificationPnl")),
+                max_drawdown=f(metrics_.max_drawdown),
+                actionable_open_rate=f(metrics_.actionable_open_rate),
+                capacity_fit=f(metrics_.capacity_fit),
+                liquidations=int(metrics_.liquidations),
+                params=dict(surface),
+                payload={
+                    "return30d": return_30, "return7d": return_7,
+                    "validationMode": "strict-finalist",
+                },
+            )
+            _store_formation_prefix_evidence(
+                db, generation_id, strict_cache_hash, addrs, evidence,
+                {"validationMode": "strict-finalist", "validation": result},
+            )
+            del windows
+            gc.collect()
+            sample_resource_peak()
+            return result
+
+        def local_progress(stage, completed, _increment):
+            _set_scan_progress(
+                db, stage=stage, candidates_scanned=int(completed),
+                candidates_total=1,
+            )
+
+        chosen_run = auto_tune.tune_local_prefix_surfaces(
+            candidate_count=len(tune_ordered), center_count=winning_count,
+            follow=base_follow, evaluate=quick_surface_evaluate,
+            validate=strict_local_validate, progress=local_progress,
+        )
+        db.commit()
+        sample_resource_peak()
+        winning_count = int(chosen_run.get("selected_count") or winning_count)
+        finalist_admission_audit = list(chosen_run.get("finalists") or ())
+        tuned_params, tune_eligible, tune_reason = _formation_param_surface(
+            base_follow, chosen_run, retune=True,
+        )
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
@@ -4027,9 +4153,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # delete the rest of the bounded Top16 before strict replay.  Every Top16 wallet receives the winning
     # surface, individual failures are removed, and only then may the shared-account prefix search choose
     # its final count.  Otherwise fitting k=9 silently made ranks 10–16 ineligible without evaluating them.
-    # The current-surface Top16 is only the bounded tune seed. Once a parameter surface exists, every
-    # path-valid Top32 wallet must receive final individual strict replay on that same surface. Otherwise
-    # ranks 17-32 can never prove that parameter changes made them stronger than the original seed.
+    # The frozen Top16 receives the one authoritative individual strict replay on the winning surface.
+    # Rough ranks 17-32 remain Challenger evidence and cannot re-enter after observing tuned parameters.
     tuned_candidate_rows = list(prepath_rows)
 
     def replay_effective_surface(follow_surface):
@@ -4046,14 +4171,51 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             {**follow_surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
-        replay_results = _parallel_effective_follow_replays(
-            db, tuned_candidate_rows, now_ms,
-            generation_id=generation_id, follow=follow_surface,
-            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-        )
-        for row, effective in zip(tuned_candidate_rows, replay_results):
-            qualification = dict(effective.get("qualification") or {})
+        individual_cache_hash = f"individual:{surface_key}"
+        for index, row in enumerate(tuned_candidate_rows, start=1):
             addr = row["addr"]
+            _set_scan_progress(
+                db, stage="top16_individual_strict",
+                candidates_scanned=index - 1, candidates_total=len(tuned_candidate_rows),
+            )
+            cached = _load_formation_prefix_evidence(
+                db, generation_id, individual_cache_hash, (addr,),
+            )
+            effective = None
+            if cached is not None:
+                _cached_value, replay_summary = cached
+                if replay_summary.get("validationMode") == "individual":
+                    effective = dict(replay_summary.get("effective") or {})
+                    local_cache_stats["hits"] += 1
+                    local_cache_stats["persistentHits"] += 1
+            if not effective:
+                effective = _effective_follow_replay(
+                    db, row, now_ms,
+                    generation_id=generation_id, follow=follow_surface,
+                    valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                    strict_path=True, qualification_stage="strict",
+                )
+                effective_metrics = dict(effective.get("metrics") or {})
+                effective_qualification = dict(effective.get("qualification") or {})
+                evidence = core_formation.PrefixEvaluation(
+                    count=1,
+                    net_pnl=f(effective_metrics.get("copy_bt_net_pnl")),
+                    stress_net_pnl=f(effective_metrics.get("copy_bt_net_pnl")),
+                    max_drawdown=f(effective_metrics.get("copy_bt_max_drawdown")),
+                    actionable_open_rate=f(effective_metrics.get("actionable_open_rate")),
+                    capacity_fit=f(effective_metrics.get("capacity_fit")),
+                    liquidations=int(f(effective_metrics.get("copy_bt_liquidations"))),
+                    params=dict(follow_surface),
+                    payload={
+                        "validationMode": "individual",
+                        "status": effective_qualification.get("status"),
+                    },
+                )
+                _store_formation_prefix_evidence(
+                    db, generation_id, individual_cache_hash, (addr,), evidence,
+                    {"validationMode": "individual", "effective": effective},
+                )
+            qualification = dict(effective.get("qualification") or {})
             formation = _formation_entry_eligibility(
                 effective.get("metrics") or {}, effective.get("score"),
                 policy_values=follow_surface,
@@ -4180,6 +4342,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
      effective_surface_hash) = replay_effective_surface(
         qualification_follow
     )
+    sample_resource_peak()
     tune_coverage_fallback = False
     effective_ranked.sort(key=lambda row: follow_score.follow_score_sort_key(
         effective_metrics.get(row["addr"]) or {},
@@ -4198,12 +4361,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "walletMetrics": effective_metrics,
             "replayParamsHash": effective_surface_hash,
             "search": {
-                "algorithm": "profit_priority_then_unified_tune_v1", "initialCount": 0,
+                "algorithm": "count_first_local_surface_v1", "initialCount": 0,
                 "selectedCount": 0,
                 "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
                 "tunedInputCount": winning_count,
-                "fullTuneRuns": 1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0,
+                "fullTuneRuns": 1 if chosen_run.get("search_profile") == "local" else 0,
                 "effectiveRejected": qualification_rejected,
                 "formationTuneEligible": tune_eligible,
                 "formationTuneReason": tune_reason,
@@ -4247,13 +4410,16 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "return7d": 0.0,
             }
             return value
+        final_cache_hash = f"final-shared:{effective_surface_hash}"
         cached = _load_formation_prefix_evidence(
-            db, generation_id, effective_surface_hash, key,
+            db, generation_id, final_cache_hash, key,
         )
         if cached is not None:
             value, replay_summary = cached
             membership_eval_cache[key] = value
             membership_replay_cache[key] = replay_summary
+            local_cache_stats["hits"] += 1
+            local_cache_stats["persistentHits"] += 1
             _set_scan_progress(
                 db, stage="portfolio_prefix_cache_hit",
                 candidates_scanned=len(key), candidates_total=len(ordered),
@@ -4326,7 +4492,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         # these contribution/outlier summaries; all ranking metrics already live in ``value``.
         membership_replay_cache[key] = replay_summary
         _store_formation_prefix_evidence(
-            db, generation_id, effective_surface_hash, key, value, replay_summary,
+            db, generation_id, final_cache_hash, key, value,
+            {"validationMode": "final-shared", **replay_summary},
         )
         return value
 
@@ -4456,6 +4623,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "utility": value.utility,
         "feasible": bool(value.feasible),
     } for value in (tune_search.evaluated if tune_search is not None else ()))
+    sample_resource_peak()
     result = {
         "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
@@ -4465,7 +4633,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "policies": effective_policies, "walletMetrics": effective_metrics,
         "replayParamsHash": effective_surface_hash,
         "search": {
-            "algorithm": "adaptive_count_continuous_equity_v8", "initialCount": len(ordered),
+            "algorithm": "count_first_local_surface_v1", "initialCount": len(ordered),
             "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
@@ -4491,7 +4659,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": winning_count,
             "coarseTuneRuns": len(tune_runs),
-            "fullTuneRuns": 1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0,
+            "fullTuneRuns": 1 if chosen_run.get("search_profile") == "local" else 0,
             "tuneBoundary": tune_search.boundary if tune_search is not None else None,
             "tuneEvaluatedCounts": (
                 [value.count for value in tune_search.evaluated]
@@ -4505,6 +4673,29 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
             "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
             "formationFinalistAdmission": finalist_admission_audit,
+            "candidatePoolCount": len(tune_ordered),
+            "countCenter": chosen_run.get("count_center"),
+            "primaryCounts": list(chosen_run.get("primary_counts") or ()),
+            "guardCounts": list(chosen_run.get("guard_counts") or ()),
+            "guardPromoted": chosen_run.get("guard_promoted"),
+            "sharedSurfaceCount": int(chosen_run.get("shared_surface_count") or 0),
+            "tierBreakoutProbe": chosen_run.get("breakout_tier"),
+            "quickReplayCount": int(chosen_run.get("quick_replay_count") or 0),
+            "expensiveFinalistCount": len(chosen_run.get("finalists") or ()),
+            "cacheHitCount": int(chosen_run.get("cache_hit_count") or 0)
+                + int(local_cache_stats.get("hits") or 0),
+            "tierEconomics": dict(chosen_run.get("tier_economics") or {}),
+            "finalCountDrift": len(chosen_addrs) - int(
+                chosen_run.get("selected_count") or len(chosen_addrs)
+            ),
+            "stageDurations": dict(chosen_run.get("stage_durations") or {}),
+            "resourcePeak": dict(resource_peak),
+            "fallbackReason": (
+                chosen_run.get("reason")
+                if chosen_run.get("status") not in {None, "ok"} else None
+            ),
+            "resumeCount": int(bool(local_cache_stats.get("persistentHits"))),
+            "deferredReasons": [],
             "qualificationRejected": qualification_rejected,
             "admission": admission_audit,
             "finalSurfaceUniverseCount": len(tuned_candidate_rows),
@@ -5205,42 +5396,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             f(final_recent_economics.get("qualificationPnl")) / recent_start_equity
             if recent_start_equity > 0.0 else float("-inf")
         )
-        paper_start_equity = _paper_account_equity(db)
-        if abs(paper_start_equity - float(config.INITIAL_BALANCE)) <= 1e-9:
-            paper_windows = final_windows
-        else:
-            paper_windows = auto_tune._candidate_windows(
-                db, list(final_addrs), sigmas,
-                {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, int(now_ms),
-                window_fills=final_fills_by_window, market_ctx=market_ctx,
-                path_rows=final_path, path_meta=final_path_meta,
-                initial_balance=paper_start_equity,
-                compact=True,
-            )
-        paper_result = paper_windows.get(30) or paper_windows.get(max(paper_windows)) or {}
-        paper_recent = paper_windows.get(7) or {}
-        paper_metrics = _portfolio_selection_metrics(
-            paper_windows, selected_n=len(final_addrs),
-        )
-        paper_start_30d = f(
-            paper_result.get("window_start_equity")
-            or paper_result.get("initial_margin_equity")
-            or paper_start_equity
-        )
-        paper_start_7d = f(
-            paper_recent.get("window_start_equity")
-            or paper_recent.get("initial_margin_equity")
-        )
-        paper_economics = replay_result_profitability(paper_result)
-        paper_recent_economics = replay_result_profitability(paper_recent)
-        paper_return_30d = (
-            f(paper_economics.get("qualificationPnl")) / paper_start_30d
-            if paper_start_30d > 0.0 else float("-inf")
-        )
-        paper_return_7d = (
-            f(paper_recent_economics.get("qualificationPnl")) / paper_start_7d
-            if paper_start_7d > 0.0 else float("-inf")
-        )
         failures = []
         if f(final_economics.get("qualificationPnl")) <= 0.0:
             failures.append("net_not_positive")
@@ -5254,18 +5409,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             failures.append("open_loss_over_50pct")
         if f(final_metrics.actionable_open_rate) < load_copy_policy().min_actionable_open_rate:
             failures.append("open_follow_rate")
-        if f(paper_economics.get("qualificationPnl")) <= 0.0:
-            failures.append("paper_net_not_positive")
-        if paper_return_30d < float(config.CORE_PORTFOLIO_MIN_RETURN_30D):
-            failures.append("paper_dynamic_return_30d")
-        if paper_return_7d < float(config.CORE_PORTFOLIO_MIN_RETURN_7D):
-            failures.append("paper_dynamic_return_7d")
-        if f(paper_recent_economics.get("qualificationPnl")) <= 0.0:
-            failures.append("paper_recent_net_not_positive")
-        if not open_loss_ratio_within_limit(paper_economics):
-            failures.append("paper_open_loss_over_50pct")
-        if f(paper_metrics.actionable_open_rate) < load_copy_policy().min_actionable_open_rate:
-            failures.append("paper_open_follow_rate")
         if f(final_result.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
             failures.append("path_coverage")
         if f(final_result.get("maintenance_margin_coverage")) < float(
@@ -5316,28 +5459,31 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 "dynamicReturn7d": return_7d,
             },
             "paperAccount": {
-                "initialEquity": paper_start_equity,
-                "netPnl30d": f(paper_economics.get("qualificationPnl")),
-                "markedNetPnl30d": f(paper_result.get("copy_net_pnl")),
-                "closedNetPnl30d": f(paper_economics.get("closedPnl")),
-                "openProfitReference30d": f(paper_economics.get("openProfitReference")),
-                "openLoss30d": f(paper_economics.get("openLoss")),
-                "openLossRatio30d": paper_economics.get("openLossRatio"),
-                "startEquity30d": paper_start_30d,
-                "endEquity30d": f(paper_result.get("window_end_equity")),
-                "dynamicReturn30d": paper_return_30d,
-                "netPnl7d": f(paper_recent_economics.get("qualificationPnl")),
-                "markedNetPnl7d": f(paper_recent.get("copy_net_pnl")),
-                "closedNetPnl7d": f(paper_recent_economics.get("closedPnl")),
-                "openLoss7d": f(paper_recent_economics.get("openLoss")),
-                "startEquity7d": paper_start_7d,
-                "endEquity7d": f(paper_recent.get("window_end_equity")),
-                "dynamicReturn7d": paper_return_7d,
+                # Compatibility projection only.  Formation is always certified on the standardized
+                # account; Paper and Live scale the immutable strategy at runtime from their own equity.
+                "basis": "standardized_projection",
+                "initialEquity": float(config.INITIAL_BALANCE),
+                "netPnl30d": f(final_economics.get("qualificationPnl")),
+                "markedNetPnl30d": f(final_result.get("copy_net_pnl")),
+                "closedNetPnl30d": f(final_economics.get("closedPnl")),
+                "openProfitReference30d": f(final_economics.get("openProfitReference")),
+                "openLoss30d": f(final_economics.get("openLoss")),
+                "openLossRatio30d": final_economics.get("openLossRatio"),
+                "startEquity30d": initial_equity,
+                "endEquity30d": f(final_result.get("window_end_equity")),
+                "dynamicReturn30d": return_30d,
+                "netPnl7d": f(final_recent_economics.get("qualificationPnl")),
+                "markedNetPnl7d": f(final_recent.get("copy_net_pnl")),
+                "closedNetPnl7d": f(final_recent_economics.get("closedPnl")),
+                "openLoss7d": f(final_recent_economics.get("openLoss")),
+                "startEquity7d": recent_start_equity,
+                "endEquity7d": f(final_recent.get("window_end_equity")),
+                "dynamicReturn7d": return_7d,
             },
             "maxDrawdown30d": f(final_metrics.max_drawdown),
             "liquidations30d": int(final_metrics.liquidations),
             "actionableOpenRate30d": f(final_metrics.actionable_open_rate),
-            "paperActionableOpenRate30d": f(paper_metrics.actionable_open_rate),
+            "paperActionableOpenRate30d": f(final_metrics.actionable_open_rate),
             "capacityFit30d": f(final_metrics.capacity_fit),
             "pricePathCoverage30d": f(final_result.get("price_path_coverage")),
             "maintenanceMarginCoverage30d": f(
@@ -5345,8 +5491,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             ),
             "failures": failures,
         }
-        if paper_windows is not final_windows:
-            del paper_windows
         del final_windows
         # Economic degradation is surfaced for operator review; only missing
         # path/maintenance proof is a publication blocker.
@@ -6647,7 +6791,9 @@ def _adopt_resumable_deferred_profiles(db, generation_id: str, scan_stamp) -> in
     return max(0, int(result.rowcount or 0))
 
 
-def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=True) -> dict:
+def finalize_profiled_generation(
+    db, generation_id=None, stamp=None, *, retune=True, offline=False,
+) -> dict:
     """Finish selection from an already-profiled generation without fetching wallet history.
 
     ``retune=False`` is an operational escape hatch for a generation whose bounded parameter search is too
@@ -6665,8 +6811,11 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     if not generation_id:
         raise RuntimeError("no_profiled_generation_to_finalize")
     meta = db.execute(
-        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows,metrics_json,started_at "
-        "FROM scan_generation WHERE generation=?",
+        "SELECT sg.status,sg.leaderboard_valid,sg.workset_n,sg.leaderboard_rows,"
+        "sg.metrics_json,sg.started_at,"
+        "COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
+        "FROM scan_generation sg LEFT JOIN generation_market_manifest gmm "
+        "ON gmm.generation=sg.generation WHERE sg.generation=?",
         (generation_id,),
     ).fetchone()
     if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
@@ -6701,7 +6850,12 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     ).fetchone()[0] or 0)
     pre_strict_counts = _pre_strict_counts(db, generation_id)
 
-    now_ms = int(time.time() * 1000)
+    # Resuming a cached generation must replay the same immutable evidence horizon that the original scan
+    # sealed. Using the recovery day's clock would silently add an empty tail and could trigger fresh market
+    # fetches, changing both count selection and parameter economics.
+    now_ms = int(meta[6] or 0)
+    if now_ms <= 0:
+        raise RuntimeError("profile_generation_asof_missing")
     previous_core = selection.published_core_membership(db) or []
     previous_strategy_bundle = strategy_revision.load_active(db)
     _set_scan_progress(
@@ -6716,7 +6870,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         limit=int(config.PRE_STRICT_QUEUE_MAX_N),
     )
     db.rollback()
-    if preview:
+    if preview and not offline:
         _set_scan_progress(db, stage="prefetch_selection_paths")
         _prefetch_selection_paths(db, preview, now_ms, generation_id)
     formation = form_quality_prefix(

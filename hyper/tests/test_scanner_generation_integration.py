@@ -181,18 +181,14 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_core_formation_searches_count_on_active_surface_then_tunes_once(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
-        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
-        self.assertNotIn('search_profile="coarse"', source)
-        self.assertIn('search_profile="efficient"', source)
-        self.assertIn("addrs_override=list(tune_ordered[:winning_count])", source)
+        self.assertEqual(source.count("auto_tune.tune_local_prefix_surfaces("), 1)
+        self.assertNotIn("auto_tune.maybe_tune_margins(", source)
         self.assertIn("search_quality_prefix(", source)
         self.assertIn("current_surface_evaluate", source)
-        self.assertIn("except TimeoutError as exc", source)
-        self.assertIn("single_tune_timeout", source)
-        self.assertIn(
-            "_select_formation_finalist_surface(\n                    db, full_run, tune_ranked,",
-            source,
-        )
+        self.assertNotIn("except TimeoutError", source)
+        self.assertIn("strict_local_validate", source)
+        self.assertIn("required_count=0", source)
+        self.assertIn("exhaustive_below=0", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
         self.assertNotIn("tuned_candidate_rows = list(ranked_candidates)", source)
         self.assertNotIn("tuned_candidate_addrs", source)
@@ -207,6 +203,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         )
         self.assertIn("_load_formation_prefix_evidence(", source)
         self.assertIn("_store_formation_prefix_evidence(", source)
+        for validation_mode in (
+            "quick:", "strict-finalist:", "individual:", "final-shared:",
+        ):
+            self.assertIn(validation_mode, source)
 
     def test_compact_prefix_evidence_round_trips_without_member_addresses(self):
         with tempfile.TemporaryDirectory() as td:
@@ -235,6 +235,33 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("0xaaa", raw[0] + raw[1])
         self.assertNotIn("0xbbb", raw[0] + raw[1])
 
+    def test_prefix_cache_separates_fast_and_strict_validation_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            value = scanner.core_formation.PrefixEvaluation(
+                count=1, net_pnl=1.0, stress_net_pnl=1.0,
+                max_drawdown=0.0, actionable_open_rate=1.0, capacity_fit=1.0,
+                liquidations=0, params={}, payload={},
+            )
+            scanner._store_formation_prefix_evidence(
+                db, "g1", "quick:same", ["0xaaa"], value,
+                {"validationMode": "quick"},
+            )
+            scanner._store_formation_prefix_evidence(
+                db, "g1", "final-shared:same", ["0xaaa"], value,
+                {"validationMode": "final-shared"},
+            )
+
+            quick = scanner._load_formation_prefix_evidence(
+                db, "g1", "quick:same", ["0xaaa"],
+            )
+            strict = scanner._load_formation_prefix_evidence(
+                db, "g1", "final-shared:same", ["0xaaa"],
+            )
+
+        self.assertEqual(quick[1]["validationMode"], "quick")
+        self.assertEqual(strict[1]["validationMode"], "final-shared")
+
     def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)
         optimize_source = inspect.getsource(scanner.optimize_published_generation)
@@ -256,7 +283,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         )
         self.assertIn("path_rows=None, path_meta=None", formation_source)
         self.assertNotIn("shared_path = price_path.load_refined", formation_source)
-        self.assertEqual(publication_source.count("auto_tune._candidate_windows("), 3)
+        self.assertEqual(publication_source.count("auto_tune._candidate_windows("), 2)
+        self.assertNotIn("paper_start_equity", publication_source)
         self.assertIn("dynamicReturn30d", publication_source)
         self.assertIn("dynamicReturn7d", publication_source)
         self.assertIn("final_strict_copy_failed:", publication_source)
@@ -309,7 +337,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertNotIn("weekly_rebalance_not_due", source)
         self.assertNotIn("chosen_addrs = tuple(stable)", source)
-        self.assertIn("retune = bool(retune and (force_retune or rebalance_due))", source)
+        self.assertIn("retune = bool(retune)", source)
         self.assertIn("retune=bool(retune), force_retune=bool(retune)", finalize_source)
 
     def test_core_order_change_is_detected_even_when_fixed_surface_can_publish_it(self):
@@ -652,15 +680,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             model_versions, {scanner.pre_strict.SELECTION_MODEL_VERSION},
         )
 
-    def test_formation_runs_one_path_bridge_and_one_final_surface_replay(self):
+    def test_formation_runs_one_checkpointed_individual_strict_surface(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertNotIn("_rank_formation_candidates_for_surface", source)
-        self.assertEqual(source.count("_parallel_effective_follow_replays("), 2)
+        self.assertNotIn("_parallel_effective_follow_replays(", source)
+        self.assertEqual(source.count("effective = _effective_follow_replay("), 1)
+        self.assertIn('individual_cache_hash = f"individual:{surface_key}"', source)
         self.assertIn("tune_ranked = ranked_candidates[:core_upper]", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
         self.assertIn('"finalSurfaceUniverseCount": len(tuned_candidate_rows)', source)
-        self.assertEqual(source.count("follow_score.follow_score_sort_key("), 2)
+        self.assertEqual(source.count("follow_score.follow_score_sort_key("), 1)
 
     def test_cached_strict_formation_releases_writer_lock_between_wallets(self):
         source = inspect.getsource(scanner.form_quality_prefix)
@@ -672,11 +702,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             if source.startswith(update_sql, index)
         ]
 
-        self.assertEqual(len(updates), 2)
-        first_tail = source[updates[0]:source.index("if hard_invalid:", updates[0])]
-        second_tail = source[updates[1]:source.index("        return (", updates[1])]
-        self.assertIn("db.commit()", first_tail)
-        self.assertIn("db.commit()", second_tail)
+        self.assertEqual(len(updates), 1)
+        tail = source[updates[0]:source.index("        return (", updates[0])]
+        self.assertIn("db.commit()", tail)
 
     def test_auto_tune_releases_seed_write_before_expensive_grid(self):
         source = inspect.getsource(scanner.auto_tune.maybe_tune_margins)
@@ -708,7 +736,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("CORE_FORMATION_CLOSURE_MAX_ROUNDS", source)
         self.assertNotIn("for round_index in range(1, max_rounds + 1)", source)
         self.assertIn('"membershipConfirmedWithoutRetune"', source)
-        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
+        self.assertEqual(source.count("auto_tune.tune_local_prefix_surfaces("), 1)
+        self.assertNotIn("auto_tune.maybe_tune_margins(", source)
         # The helper remains available only for explicit operator repair/optimization paths.
         self.assertIn('addrs_override=list(ordered_addrs)', helper)
         self.assertIn('search_profile="efficient"', helper)
@@ -1076,6 +1105,28 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             f"0x{index:02x}" for index in range(16)
         ])
         self.assertNotIn("0x10", [row["addr"] for row in selected])
+
+    def test_retained_core_consumes_the_same_frozen_pool_limit(self):
+        rows = [
+            {
+                "addr": f"0x{index:02x}",
+                "pre_strict_queue_rank": index + 1,
+                "retention_lane": index in {17, 18, 19},
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": True,
+                    "role": "core_eligible", "deferred": False,
+                },
+            }
+            for index in range(20)
+        ]
+
+        selected = scanner._bounded_formation_candidates(rows, 16)
+
+        self.assertEqual(len(selected), 16)
+        self.assertEqual([row["addr"] for row in selected[:3]], [
+            "0x11", "0x12", "0x13",
+        ])
+        self.assertNotIn("0x0d", [row["addr"] for row in selected])
 
     def test_source_quality_pool_keeps_every_structural_survivor_without_top40(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1515,15 +1566,18 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.seal_market(db, "cached-g")
 
             with patch.object(scanner.rest, "post", side_effect=AssertionError("wallet fetch forbidden")), \
+                    patch.object(scanner, "_prefetch_selection_paths") as prefetch, \
                     patch.object(scanner, "form_quality_prefix",
                                  wraps=scanner.form_quality_prefix) as formation:
                 result = scanner.finalize_profiled_generation(
-                    db, "cached-g", stamp="finish", retune=False,
+                    db, "cached-g", stamp="finish", retune=False, offline=True,
                 )
 
             self.assertEqual(result["status"], "published")
             self.assertEqual(result["core"], 0)
+            prefetch.assert_not_called()
             self.assertFalse(formation.call_args.kwargs["retune"])
+            self.assertEqual(formation.call_args.args[3], 1)
             self.assertEqual(db.execute(
                 "SELECT status,complete,is_current FROM scan_generation WHERE generation='cached-g'"
             ).fetchone(), ("published", 1, 1))

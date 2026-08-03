@@ -25,8 +25,8 @@ SCAN_IDLE_MIN_REQUEST_INTERVAL = 0.02    # low-weight metadata calls need not in
 REPLAY_PROCESS_MAX_WORKERS = 4           # auto-scales 1→1, 2→2, 4+→4; replay stays bounded on small VPSes
 REPLAY_LOW_MEMORY_SERIAL_BYTES = 2 * 1024 * 1024 * 1024
 SCANNER_MIN_AVAILABLE_MEMORY_BYTES = 192 * 1024 * 1024
-SCANNER_MAX_PROCESS_TREE_RSS_BYTES = 1100 * 1024 * 1024
-SCANNER_MAX_PROCESS_TREE_SWAP_BYTES = 256 * 1024 * 1024
+SCANNER_MAX_PROCESS_TREE_RSS_BYTES = 1024 * 1024 * 1024
+SCANNER_MAX_PROCESS_TREE_SWAP_BYTES = 128 * 1024 * 1024
 SCANNER_REPLAY_DECODE_MULTIPLIER = 6.0
 
 # Copy engine: SIGNAL via REST poll (per-wallet userFills — REST has no 10-user cap, so we can
@@ -379,11 +379,9 @@ AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
 AUTO_TUNE_LEVERAGE_SHORTLIST = 3  # 每档保留当前/最高盈利/最少清算；efficient 模式不做 3^3 笛卡尔积
 AUTO_TUNE_SIZING_FINALISTS = 12  # 避免高杠杆+配对低保证金组合在严格路径认证前被过早剪枝
 AUTO_TUNE_MARGIN_COORD_ROUNDS = 2  # bounded closure can combine two profitable tier moves without 3-D grid
-# Prefix-count discovery uses a sparse grid; the winning count receives one complete tune. Bound both modes
-# so a large fills/path set cannot swap-thrash the production host indefinitely.
-AUTO_TUNE_TIME_BUDGET_SEC = 1800
-AUTO_TUNE_COARSE_TIME_BUDGET_SEC = 600
-AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC = 1200
+# Automatic formation uses bounded candidate counts rather than a wall-clock deadline: one count-first local
+# surface search, at most three strict finalists, then same-surface certification. Explicit research tuning
+# retains its larger grids but is governed by the replay resource guard and resumable process boundary.
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)
 AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.09, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.3)
@@ -397,7 +395,7 @@ AUTO_TUNE_EFFICIENT_ADD_FINALISTS = 2
 AUTO_TUNE_EFFICIENT_MARGIN_COORD_ROUNDS = 1
 
 CORE_PREFIX_EXHAUSTIVE_MAX_N = 0  # never exhaustively replay every prefix; use bounded boundary search
-CORE_FORMATION_CLOSURE_MAX_ROUNDS = 2  # final membership and its parameter surface must converge boundedly
+CORE_FORMATION_CLOSURE_MAX_ROUNDS = 2  # explicit legacy repair only; automatic formation performs zero closures
 # Backward elimination stops naturally when every remaining wallet has positive conditional economics.
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
 CORE_LOO_MAX_REMOVALS = MAX_TARGETS - 1

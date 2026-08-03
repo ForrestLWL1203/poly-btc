@@ -1,5 +1,6 @@
 import tempfile
 import json
+import inspect
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1101,6 +1102,116 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertTrue(result["eligible"])
         self.assertNotIn("stress_liquidation", result["reasons"])
+
+    def test_count_first_local_tuner_bounds_neighbourhood_and_strict_finalists(self):
+        follow = {
+            key: float(getattr(auto_tune.config, key))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+        evaluated = []
+        validated = []
+
+        def evaluate(count, surface, stage):
+            evaluated.append((count, stage, auto_tune._local_surface_marker(surface)))
+            return {
+                "netPnl": float(count * 100), "feasible": True,
+                "liquidations": 0, "capacityFit": .95, "openRate": .95,
+                "addCaptureRate": .9, "tierEconomics": {"mid": {"netPnl": 50.0}},
+            }
+
+        def validate(count, surface):
+            validated.append((count, auto_tune._local_surface_marker(surface)))
+            return {"eligible": True, "reasons": []}
+
+        result = auto_tune.tune_local_prefix_surfaces(
+            candidate_count=16, center_count=10, follow=follow,
+            evaluate=evaluate, validate=validate,
+        )
+
+        self.assertEqual(result["algorithm"], "count_first_local_surface_v1")
+        self.assertEqual(result["primary_counts"], [9, 10, 11])
+        self.assertEqual(result["guard_counts"], [8, 12])
+        self.assertLessEqual(result["shared_surface_count"], 9)
+        self.assertLessEqual(len(validated), 3)
+        self.assertTrue(result["eligible_to_apply"])
+        self.assertFalse(any(count < 8 or count > 12 for count, _stage, _marker in evaluated))
+
+    def test_signal_heavy_profitable_underdeployed_tier_gets_one_breakout_probe(self):
+        follow = {
+            key: float(getattr(auto_tune.config, key))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+        follow.update({
+            key: float(getattr(auto_tune.config, key))
+            for key in (
+                "MARGIN_EQUITY_PCT", "MIN_OPEN_MARGIN_PCT",
+                *auto_tune.COIN_CAP_KEYS,
+                "STABLE_MARGIN_MIN_PCT", "MID_MARGIN_MIN_PCT", "HIGH_MARGIN_MIN_PCT",
+            )
+        })
+        base = auto_tune._local_complete_surface(follow)
+        ceilings = auto_tune.margin_add_capacity_ceilings(follow)
+
+        surfaces = auto_tune.local_shared_margin_surfaces(
+            follow, base,
+            tier_economics={
+                "stable": {"signalShare": .10, "netPnl": 50, "avgDeployPct": .10},
+                "mid": {"signalShare": .80, "netPnl": 500, "avgDeployPct": .20},
+                "high": {"signalShare": .10, "netPnl": -10, "avgDeployPct": .05},
+            },
+        )
+
+        self.assertLessEqual(len(surfaces), 9)
+        self.assertTrue(any(
+            surface["MID_MARGIN_PCT"] > ceilings["MID_MARGIN_PCT"]
+            for surface in surfaces
+        ))
+        self.assertFalse(any(
+            surface["STABLE_MARGIN_PCT"] > ceilings["STABLE_MARGIN_PCT"]
+            or surface["HIGH_MARGIN_PCT"] > ceilings["HIGH_MARGIN_PCT"]
+            for surface in surfaces
+        ))
+
+    def test_count_first_local_tuner_clips_edge_neighbourhoods(self):
+        follow = {
+            key: float(getattr(auto_tune.config, key))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+
+        def evaluate(count, surface, _stage):
+            return {
+                "netPnl": float(count), "feasible": True,
+                "liquidations": 0, "capacityFit": 1.0, "openRate": 1.0,
+            }
+
+        expected = {
+            1: ([1, 2], [3]),
+            2: ([1, 2, 3], [4]),
+            15: ([14, 15, 16], [13]),
+            16: ([15, 16], [14]),
+        }
+        with patch.object(
+            auto_tune, "local_shared_margin_surfaces",
+            side_effect=lambda _follow, base, **_kwargs: [base],
+        ), patch.object(
+            auto_tune, "local_leverage_surfaces", return_value=[],
+        ), patch.object(
+            auto_tune, "local_add_surfaces", return_value=[],
+        ):
+            for center, (primary, guards) in expected.items():
+                result = auto_tune.tune_local_prefix_surfaces(
+                    candidate_count=16, center_count=center, follow=follow,
+                    evaluate=evaluate,
+                    validate=lambda _count, _surface: {"eligible": True},
+                )
+                self.assertEqual(result["primary_counts"], primary)
+                self.assertEqual(result["guard_counts"], guards)
+
+    def test_legacy_tuner_has_no_wall_clock_deadline(self):
+        source = inspect.getsource(auto_tune.maybe_tune_margins)
+        self.assertNotIn("deadline", source)
+        self.assertNotIn("auto_tune_time_budget", source)
+        self.assertIn("resource_guard.require_replay_budget()", source)
 
 
 if __name__ == "__main__":

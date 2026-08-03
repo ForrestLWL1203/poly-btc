@@ -40,10 +40,10 @@ Deep fills structure + source quality
 Fills-only rough Copy
     ↓ 3/4 active weeks; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
 Profit-aligned score (70/30 return with bounded confidence haircut)
-    ↓ frozen Top32 → current-surface strict path → score Top16 formation seed
+    ↓ Top32 evidence pool → freeze score Top16 formation candidates
 Final strict individual/shared Copy
-    ↓ fresh finalizer process → active-surface count search → optional one efficient tune
-    ↓ tuned-surface Top32 certification → final Top16/prefix strict-confirmed without recursive retune
+    ↓ fresh finalizer process → active-surface count center → one n±1 local tier tune + n±2 guards
+    ↓ at most three strict finalists → winning-surface Top16 certification → same-surface final count/path
     ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ mode-bound Observer (new targets start now; active Live sessions recover durably)
@@ -199,22 +199,23 @@ Wallet quality and funded-account membership are separate decisions.
   only haircut profitability and cannot manufacture a high score for a weak-return wallet. Raw profit priority,
   30d, 7d, PF and address are stable tie-breaks. Rough 20%/5% wallets remain labelled `primary`; other qualified
   wallets are `reserve`, but those tiers no longer create a conflicting sort order. Current-surface strict path
-  replay reranks candidates by the same score and its Top16 seeds unified tuning. The winning surface then
-  certifies the complete path-valid Top32 before the final Top16 is formed.
+  Rough Copy freezes Top32 as evidence and Challenger scope; its first 16 score-ranked wallets form the only
+  automatic tuning pool. The winning surface certifies those same frozen Top16 once, so ranks 17–32 cannot
+  enter after observing the tuned parameters.
 - Final individual strict replay requires conservative dynamic 30d/7d returns of 10%/3%, positive closed PnL,
   a 30-day open-loss ratio at or below 50%, at least seven complete 30-day Copy Episodes, Copy PF at least
   1.25, conditional lottery protection, 70% open follow, the frozen cross-week activity proof,
   complete data/path evidence and at most three proxy liquidations. A separate severity gate rejects a wallet
   from the rough candidate pool as soon as any liquidated Copy episode loses at least 8% of the dynamic account
   equity recorded when that episode opened, even if its count is only one. Final shared replay requires
-  conservative 10%/3%, a 30-day open-loss ratio at or below 50%, and 70% open follow on both standardized and
-  actual Paper capital. Campaign, weekly-fold, per-close,
+  conservative 10%/3%, a 30-day open-loss ratio at or below 50%, and 70% open follow on the standardized
+  account. Paper and Live scale the sealed strategy at runtime from their own actual equity. Campaign, weekly-fold, per-close,
   cost-multiple, maximum-drawdown and 75-point gates do not exist.
 - Confirmed source-account zeroing liquidations and those >=8% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
-- With automatic tuning enabled, the active surface first locates a feasible wallet-count prefix using the
-  bounded count search, then exactly one `efficient` parameter search tunes that neighbourhood. The winning
-  surface requalifies every path-valid Top32 wallet and the final shared prefix is strict-confirmed on that same
+- With automatic tuning enabled, the active surface first locates a feasible wallet-count center using the
+  bounded count search, then exactly one `count_first_local_surface_v1` search tunes n±1 with n±2 guards. The
+  winning surface strictly replays only the frozen Top16 and the final shared prefix is confirmed on that same
   surface; a membership change cannot recursively launch a second tuning pool. With automatic tuning disabled,
   the same strict qualification and prefix search run entirely on the active fixed surface.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
@@ -296,7 +297,9 @@ incumbents form the effective membership floor; requalify wallets remain eligibl
 longer reserve a seat. Actual-Copy risk is persisted before membership formation, independently of whether the
 later daily publication succeeds; Observer also refreshes it after settlements and every five minutes.
 Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
-than 16 seats, daily may append the highest strict proposal and retune only that changed exact membership.
+than 16 seats, daily may append the highest strict proposal. With automatic tuning enabled it uses the same
+single count-first local-surface formation as complete discovery; resulting membership drift is confirmed on
+that surface and never starts an exact-membership closure.
 Hard financial safety is limited to a verified source self-liquidation plus fresh zero-equity/no-position
 snapshots, one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity, or at least
 two actual Copy closes whose 30-day cumulative conservative loss reaches 8% of the opening-equity reference.
@@ -383,8 +386,8 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 A replay starts with standardized `$10,000` equity and continuously compounds it. Conservative dynamic return
 divides complete closed-Episode PnL minus all current open loss by the applicable window-start floating equity;
 positive open PnL remains reference-only. Rough replay uses fills only and is capped at 40 source-quality
-wallets. Strict replay reuses the bounded Top32 K-line path cache. The current-surface Top16 is only the tune
-seed; the final tuned surface certifies the complete path-valid Top32 before forming the final Top16.
+wallets. Top32 remains evidence/Challenger scope. Automatic formation freezes Top16 before tuning, and only
+that frozen set receives the winning-surface individual strict replay.
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
 The Dashboard's `AUTO_TUNE_MARGIN_ENABLE` switch is authoritative for automatic generation formation. When
@@ -394,8 +397,8 @@ the profit-aligned Core prefix on that fixed surface. The existing bounded adapt
 capacity boundary (for example `16 → 8 → 12 → 10`) rather than decrementing every count. Congestion,
 insufficient open coverage, liquidation or shared-account risk can only shrink the prefix; if no non-empty
 prefix passes, the generation fails closed with zero Core. When enabled, the active surface locates the count
-boundary and exactly one efficient tune runs on the winning count; later membership changes receive strict
-same-surface confirmation without recursive retuning. Explicit operator optimization commands may
+center and exactly one bounded local tune runs across n±1 with n±2 guards; later membership changes receive
+strict same-surface confirmation without recursive retuning. Explicit operator optimization commands may
 still request tuning independently of this automatic switch.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
@@ -430,13 +433,11 @@ the scanner lock with full and
 daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
 new selection, tuned parameters, and revision publish atomically.
 
-The search evaluates independent parameter axes, a bounded Pareto finalist set, continuous-capital walk-forward
-folds, holdout, and stress scenarios from fills. Production formation does not enumerate arbitrary wallet
-subsets, leave-one-out variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a
-bounded strict-prefix boundary search; each tested count gets a sparse 30-day probe, and the winning exact
-membership gets an efficient tune with at most four path finalists representing profit, liquidation risk,
-capacity/open capture, and the active baseline. Count nodes are replayed on the current surface to locate the
-capacity boundary; only the winning count is tuned. Completed strict-prefix summaries
+The search evaluates a bounded local parameter surface, a small finalist set, continuous-capital windows and
+strict price-path validation. Production formation does not enumerate arbitrary wallet subsets, leave-one-out
+variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a bounded strict-prefix
+count center, crosses at most nine shared tier-margin surfaces over n±1, applies n±2 guards, and sends at most
+three candidates to strict validation. Completed strict-prefix summaries
 are cached by generation, parameter surface and membership hash, so a retry resumes without keeping full
 trajectories in memory. It never changes Core membership using stale profiles and never runs a candle replay for
 every parameter or membership proposal. After the winning parameters and membership are fixed, the one final
@@ -444,14 +445,10 @@ strict 30-day portfolio certification supplies the estimated shared-account resu
 list. Publication also persists the exact final-surface individual 30/14/7 replay fields used for score and
 admission, so Dashboard score and wallet economics never fall back to a different parameter surface.
 
-The generation's single efficient tune memoizes duplicate parameter surfaces across its axis, combination,
-margin-polish and finalist stages. Final walk-forward certification replays the active baseline once and all unique finalists in
-one CPU-aware batch over the same prepared fills/candle path; it does not rerun the identical baseline for every
-candidate. One-core hosts execute the same batch serially, while larger hosts scale to their configured worker
-ceiling without changing ordering or results.
-Its adaptive leverage, margin and smart-add batches keep one worker session alive and reuse the same immutable
-30-day fills/market context, avoiding repeated process startup and context serialization without pruning a
-candidate surface.
+The generation's single local tune memoizes duplicate parameter surfaces by generation, membership, parameter
+hash and validation mode. A ≤2GiB host executes replay serially and reuses the same immutable longest fill and
+market context. Candidate counts, not wall-clock time, bound work; resource deferral checkpoints the generation
+and the finalizer timer resumes it without refetching wallet history.
 
 最终 Strict 评分采用“60分完整资格基线 + 35分严格盈利映射 + 5分综合可信度”。这样已通过源画像、
 跨周活跃、PF、执行、路径和清算认证的钱包不会显示成不及格，同时仍按盈利能力拉开顺序；

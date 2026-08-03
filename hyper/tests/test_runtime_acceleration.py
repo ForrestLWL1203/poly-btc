@@ -161,10 +161,16 @@ class RuntimeAccelerationTests(unittest.TestCase):
         for unit in (
             templates.scan_service("/app", "/venv/python", "/data/hl.db"),
             templates.challenger_refresh_service("/app", "/venv/python", "/data/hl.db"),
+            templates.finalize_resume_service("/app", "/venv/python", "/data/hl.db"),
         ):
             self.assertIn("MemoryHigh=1100M", unit)
             self.assertIn("MemoryMax=1400M", unit)
             self.assertIn("MemorySwapMax=512M", unit)
+            self.assertIn("TimeoutStartSec=infinity", unit)
+
+        self.assertIn("finalize-profiled --if-ready", templates.finalize_resume_service(
+            "/app", "/venv/python", "/data/hl.db",
+        ))
 
     def test_reusable_replay_pool_initializes_once_across_dependent_batches(self):
         initialized = []

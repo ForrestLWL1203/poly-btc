@@ -102,6 +102,25 @@ def process_tree_usage_bytes(root_pid: int | None = None) -> tuple[int, int]:
     return rss, swap
 
 
+def cgroup_memory_metrics() -> dict:
+    """Read cgroup-v2 scanner memory telemetry when available."""
+    try:
+        row = next(
+            line for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
+            if line.startswith("0::")
+        )
+        relative = row.split("::", 1)[1].lstrip("/")
+        root = Path("/sys/fs/cgroup") / relative
+        current = int((root / "memory.current").read_text(encoding="utf-8").strip())
+        events = {}
+        for line in (root / "memory.events").read_text(encoding="utf-8").splitlines():
+            key, value = line.split(None, 1)
+            events[key] = int(value)
+        return {"currentBytes": current, "events": events}
+    except (OSError, StopIteration, TypeError, ValueError):
+        return {"currentBytes": None, "events": {}}
+
+
 def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
     raw_fill_bytes = max(0, int(raw_fill_bytes or 0))
     estimated_decode = int(
@@ -112,11 +131,14 @@ def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
     min_available = int(config.SCANNER_MIN_AVAILABLE_MEMORY_BYTES)
     max_rss = int(config.SCANNER_MAX_PROCESS_TREE_RSS_BYTES)
     max_swap = int(config.SCANNER_MAX_PROCESS_TREE_SWAP_BYTES)
+    cgroup = cgroup_memory_metrics()
     reasons = []
     if available is not None and available < min_available + estimated_decode:
         reasons.append("available_memory")
     if rss + estimated_decode > max_rss:
         reasons.append("process_tree_rss")
+    if cgroup["currentBytes"] is not None and cgroup["currentBytes"] + estimated_decode > max_rss:
+        reasons.append("cgroup_memory")
     if swap > max_swap:
         reasons.append("process_tree_swap")
     return {
@@ -131,6 +153,8 @@ def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
         "maxProcessTreeRssBytes": max_rss,
         "maxProcessTreeSwapBytes": max_swap,
         "physicalMemoryBytes": physical_memory_bytes(),
+        "cgroupMemoryCurrentBytes": cgroup["currentBytes"],
+        "cgroupMemoryEvents": cgroup["events"],
     }
 
 

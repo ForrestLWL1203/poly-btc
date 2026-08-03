@@ -91,11 +91,11 @@ The production flow is:
 
 `Leaderboard staging → $250k volume/PnL-direction recall → permanent automation-address subtraction → hybrid eager-new/fill-first cached Perp-volume proof
 → executable-market fill cache → structural hard gates → generation-frozen activity + fills-only conservative
-Copy/PF/lottery gates → scored Top32 →
-profile-stage handoff to a fresh process → current-surface strict path and profit-aligned-score Top16 seed →
-current-surface bounded count search → optional one-time efficient tune on the winning count →
-effective-surface individual strict across the complete path-valid Top32 → score Top16/prefix shared replay →
-strict confirmation of the final membership without recursive retuning → atomic generation/selection/strategy revision publish →
+Copy/PF/lottery gates → scored Top32 evidence pool →
+profile-stage handoff to a fresh process → freeze profit-aligned Top16 →
+current-surface bounded count center → one n±1 local tier tune with n±2 guards → at most three strict finalists →
+one winning-surface individual strict pass across frozen Top16 → same-surface bounded final count → one shared path certification →
+atomic generation/selection/strategy revision publish →
 Observer reload → replay-summary materialization`
 
 `AUTO_TUNE_MARGIN_ENABLE=false` is a hard fixed-surface contract for automatic complete and Challenger
@@ -103,8 +103,15 @@ generations. Membership or ordering changes may not re-enable the tuner. The act
 the complete individual/shared strict contract; congestion, insufficient open coverage or portfolio risk must
 shrink the profit-aligned Core prefix through the existing bounded adaptive count search (for example
 `16 → 8 → 12 → 10`), never sequential count enumeration. No feasible non-empty prefix may publish as an
-intentional zero-Core generation. When enabled, each generation may run at most one efficient parameter tune;
-membership changes after that tune are strictly replayed on the chosen surface and may not start another pool.
+intentional zero-Core generation. When enabled, each generation may run at most one
+`count_first_local_surface_v1` tune; membership changes after that tune are strictly replayed on the chosen
+surface and may not start another pool. Top32 remains evidence/Challenger scope only; ranks 17-32 cannot be
+reabsorbed after the Top16 is frozen.
+
+Tuning is bounded by candidate counts, never by wall-clock time. Scanner, Challenger and deferred-finalizer
+services have no total start timeout. A resource guard checkpoints and defers before OOM; the independent
+finalizer timer resumes a ready generation without refetching wallet history. Per-request network timeouts and
+retry/deferred queues remain mandatory so a dead connection cannot block the generation forever.
 
 ### 1. Generation safety
 
@@ -190,9 +197,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   strictly. Existing `active` and `draining` Core wallets form the effective membership floor; `requalify`
   wallets have released their seats but remain in the daily strict-requalification pool. Low and medium
   financial risk never removes an incumbent or revokes entry permission. Empty seats may be filled by the
-  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. Membership changes trigger
-  exact-membership retuning only while `AUTO_TUNE_MARGIN_ENABLE` is enabled; otherwise a strict promotion may
-  publish on the active fixed surface. A current-Core data/path failure retains the previous generation and does
+  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. When
+  `AUTO_TUNE_MARGIN_ENABLE` is enabled, a promotion runs the same one-shot count-first local-surface formation;
+  membership drift after its winning surface never starts an exact-membership closure. With the switch disabled,
+  a strict promotion may publish on the active fixed surface. A current-Core data/path failure retains the previous generation and does
   not advance risk confirmation. Automatic removal is limited to durable high risk, recoverable zero-equity
   unavailability, structural uncopyability, or an already-resolved losing operator exit. High risk requires a
   verified source self-liquidation plus zero equity/no positions, or a Canonical/actual Copy liquidation losing
@@ -271,8 +279,8 @@ remain audit labels. Top32 and final formation share one profit-aligned score: c
 `70%×30d + 30%×7d` return is mapped monotonically, then multiplied by an 85%–100% confidence factor from PF,
 samples, execution, repeatability, cross-week activity and liquidation safety. Confidence can only haircut
 profitability; it cannot award bonus points to a low-return wallet. Raw profit priority, 30d, 7d, PF and stable
-address are tie-breaks. At most 32 receive a queue rank and strict path; current-surface strict reranks them by
-the same score and sends at most 16 to unified tuning.
+address are tie-breaks. At most 32 receive a queue rank as the Rough/Challenger evidence pool; automatic
+formation freezes at most 16 before parameter search. Ranks 17-32 cannot be reabsorbed after tuning.
 
 Final per-wallet strict admission requires conservative dynamic 30d/rolling-7d returns of 10%/3%, positive
 closed PnL in both windows, a 30-day open-loss ratio at or below 50%, at least seven 30-day closed Copy
@@ -378,16 +386,14 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
 
 1. Freeze cross-week activity and fills-only economics for every structural survivor. Fill Top32 by the unified
    rough profit-aligned score; primary/reserve remains visible evidence, not a conflicting sort order.
-2. Build current-surface individual evidence from cached fills and one refined 15-minute path per Top32
-   candidate, rerank by the strict profit-aligned score, and use at most 16 as the initial tuning seed. Stars remain
-   operator attention metadata only.
-3. Search only strict score prefixes. Each count node uses the same normalized cached fills with continuous
-   floating equity. A combination may shorten the lowest-profit suffix, but may never skip a higher-profit
-   wallet to insert a lower-profit wallet.
-4. Recompute every path-valid Top32 wallet's complete strict qualification on the tuned surface, rerank the
-   qualified universe, and form a fresh score Top16. A wallet outside the initial seed may therefore
-   enter when the tuned surface proves it stronger.
-5. Search the shared strict score prefix on the single winning surface. Any final membership/order change is
+2. Freeze at most Top16 before parameter work. Stars remain operator attention metadata only.
+3. Locate a count center on the active surface, cross shared tier candidates over n±1 and validate n±2 guards.
+   Each node uses the same normalized cached fills with continuous floating equity. The search may shorten only
+   the lowest-profit suffix and may never insert a lower-ranked wallet.
+4. Send at most three count+surface finalists to strict validation, then run the winning surface's complete
+   individual strict qualification exactly once across the frozen Top16.
+5. Rerank the surviving frozen candidates and search the shared strict score prefix on the single winning surface.
+   Any final membership/order change is
    replayed and confirmed on that same surface; complete formation never starts a second exact-Core tune.
 6. Run the final path-complete 30-day shared-account replay only after parameters and membership have converged.
    Require conservative dynamic 30-day return at least 10%, conservative rolling-7-day return at least 3%,
@@ -395,7 +401,7 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
    both windows and complete price-path coverage. Every member must remain at or below three
    simulated liquidations and below 8% loss on every individual liquidated episode.
 7. Persist both `recommendedCore` (pure score/replay proposal) and `effectiveCore` (incumbent/risk/intent overlay),
-   plus standardized `$10,000` and current-Paper-equity results. Incomplete paths, valuation or immutable
+   plus the standardized `$10,000` certification. Paper/Live scale it at runtime. Incomplete paths, valuation or immutable
    context abort publication. A data-complete economic-only failure publishes `operator_review_degraded` with
    the existing effective membership and parameters; it does not promote or retune.
 
@@ -443,10 +449,10 @@ rows into the next generation and leaves membership operator-owned; it does not 
 
 The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
 The history/Profile phase marks its generation ready, releases the scanner lock and is replaced with a fresh
-`finalize-profiled` process before formation. Complete formation first locates the capacity boundary on the
-active surface with the bounded count search, then runs at most one efficient tune on that winning count. It
-strictly replays the complete path-valid Top32 on the chosen surface, reranks the final Top16 and chooses the
-shared profit prefix. A final membership change is strict-confirmed on the same surface; it never starts an
+`finalize-profiled` process before formation. Complete formation freezes Top16, locates the count center on the
+active surface, then runs at most one n±1 local tune with n±2 guards. It strictly replays the frozen Top16 once
+on the chosen surface, reranks the survivors and chooses the shared profit prefix. A final membership change is
+strict-confirmed on the same surface; it never starts an
 exact-Core closure tune. Eligibility, explicit selection, generation, follow history and the immutable strategy
 revision are still sealed atomically.
 An evidence-only Challenger generation may explicitly carry the prior Core snapshot, but cannot claim a new
@@ -460,11 +466,10 @@ rather than reach the OOM killer.
 The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
 and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
 not tune per-coin caps, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. Production Core formation uses the efficient profile: it tests every tier
-independently, keeps current/highest-profit/fewest-liquidation directions, but does not expand them into a
-three-tier Cartesian product. Its 30-day search retains Pareto representatives for highest profit, fewest
-liquidations, best capacity/open capture and the active baseline; only four distinct surfaces enter expensive
-path/walk-forward validation. Risk and capacity representatives must remain inside the configured near-best
+or stop/risk-owner settings. Production Core formation tests baseline plus symmetric per-tier/global margin
+probes, then adjacent notional-paired leverage and smart-add directions; it never expands them into a
+three-tier Cartesian product. Only four distinct surfaces cross the primary counts, and at most three
+count+surface candidates enter expensive path validation. Risk and capacity representatives must remain inside the configured near-best
 profit band, so an under-deployed surface cannot win merely by avoiding trades. The legacy full profile remains
 available for offline diagnostics; coarse count probes remain sparse. Any optimizer walk-forward folds compare
 parameter robustness only; they do not
@@ -481,7 +486,7 @@ safety repair without pretending to clear the ordinary relative-profit-gain hurd
 
 Core membership remains a strict profit-ranked prefix: production formation never searches arbitrary wallet
 subsets, never runs leave-one-out membership elimination, and never exhaustively replays every `1..N` prefix.
-It uses bounded boundary search plus neighbouring counts, a single efficient tune, and strict same-surface
+It uses bounded boundary search plus neighbouring counts, a single local tune, and strict same-surface
 confirmation if final ranking changes membership. Generation-scoped prefix evidence stores only compact
 metrics keyed by the membership hash and parameter surface, so a retry resumes completed strict prefix work
 without retaining full trajectories or raw membership addresses.

@@ -77,8 +77,11 @@ class LauncherTests(unittest.TestCase):
 
         schedule = services.SystemdServices(Executor(), DeployConfig()).timer_schedule()
 
-        self.assertEqual(set(schedule), {"timer", "challenger_timer"})
+        self.assertEqual(set(schedule), {
+            "timer", "challenger_timer", "finalize_timer",
+        })
         self.assertIn("2026-07-28 04:00:00", schedule["challenger_timer"]["next"])
+        self.assertIn("2026-07-28 04:00:00", schedule["finalize_timer"]["next"])
 
     def test_quiet_ssh_command_waits_instead_of_busy_spinning(self):
         class Channel:
