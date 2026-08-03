@@ -17,6 +17,7 @@ Open copies reload after restart. New exposure is equity- and volatility-tier-si
 price-spaced and capped, and target reductions are mirrored by percentage with profitable-tail protection.
 """
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -46,6 +47,16 @@ logging.getLogger("websockets").setLevel(logging.CRITICAL)
 STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
 MARK_WRITE_MIN_MS = 1_000  # dashboard mark freshness: persist at most once/sec/coin from live book ticks
 MANUAL_CLOSE_COOLDOWN_S = 24 * 60 * 60
+_SOURCE_EVENT_ID = contextvars.ContextVar("observer_source_event_id", default=None)
+_LEDGER_RECOVERY_COIN = contextvars.ContextVar("observer_ledger_recovery_coin", default=None)
+
+
+class RetryableSignalError(RuntimeError):
+    """The target fill was received, but its strategy action is not terminal yet."""
+
+
+class TerminalSignalError(RuntimeError):
+    """A verified venue/policy outcome makes retrying this target fill unsafe or pointless."""
 
 
 def _log(msg: str):
@@ -205,10 +216,12 @@ class Observer:
                 raise RuntimeError("live_mode_without_active_session")
             self.execution_mode = "live"
             self.execution_state = str(execution[1])
+            self.execution_session_id = str(execution[2])
             self.taker = Book("live", "live_copy_position", "live_copy_action", "live_copy_account")
         else:
             self.execution_mode = "paper"
             self.execution_state = "paper"
+            self.execution_session_id = "paper"
             self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
         self.live_executor = None
         self.live_reconcile_error = None
@@ -216,6 +229,9 @@ class Observer:
         self.selection_generation = None
         self.ws = None
         self.stop = False
+        self._background_tasks: dict[str, asyncio.Task] = {}
+        self._signal_tasks: set[asyncio.Task] = set()
+        self._live_order_inflight = 0
         prior_state = self.db.execute(
             "SELECT state FROM process_status WHERE name='observer'"
         ).fetchone()
@@ -237,6 +253,180 @@ class Observer:
             ).fetchall()
             if row[0]
         }
+
+    def _assert_mode_binding(self) -> None:
+        """Fail closed if an out-of-band writer changes mode/session under this process."""
+        row = self.db.execute(
+            "SELECT selected_mode,state,active_session_id FROM execution_control WHERE id=1"
+        ).fetchone()
+        selected = str(row[0] or "paper") if row else "paper"
+        if selected != self.execution_mode:
+            raise RuntimeError("execution_mode_changed_while_observer_running")
+        if self.execution_mode == "live":
+            if not row or str(row[2] or "") != self.execution_session_id:
+                raise RuntimeError("execution_session_changed_while_observer_running")
+            if str(row[1] or "") not in {
+                "live_canary", "live_running", "paused", "draining", "reconcile_required",
+            }:
+                raise RuntimeError("execution_state_invalid_while_observer_running")
+
+    def _spawn_background(self, coro, name: str, *, critical: bool = False):
+        """Track long-lived loops and turn an unexpected critical exit into a visible stop."""
+        task = asyncio.create_task(coro, name=f"observer:{name}")
+        task_key = name
+        if task_key in self._background_tasks:
+            task_key = f"{name}:{id(task)}"
+        self._background_tasks[task_key] = task
+
+        def _done(completed):
+            if self._background_tasks.get(task_key) is completed:
+                self._background_tasks.pop(task_key, None)
+            if completed.cancelled() or self.stop:
+                return
+            try:
+                exc = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if not critical and exc is None:
+                return
+            message = str(exc or f"{name}_exited")[:160]
+            _log(f"background task {name} failed: {message}")
+            if not critical:
+                return
+            self.stop = True
+            try:
+                if self.execution_mode == "live":
+                    stamp = now_iso()
+                    self.execution_state = "reconcile_required"
+                    self.paused = True
+                    self.db.execute(
+                        "UPDATE execution_session SET state='reconcile_required',updated_at=? "
+                        "WHERE session_id=?",
+                        (stamp, self.execution_session_id),
+                    )
+                    self.db.execute(
+                        "UPDATE execution_control SET state='reconcile_required',last_error_code=?,"
+                        "last_error_at=?,updated_at=? WHERE id=1 AND selected_mode='live' "
+                        "AND active_session_id=?",
+                        (f"TASK_{name.upper()}_FAILED", stamp, stamp, self.execution_session_id),
+                    )
+                    self.db.commit()
+                self._write_proc_status("failed")
+            except Exception as status_exc:  # noqa: BLE001 - original failure remains authoritative
+                self._rollback_db()
+                _log(f"failed to persist {name} task failure: {str(status_exc)[:120]}")
+            self._interrupt_ws_for_stop()
+
+        task.add_done_callback(_done)
+        return task
+
+    def _signal_row(self, signal_id: int):
+        return self.db.execute(
+            "SELECT signal_id,state,attempt_count,payload_json FROM execution_signal "
+            "WHERE signal_id=? AND mode=? AND session_id=?",
+            (int(signal_id), self.execution_mode, self.execution_session_id),
+        ).fetchone()
+
+    def _mark_signal(self, signal_id: int, state: str, *, code=None, error=None, retry=False) -> None:
+        stamp = now_iso()
+        if retry:
+            row = self._signal_row(signal_id)
+            attempts = int(row[2] or 0) if row else 1
+            delay_s = min(
+                float(config.LIVE_SIGNAL_RETRY_MAX_S),
+                float(config.LIVE_SIGNAL_RETRY_BASE_S) * (2 ** max(0, attempts - 1)),
+            )
+            next_ms = now_ms() + int(delay_s * 1000)
+            self.db.execute(
+                "UPDATE execution_signal SET state='retryable',next_attempt_ms=?,decision_code=?,"
+                "last_error=?,updated_at=?,completed_at=NULL WHERE signal_id=?",
+                (next_ms, code, str(error or "")[:300] or None, stamp, int(signal_id)),
+            )
+        else:
+            self.db.execute(
+                "UPDATE execution_signal SET state=?,next_attempt_ms=0,decision_code=?,last_error=?,"
+                "updated_at=?,completed_at=? WHERE signal_id=?",
+                (state, code, str(error or "")[:300] or None, stamp, stamp, int(signal_id)),
+            )
+        self.db.commit()
+
+    def _schedule_signal_task(self, signal_id, coro, *, name: str):
+        """Run one strategy transition and durably finalize or retry its source signal."""
+        if signal_id is None:
+            return self._spawn_background(coro, f"event:{name}", critical=False)
+        self.db.execute(
+            "UPDATE execution_signal SET state='processing',attempt_count=attempt_count+1,"
+            "updated_at=? WHERE signal_id=?",
+            (now_iso(), int(signal_id)),
+        )
+        # Release the main connection's write transaction before the runner calls LiveExecutor,
+        # which deliberately uses a separate connection.  Leaving this UPDATE uncommitted would
+        # make Observer contend with itself and can turn every signed attempt into `database is locked`.
+        self.db.commit()
+
+        async def _runner():
+            source_event_id = f"signal:{self.execution_session_id}:{int(signal_id)}"
+            token = _SOURCE_EVENT_ID.set(source_event_id)
+            signal = self.db.execute(
+                "SELECT coin FROM execution_signal WHERE signal_id=?", (int(signal_id),),
+            ).fetchone()
+            recovery = self.db.execute(
+                "SELECT coin FROM execution_order_intent WHERE session_id=? AND source_fill_id=? "
+                "LIMIT 1",
+                (self.execution_session_id, source_event_id),
+            ).fetchone()
+            recovery_token = _LEDGER_RECOVERY_COIN.set(
+                str(signal[0]) if signal and recovery and str(signal[0]) == str(recovery[0]) else None
+            )
+            try:
+                await coro
+            except TerminalSignalError as exc:
+                try:
+                    self._restore_live_book_from_db()
+                except Exception as restore_exc:  # noqa: BLE001 - terminal audit remains authoritative
+                    self._rollback_db()
+                    _log(f"signal #{signal_id} terminal state reload failed: {str(restore_exc)[:120]}")
+                self._mark_signal(
+                    signal_id, "failed_terminal", code="EXECUTION_TERMINAL", error=exc,
+                )
+                _log(f"signal #{signal_id} {name} terminal: {str(exc)[:120]}")
+            except RetryableSignalError as exc:
+                try:
+                    self._restore_live_book_from_db()
+                except Exception as restore_exc:  # noqa: BLE001 - durable inbox will retry
+                    self._rollback_db()
+                    _log(f"signal #{signal_id} state reload failed: {str(restore_exc)[:120]}")
+                self._mark_signal(signal_id, "retryable", code="TRANSIENT", error=exc, retry=True)
+            except Exception as exc:  # noqa: BLE001 - inbox owns retry and audit
+                self._rollback_db()
+                try:
+                    self._restore_live_book_from_db()
+                except Exception as restore_exc:  # noqa: BLE001 - durable inbox will retry
+                    self._rollback_db()
+                    _log(f"signal #{signal_id} state reload failed: {str(restore_exc)[:120]}")
+                self._mark_signal(
+                    signal_id, "retryable", code=type(exc).__name__, error=exc, retry=True,
+                )
+                _log(f"signal #{signal_id} {name} deferred: {str(exc)[:120]}")
+            else:
+                self._mark_signal(signal_id, "completed", code="OK")
+            finally:
+                _LEDGER_RECOVERY_COIN.reset(recovery_token)
+                _SOURCE_EVENT_ID.reset(token)
+
+        task = asyncio.create_task(_runner(), name=f"observer:signal:{signal_id}:{name}")
+        self._signal_tasks.add(task)
+        task.add_done_callback(self._signal_tasks.discard)
+        return task
+
+    def _restore_live_book_from_db(self) -> None:
+        """Discard partially-mutated in-memory episode state after a failed Live transition."""
+        if self.execution_mode != "live":
+            return
+        self._rollback_db()
+        self.taker.open_ep.clear()
+        self._load_account(self.taker)
+        self._reload_open(self.taker)
 
     # -- paper account ------------------------------------------------------
     def _available(self, book=None) -> float:
@@ -330,6 +520,67 @@ class Observer:
         )
         self.db.commit()
 
+    def _verify_live_ledger_projection(self) -> bool:
+        """Require the managed Live ledger to net to the exchange projection.
+
+        The execution adapter can prove that every exchange position came from
+        one of our durable order intents.  This second projection proves that
+        those confirmed fills were also applied to ``live_copy_position``.  A
+        crash between the two commits is therefore visible and blocks increases
+        instead of leaving an unmanaged real position behind.
+        """
+        if self.execution_mode != "live":
+            return True
+        ledger = {
+            str(coin): float(size or 0.0)
+            for coin, size in self.db.execute(
+                "SELECT coin,COALESCE(SUM(CASE WHEN side='long' THEN rem_size ELSE -rem_size END),0) "
+                "FROM live_copy_position WHERE status='open' GROUP BY coin"
+            ).fetchall()
+        }
+        exchange = {
+            str(coin): float(size or 0.0)
+            for coin, size in self.db.execute(
+                "SELECT coin,COALESCE(SUM(signed_size),0) FROM execution_position_projection "
+                "WHERE session_id=? GROUP BY coin",
+                (self.execution_session_id,),
+            ).fetchall()
+        }
+        drift = []
+        for coin in sorted(set(ledger) | set(exchange)):
+            expected = ledger.get(coin, 0.0)
+            actual = exchange.get(coin, 0.0)
+            tolerance = max(1e-8, abs(actual) * 1e-7)
+            if abs(expected - actual) > tolerance:
+                drift.append(coin)
+        if not drift:
+            return True
+        # Ignore only the exact interval in which LiveExecutor has confirmed a managed order but the awaiting
+        # coroutine has not resumed to commit its ledger transition.  A durable signal recovering an existing
+        # intent may also repair drift on that signal's coin; unrelated drift still fails closed.
+        recovery_coin = _LEDGER_RECOVERY_COIN.get()
+        if self._live_order_inflight > 0 or (
+            recovery_coin is not None and set(drift) == {recovery_coin}
+        ):
+            return True
+        stamp = now_iso()
+        self.paused = True
+        self.execution_state = "reconcile_required"
+        self.live_reconcile_error = "LIVE_LEDGER_PROJECTION_DRIFT"
+        self.live_reconcile_error_at = stamp
+        self.db.execute(
+            "UPDATE execution_session SET state='reconcile_required',updated_at=? WHERE session_id=?",
+            (stamp, self.execution_session_id),
+        )
+        self.db.execute(
+            "UPDATE execution_control SET state='reconcile_required',last_error_code=?,last_error_at=?,"
+            "updated_at=? WHERE id=1",
+            ("LIVE_LEDGER_PROJECTION_DRIFT", stamp, stamp),
+        )
+        self.db.commit()
+        _log(f"live ledger projection drift on {len(drift)} coin(s); exposure increases frozen")
+        return False
+
     async def _refresh_live_sizing_state(self) -> None:
         """Refresh authoritative Mainnet equity before calculating any exposure increase."""
         if self.execution_mode != "live" or self.live_executor is None:
@@ -349,6 +600,8 @@ class Observer:
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
         self._sync_live_account()
+        if result.get("ok") and not self._verify_live_ledger_projection():
+            raise RuntimeError("live_ledger_projection_drift")
         if not result.get("ok"):
             self.paused = True
             self.execution_state = "reconcile_required"
@@ -423,9 +676,10 @@ class Observer:
         if not addr or not coin:
             return None
         row = self.db.execute(
-            "SELECT expires_at FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "SELECT expires_at FROM execution_manual_close_cooldown "
+            "WHERE mode=? AND addr=? AND lower(coin)=lower(?) "
             "AND reason IN ('manual_close','manual_stop_loss')",
-            (addr, coin),
+            (self.execution_mode, addr, coin),
         ).fetchone()
         if not row:
             return None
@@ -433,27 +687,31 @@ class Observer:
         if expires_at > now_iso():
             return expires_at
         self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "DELETE FROM execution_manual_close_cooldown "
+            "WHERE mode=? AND addr=? AND lower(coin)=lower(?) "
             "AND reason IN ('manual_close','manual_stop_loss')",
-            (addr, coin),
+            (self.execution_mode, addr, coin),
         )
         self.db.commit()
         return None
 
     def _clear_manual_close_cooldown(self, addr: str, coin: str):
         self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "DELETE FROM execution_manual_close_cooldown "
+            "WHERE mode=? AND addr=? AND lower(coin)=lower(?) "
             "AND reason IN ('manual_close','manual_stop_loss')",
-            ((addr or "").lower(), coin),
+            (self.execution_mode, (addr or "").lower(), coin),
         )
         self.db.commit()
 
     def _prune_legacy_profit_cooldowns(self):
         """Remove cooldowns written by the old all-manual-full-closes policy for non-losing exits."""
         cur = self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE reason='manual_close' AND EXISTS ("
-            "SELECT 1 FROM copy_position p WHERE p.pos_id=manual_close_cooldown.pos_id "
-            "AND COALESCE(p.realized_pnl,0)>=0)"
+            "DELETE FROM execution_manual_close_cooldown WHERE mode=? AND reason='manual_close' AND EXISTS ("
+            f"SELECT 1 FROM {self.taker.pos_table} p "
+            "WHERE p.pos_id=execution_manual_close_cooldown.pos_id "
+            "AND COALESCE(p.realized_pnl,0)>=0)",
+            (self.execution_mode,),
         )
         self.db.commit()
         if cur.rowcount:
@@ -464,12 +722,13 @@ class Observer:
         created_at = now_iso()
         expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + MANUAL_CLOSE_COOLDOWN_S))
         self.db.execute(
-            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
-            "VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(addr,coin) DO UPDATE SET "
+            "INSERT INTO execution_manual_close_cooldown "
+            "(mode,addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(mode,addr,coin) DO UPDATE SET "
             "pos_id=excluded.pos_id,reason=excluded.reason,created_at=excluded.created_at,"
             "expires_at=excluded.expires_at",
-            (addr, coin, pos_id, "manual_stop_loss", created_at, expires_at),
+            (self.execution_mode, addr, coin, pos_id, "manual_stop_loss", created_at, expires_at),
         )
         self.db.commit()
         return expires_at
@@ -827,7 +1086,7 @@ class Observer:
                 smart_tp_master_anchor=0.0,
             )
         self.db.execute(
-            "UPDATE copy_position SET smart_tp_armed=0,smart_tp_stage=0,smart_tp_peak_pnl=0,"
+            f"UPDATE {self.taker.pos_table} SET smart_tp_armed=0,smart_tp_stage=0,smart_tp_peak_pnl=0,"
             "smart_tp_base_size=NULL,smart_tp_master_anchor=NULL WHERE status='open'"
         )
         self.db.commit()
@@ -1087,8 +1346,23 @@ class Observer:
         addrs = addrs + held_off
         self.held_off = set(held_off)         # EXIT-ONLY set: poll them to unwind, but open nothing new
         new = [a for a in addrs if a not in self.last_fill_ms]
+        stamp_ms = now_ms()
         for a in new:
-            self.last_fill_ms[a] = now_ms()       # forward-only: don't copy a new wallet's old fills
+            cursor = None
+            if self.execution_mode == "live":
+                row = self.db.execute(
+                    "SELECT last_fill_ms FROM observer_target_cursor "
+                    "WHERE mode='live' AND session_id=? AND lower(addr)=lower(?)",
+                    (self.execution_session_id, a),
+                ).fetchone()
+                cursor = int(row[0]) if row and row[0] is not None else None
+            self.last_fill_ms[a] = cursor if cursor is not None else stamp_ms
+            if self.execution_mode == "live" and cursor is None:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO observer_target_cursor "
+                    "(mode,session_id,addr,last_fill_ms,updated_at) VALUES ('live',?,?,?,?)",
+                    (self.execution_session_id, a, stamp_ms, now_iso()),
+                )
         dropped = [a for a in self.addrs if a not in addrs]
         self.addrs = addrs
         if init or new or dropped or held_off:
@@ -1247,24 +1521,38 @@ class Observer:
     ):
         if self.execution_mode != "live" or self.live_executor is None:
             return None
-        source_fill_id = (
-            f"{str(addr).lower()}:{int(source_time_ms)}:{source_order_id if source_order_id is not None else 'none'}:"
+        source_fill_id = _SOURCE_EVENT_ID.get() or (
+            f"{str(addr).lower()}:{int(source_time_ms)}:"
+            f"{source_order_id if source_order_id is not None else 'none'}:"
             f"{action}:{int(ep.get('num_actions') or 0) + 1}"
         )
-        return await asyncio.to_thread(
-            self.live_executor.execute,
-            coin=coin,
-            is_buy=bool(is_buy),
-            size=float(size),
-            leverage=float(leverage),
-            reduce_only=bool(reduce_only),
-            action=action,
-            source_address=addr,
-            source_fill_id=source_fill_id,
-            source_order_id=str(source_order_id) if source_order_id is not None else None,
-            source_time_ms=int(source_time_ms),
-            action_seq=int(ep.get("num_actions") or 0) + 1,
-        )
+        self._live_order_inflight += 1
+        try:
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    self.live_executor.execute,
+                    coin=coin,
+                    is_buy=bool(is_buy),
+                    size=float(size),
+                    leverage=float(leverage),
+                    reduce_only=bool(reduce_only),
+                    action=action,
+                    source_address=addr,
+                    source_fill_id=source_fill_id,
+                    source_order_id=str(source_order_id) if source_order_id is not None else None,
+                    source_time_ms=int(source_time_ms),
+                    action_seq=int(ep.get("num_actions") or 0) + 1,
+                ),
+                name=f"observer:live_order:{action}:{coin}",
+            )
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelling an await does not cancel the signed worker thread.  Finish recovery and return
+                # its confirmed result so the caller can commit the matching Live ledger transition.
+                return await worker
+        finally:
+            self._live_order_inflight = max(0, self._live_order_inflight - 1)
 
     def _coin_liquidity_decision(
         self, coin: str, *, book_snapshot=None, is_buy=None, planned_notional=None,
@@ -1372,7 +1660,9 @@ class Observer:
         (stock/commodity) -> the REST l2Book poll set (WS bbo can't serve builder dexes)."""
         if not coin or coin in self.sub_coins or coin in self.stock_coins:
             return
-        asyncio.create_task(self._ensure_vol(coin))   # make sure we have this coin's σ for sizing
+        self._spawn_background(
+            self._ensure_vol(coin), f"ensure_vol:{coin}", critical=False,
+        )
         if coin in self.crypto_coins:
             if self.ws is not None:
                 self.sub_coins.add(coin)
@@ -1541,6 +1831,9 @@ class Observer:
             return None
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
+        if result.get("ok") and not self._verify_live_ledger_projection():
+            result = dict(result)
+            result.update(ok=False, status="reconcile_required", ledgerProjectionDrift=True)
         if not result.get("ok"):
             self.paused = True
             self.execution_state = "reconcile_required"
@@ -1555,8 +1848,8 @@ class Observer:
 
     async def prune_live_fills(self):
         """Keep live_fills bounded on disk. tid-dedup only needs the last POLL_OVERLAP_MS of history
-        (the forward-only cursor re-fetches only a few seconds back), so deleting rows past the
-        retention window can't cause re-processing — the rest is just audit. Runs at startup then 6h."""
+        (the cursor re-fetches only a few seconds back), while terminal Live handling is independently
+        recorded in execution_signal. The rest is receipt audit. Runs at startup then every 6h."""
         while not self.stop:
             cutoff = now_ms() - config.LIVE_FILLS_RETENTION_DAYS * 86400_000
             n = self.db.execute("DELETE FROM live_fills WHERE time_ms < ?", (cutoff,)).rowcount
@@ -1580,6 +1873,16 @@ class Observer:
         UI flag a dead observer (stale) and lets the command channel self-heal."""
         self._proc_state = state
         pid = None if state == "stopped" else os.getpid()
+        signal_states = {}
+        if self.execution_mode == "live":
+            signal_states = {
+                str(row[0]): int(row[1])
+                for row in self.db.execute(
+                    "SELECT state,COUNT(*) FROM execution_signal WHERE mode='live' AND session_id=? "
+                    "GROUP BY state",
+                    (self.execution_session_id,),
+                ).fetchall()
+            }
         self.db.execute(
             "INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
             "('observer',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
@@ -1591,7 +1894,8 @@ class Observer:
                          "executionState": self.execution_state,
                          "reconcileHealthy": self.live_reconcile_error is None,
                          "reconcileError": self.live_reconcile_error,
-                         "reconcileErrorAt": self.live_reconcile_error_at})))
+                         "reconcileErrorAt": self.live_reconcile_error_at,
+                         "signalStates": signal_states})))
         self.db.commit()
 
     def _interrupt_ws_for_stop(self):
@@ -1623,6 +1927,15 @@ class Observer:
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
         OWNED = ("pause", "resume", "close_position", "close_all", "drain", "emergency_close_all", "wallet_toggle",
                  "wallet_exit_request", "wallet_exit_cancel", "wallet_star", "reload_params")
+        # A process may die after acknowledgement but before completing a signed order/ledger commit.
+        # Requeue only Observer-owned commands; command-id-derived source event ids make Live closes
+        # deterministic across the restart.
+        self.db.execute(
+            "UPDATE commands SET status='pending',acked_at=NULL,error=NULL "
+            "WHERE status='acked' AND type IN (" + ",".join("?" * len(OWNED)) + ")",
+            OWNED,
+        )
+        self.db.commit()
         last_hb = 0.0
         while not self.stop:
             try:
@@ -1634,7 +1947,9 @@ class Observer:
                                     (now_iso(), cmd_id))
                     self.db.commit()
                     try:
-                        result = await self._dispatch_command(ctype, json.loads(payload_json or "{}"))
+                        result = await self._dispatch_command(
+                            ctype, json.loads(payload_json or "{}"), command_id=cmd_id,
+                        )
                         self.db.execute(
                             "UPDATE commands SET status='done',done_at=?,result_json=? WHERE id=?",
                             (now_iso(), json.dumps(result), cmd_id))
@@ -1653,7 +1968,7 @@ class Observer:
                 _log(f"command loop error: {exc}")
             await asyncio.sleep(1.5)
 
-    async def _dispatch_command(self, ctype, payload):
+    async def _dispatch_command(self, ctype, payload, *, command_id=None):
         if ctype == "pause":
             self.paused = True
             if self.execution_mode == "live":
@@ -1692,9 +2007,12 @@ class Observer:
             self._write_proc_status("running")
             return {"paused": False}
         if ctype == "close_position":
-            return await self._cmd_close(int(payload["positionId"]), float(payload.get("fraction", 1.0)))
+            return await self._cmd_close(
+                int(payload["positionId"]), float(payload.get("fraction", 1.0)),
+                source_event_id=f"command:{command_id}:position:{int(payload['positionId'])}",
+            )
         if ctype == "close_all":
-            return await self._cmd_close_all()
+            return await self._cmd_close_all(source_event_id=f"command:{command_id}:close_all")
         if ctype == "drain":
             if self.execution_mode != "live":
                 raise ValueError("drain_requires_live_mode")
@@ -1716,9 +2034,11 @@ class Observer:
         if ctype == "emergency_close_all":
             if self.execution_mode != "live":
                 raise ValueError("emergency_close_all_requires_live_mode")
-            await self._dispatch_command("drain", {})
+            await self._dispatch_command("drain", {}, command_id=command_id)
             await asyncio.to_thread(self.live_executor.cancel_managed_orders)
-            result = await self._cmd_close_all()
+            result = await self._cmd_close_all(
+                source_event_id=f"command:{command_id}:emergency_close_all",
+            )
             result["emergency"] = True
             self._finish_live_session_if_drained()
             return result
@@ -1759,13 +2079,30 @@ class Observer:
                 return addr, coin, ep
         return None
 
-    async def _cmd_close(self, pos_id, frac=1.0):
+    async def _cmd_close(self, pos_id, frac=1.0, *, source_event_id=None):
         """Manual close of one live copy at the current book (operator exit). `frac` ∈ (0,1] closes that
         fraction of the remaining size — <100% is a partial reduce (position stays open; freed margin
         returns to available via rem_size/size). Reuses the normal reduce path so PnL/account/status
         finalize identically to a master-driven close."""
         found = self._ep_by_pos(pos_id)
         if not found:
+            if self.execution_mode == "live" and source_event_id:
+                recovered = self.db.execute(
+                    "SELECT 1 FROM execution_order_intent WHERE session_id=? "
+                    "AND (source_fill_id=? OR source_fill_id LIKE ?) AND filled_size>0 "
+                    "AND state IN ('filled','partial') LIMIT 1",
+                    (self.execution_session_id, source_event_id, f"{source_event_id}:%"),
+                ).fetchone()
+                closed_row = self.db.execute(
+                    "SELECT status,realized_pnl FROM live_copy_position WHERE pos_id=?",
+                    (int(pos_id),),
+                ).fetchone()
+                if recovered and closed_row and closed_row[0] != "open":
+                    return {
+                        "positionId": pos_id, "fraction": frac, "closed": True,
+                        "realizedPnl": round(f(closed_row[1]), 2), "remSize": 0.0,
+                        "recovered": True, "cooldownUntil": None,
+                    }
             raise ValueError(f"position {pos_id} not open/live")
         addr, coin, ep = found
         if ep.get("entry_px") is None:
@@ -1778,10 +2115,32 @@ class Observer:
             exit_px = ba[0] if ep.get("sign", 1) > 0 else ba[1]
         else:
             exit_px = self._mark_px(coin, ep["entry_px"])
-        await self._apply_reduce(addr, coin, ep, now_ms(), exit_px, 0.0, 0.0,
-                                 closing=(frac >= 0.999), liq=False,
-                                 forced_px=exit_px, forced_frac=frac)
         full = frac >= 0.999
+        attempts = 6 if self.execution_mode == "live" and full else 1
+        last_error = None
+        for attempt in range(attempts):
+            token = None
+            if source_event_id:
+                # Keep one logical action id across outer retries. LiveExecutor's deterministic attempt
+                # indexes recover a prior ambiguous/partial fill and submit only the verified remainder.
+                token = _SOURCE_EVENT_ID.set(source_event_id)
+            try:
+                await self._apply_reduce(
+                    addr, coin, ep, now_ms(), exit_px, 0.0, 0.0,
+                    closing=full, liq=False, forced_px=exit_px, forced_frac=frac,
+                )
+                last_error = None
+            except RetryableSignalError as exc:
+                last_error = exc
+            finally:
+                if token is not None:
+                    _SOURCE_EVENT_ID.reset(token)
+            if not full or (addr, coin) not in self.open_ep:
+                break
+            if attempt + 1 < attempts:
+                await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
+        if last_error is not None or (full and (addr, coin) in self.open_ep):
+            raise RuntimeError("manual_close_incomplete") from last_error
         # Partial manual profit-taking/stop-loss keeps this episode live: subsequent target adds and reduces
         # continue through the same ``ep``. A full manual loss is a risk veto and gets 24h cooldown; a full
         # profitable/breakeven exit is merely early profit-taking and must not block the target's next episode.
@@ -1792,20 +2151,31 @@ class Observer:
             self._clear_manual_close_cooldown(addr, coin)
         _log(f"MANUAL-{'CLOSE' if full else f'REDUCE {int(round(frac*100))}%'} {addr[:10]} {coin} {ep['side']} "
              f"@ {exit_px:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
-        return {"positionId": pos_id, "exit": exit_px, "fraction": frac, "closed": full,
+        actually_closed = (addr, coin) not in self.open_ep
+        return {"positionId": pos_id, "exit": exit_px, "fraction": frac, "closed": actually_closed,
                 "realizedPnl": round(ep["realized_pnl"], 2), "remSize": round(ep["rem_size"], 8),
                 "cooldownUntil": cooldown_until}
 
-    async def _cmd_close_all(self):
+    async def _cmd_close_all(self, *, source_event_id=None):
         pos_ids = [ep["pos_id"] for ep in self.open_ep.values()]
         closed = []
+        failed = []
         for pid in pos_ids:
             try:
-                await self._cmd_close(pid)
+                await self._cmd_close(
+                    pid, source_event_id=f"{source_event_id or 'close_all'}:position:{pid}",
+                )
                 closed.append(pid)
             except Exception as exc:  # noqa: BLE001
-                _log(f"close_all: skip {pid}: {exc}")
-        return {"closed": closed, "count": len(closed)}
+                failed.append(pid)
+                _log(f"close_all: position {pid} incomplete: {str(exc)[:120]}")
+        if self.execution_mode == "live":
+            result = await self._reconcile_live_once()
+            if not result or not result.get("ok"):
+                failed.extend(pid for pid in pos_ids if pid not in failed and pid not in closed)
+        if failed or self.open_ep:
+            raise RuntimeError(f"close_all_incomplete:{len(set(failed)) or len(self.open_ep)}")
+        return {"closed": closed, "count": len(closed), "exchangeFlat": True}
 
     def _finish_live_session_if_drained(self):
         if self.execution_mode != "live" or not self.draining or self.open_ep:
@@ -2068,10 +2438,9 @@ class Observer:
         """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − a few-second
         overlap so a fill landing between rounds isn't missed; tid-dedup absorbs the re-fetch),
         replaying each through the idempotent process_fill. No fixed period — the REST pacer sets the
-        cadence; a full round over ~tens of wallets takes a few seconds. Strictly FORWARD-ONLY: each
-        wallet's cursor starts at now (set in _reload_targets), so we only ever copy fills that
-        happen while we're live — never history. Re-reads the watchlist periodically so rolling
-        discovery flows in without a restart."""
+        cadence; a full round over ~tens of wallets takes a few seconds. A newly-added target starts
+        at now; an active Live session resumes its durable cursor after a worker restart. Re-reads
+        the watchlist periodically so rolling discovery flows in without a restart."""
         last_reload = now_ms()
         sem = asyncio.Semaphore(config.POLL_CONCURRENCY)
 
@@ -2082,14 +2451,109 @@ class Observer:
                     await self._poll_fills(addr, since)
                 except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
                     self._rollback_db()
+                    self._tally("poll_error")
                     _log(f"poll_fills {addr[:10]} error: {exc}")
 
         while not self.stop:
+            self._assert_mode_binding()
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_strategy()
                 last_reload = now_ms()
             await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
             await asyncio.sleep(1)                 # small breath between rounds
+
+    async def signal_retry_loop(self):
+        """Resume journalled Live target fills until strategy handling is terminal.
+
+        ``processing`` is process-local ownership.  A restart converts abandoned
+        rows back to retryable; deterministic CLOIDs make recovery safe even when
+        the exchange filled immediately before the previous process died.
+        """
+        if self.execution_mode != "live":
+            return
+        self.db.execute(
+            "UPDATE execution_signal SET state='retryable',next_attempt_ms=0,"
+            "last_error=COALESCE(last_error,'observer_restarted'),updated_at=? "
+            "WHERE mode='live' AND session_id=? AND state='processing'",
+            (now_iso(), self.execution_session_id),
+        )
+        self.db.commit()
+        while not self.stop:
+            self._assert_mode_binding()
+            if self._signal_tasks:
+                await asyncio.sleep(0.05)
+                continue
+            # With a single consumer, `processing` and no in-memory task can only mean the runner died
+            # between state changes.  Reclaim it immediately instead of waiting for another process restart.
+            reclaimed = self.db.execute(
+                "UPDATE execution_signal SET state='retryable',next_attempt_ms=0,"
+                "last_error=COALESCE(last_error,'signal_runner_abandoned'),updated_at=? "
+                "WHERE mode='live' AND session_id=? AND state='processing'",
+                (now_iso(), self.execution_session_id),
+            ).rowcount
+            if reclaimed:
+                self.db.commit()
+            rows = self.db.execute(
+                "SELECT s.signal_id,s.payload_json FROM execution_signal s "
+                "WHERE s.mode='live' AND s.session_id=? AND s.state IN ('pending','retryable') "
+                "AND s.next_attempt_ms<=? AND NOT EXISTS ("
+                "SELECT 1 FROM execution_signal prior WHERE prior.mode=s.mode "
+                "AND prior.session_id=s.session_id AND prior.addr=s.addr "
+                "AND prior.coin=s.coin AND prior.state IN ('pending','retryable','processing') "
+                "AND (prior.source_time_ms<s.source_time_ms OR "
+                "(prior.source_time_ms=s.source_time_ms AND prior.signal_id<s.signal_id))) "
+                "ORDER BY s.source_time_ms,s.signal_id LIMIT 1",
+                (
+                    self.execution_session_id, now_ms(),
+                ),
+            ).fetchall()
+            for signal_id, payload_json in rows:
+                try:
+                    x = json.loads(payload_json)
+                    addr = str(x.get("_addr") or "").lower()
+                    if not addr:
+                        source = self.db.execute(
+                            "SELECT addr FROM execution_signal WHERE signal_id=?", (signal_id,),
+                        ).fetchone()
+                        addr = str(source[0] or "").lower() if source else ""
+                    coin = x.get("coin")
+                    if not addr or not coin or x.get("tid") is None:
+                        raise ValueError("invalid_signal_payload")
+                    oid = x.get("oid")
+                    actions = {
+                        str(row[0] or "")
+                        for row in self.db.execute(
+                            "SELECT action FROM live_copy_action "
+                            "WHERE lower(addr)=lower(?) AND coin=? AND ts=? "
+                            "AND ((master_oid=?) OR (master_oid IS NULL AND ? IS NULL))",
+                            (addr, coin, int(x["time"]), oid, oid),
+                        ).fetchall()
+                    }
+                    signed = f(x.get("sz")) if x.get("side") == "B" else -f(x.get("sz"))
+                    pos0 = f(x.get("startPosition"))
+                    pos1 = pos0 + signed
+                    transition = classify_fill_transition(pos0, pos1)
+                    terminal_action = (
+                        (transition == "open" and "open" in actions)
+                        or (transition == "add" and "add" in actions)
+                        or (transition == "reduce" and bool(actions & {"reduce", "close"}))
+                        # A flip is two-phase.  A close action alone must resume the reverse open.
+                        or (transition == "flip" and "open" in actions)
+                    )
+                    if terminal_action:
+                        self._mark_signal(signal_id, "completed", code="LEDGER_ACTION_PRESENT")
+                        continue
+                    self._dispatch_fill(
+                        addr, coin, (addr, coin), int(x["time"]), signed, pos0, pos1,
+                        f(x.get("px")), bool(x.get("liquidation")), oid,
+                        signal_id=int(signal_id),
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep corrupt/transient rows visible
+                    self._rollback_db()
+                    self._mark_signal(
+                        int(signal_id), "retryable", code=type(exc).__name__, error=exc, retry=True,
+                    )
+            await asyncio.sleep(0.05 if rows else 0.25)
 
     def _apply_authoritative_marks(self, contexts: dict, coins) -> int:
         """Apply fresh exchange markPx values and evaluate mark-based risk.
@@ -2197,13 +2661,15 @@ class Observer:
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
         self._load_account(self.taker)
         self._reload_open(self.taker)
+        if self.execution_mode == "live":
+            self._verify_live_ledger_projection()
         self._resolve_all_draining_intents()
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
-        self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
+        self._reload_strategy(init=True)           # atomic Core + exact follow-param revision
         try:
             self._bind_live_strategy_revision()
         except Exception:
@@ -2229,34 +2695,51 @@ class Observer:
             self._write_proc_status(self._proc_state)  # preserve operator pause across worker restarts
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
             _log(f"proc status init failed: {exc}")
-        asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
-        asyncio.create_task(self.mark_refresh_loop())  # dashboard freshness (25s mark-to-market)
+        self._spawn_background(self.consume_commands(), "commands", critical=True)
+        self._spawn_background(self.mark_refresh_loop(), "marks", critical=False)
         if self.execution_mode == "live":
-            asyncio.create_task(self.live_reconcile_loop())
-        asyncio.create_task(self._announce())
-        asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
-        asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
-        asyncio.create_task(self.reconcile_loop())    # periodic orphan-check: close copies whose master exited
-        asyncio.create_task(self.wallet_safety_retry_loop())  # confirm/retry source self-liquidations
-        asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
-        asyncio.create_task(self.poll_authoritative_marks())  # exchange markPx drives liquidation
-        asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book, slower)
-        asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
+            self._spawn_background(self.live_reconcile_loop(), "live_reconcile", critical=True)
+            self._spawn_background(self.signal_retry_loop(), "signal_retry", critical=True)
+        self._spawn_background(self._announce(), "announce", critical=False)
+        self._spawn_background(self.prewarm_vol(), "prewarm_vol", critical=False)
+        self._spawn_background(self.vol_refresh_loop(), "vol_refresh", critical=False)
+        self._spawn_background(self.reconcile_loop(), "target_reconcile", critical=True)
+        self._spawn_background(self.wallet_safety_retry_loop(), "wallet_safety", critical=False)
+        self._spawn_background(self.prune_live_fills(), "prune", critical=False)
+        self._spawn_background(self.poll_authoritative_marks(), "authoritative_marks", critical=False)
+        self._spawn_background(self.poll_stock_books(), "stock_books", critical=False)
+        self._spawn_background(self.poll_loop(), "poll", critical=True)
         while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
             try:
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
-                    hb = asyncio.create_task(self.heartbeat())
-                    asyncio.create_task(self.subscribe_bbo())
-                    _log(f"bbo ws connected ({len(self.addrs)} wallets polled, {len(self.open_ep)} open copies)")
-                    async for raw in conn:
-                        self.on_message(raw)
-                    hb.cancel()
+                    hb = asyncio.create_task(self.heartbeat(), name="observer:ws_heartbeat")
+                    subscribe = asyncio.create_task(self.subscribe_bbo(), name="observer:ws_subscribe")
+                    try:
+                        _log(
+                            f"bbo ws connected ({len(self.addrs)} wallets polled, "
+                            f"{len(self.open_ep)} open copies)"
+                        )
+                        async for raw in conn:
+                            self.on_message(raw)
+                    finally:
+                        hb.cancel()
+                        subscribe.cancel()
+                        await asyncio.gather(hb, subscribe, return_exceptions=True)
             except Exception as exc:  # noqa: BLE001
                 self.ws = None
                 self._rollback_db()
                 _log(f"bbo ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
+        for task in list(self._background_tasks.values()):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*list(self._background_tasks.values()), return_exceptions=True)
+        # A signal task may be awaiting a signed order in asyncio.to_thread; cancelling the coroutine does
+        # not stop that worker thread.  Let the bounded exchange call return and persist its terminal intent
+        # before releasing the lease/closing the executor DB.
+        if self._signal_tasks:
+            await asyncio.gather(*list(self._signal_tasks), return_exceptions=True)
         if self.live_executor is not None:
             try:
                 self.live_executor.release_lease()
@@ -2303,15 +2786,65 @@ class Observer:
              f(x.get("px")), f(x.get("sz")), f(x.get("closedPnl")), 1 if x.get("crossed") else 0))
         return cur.rowcount > 0
 
+    def _ensure_execution_signal(self, addr: str, x: dict) -> int:
+        addr = str(addr or "").lower()
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT OR IGNORE INTO execution_signal "
+            "(mode,session_id,addr,coin,tid,source_time_ms,source_order_id,payload_json,state,"
+            "received_at,updated_at) VALUES ('live',?,?,?,?,?,?,?,'pending',?,?)",
+            (
+                self.execution_session_id, addr, str(x["coin"]), int(x["tid"]), int(x["time"]),
+                str(x.get("oid")) if x.get("oid") is not None else None,
+                json.dumps(x, sort_keys=True, separators=(",", ":")), stamp, stamp,
+            ),
+        )
+        row = self.db.execute(
+            "SELECT signal_id FROM execution_signal WHERE mode='live' AND session_id=? "
+            "AND lower(addr)=lower(?) AND tid=?",
+            (self.execution_session_id, addr, int(x["tid"])),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("live_signal_journal_failed")
+        return int(row[0])
+
     # -- core: master fills -> copy actions ----------------------------------
     def process_fill(self, addr: str, x: dict):
         coin = x.get("coin")
         if not coin or x.get("tid") is None:
             return
-        if not self._record_fill(addr, x):
+        inserted = self._record_fill(addr, x)
+        signal_id = None
+        if self.execution_mode == "live":
+            if inserted:
+                signal_id = self._ensure_execution_signal(addr, x)
+            else:
+                # A durable pending/retryable row is owned by signal_retry_loop.  A terminal row is the
+                # real idempotency boundary; raw receipt alone is never proof of execution completion.
+                return
+        elif not inserted:
             return                          # already processed this tid (poll overlap) — idempotent
         self._tally("seen")                 # a fresh target fill reached us (proves ingestion is alive)
         self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), x["time"])  # advance cursor
+        if self.execution_mode == "live":
+            # Live ingestion owns only durable receipt.  A single ordered consumer below owns all strategy,
+            # exchange and ledger mutation, so two target fills cannot interleave commits on self.db.
+            if self._target_self_liquidation(addr, x):
+                event_key = x.get("tid") or f"{coin}:{x['time']}"
+                self._set_wallet_safety(
+                    addr, "pending", event_key=event_key, occurred_at=x["time"],
+                    reason="source_liquidation_pending",
+                    evidence={"coin": coin, "tid": x.get("tid")},
+                )
+                self._spawn_background(
+                    self._confirm_wallet_safety(addr, coin),
+                    f"wallet_safety:{addr[:8]}:{coin}", critical=False,
+                )
+            if coin not in self.sub_coins and coin not in self.stock_coins:
+                self._spawn_background(
+                    self.ensure_coin(coin), f"ensure_coin:{coin}", critical=False,
+                )
+            return signal_id
         t = x["time"]
         sz = f(x.get("sz"))
         signed = sz if x.get("side") == "B" else -sz
@@ -2328,13 +2861,20 @@ class Observer:
                 reason="source_liquidation_pending",
                 evidence={"coin": coin, "tid": x.get("tid")},
             )
-            asyncio.create_task(self._confirm_wallet_safety(addr, coin))
+            self._spawn_background(
+                self._confirm_wallet_safety(addr, coin),
+                f"wallet_safety:{addr[:8]}:{coin}", critical=False,
+            )
         if coin not in self.sub_coins and coin not in self.stock_coins:
-            asyncio.create_task(self.ensure_coin(coin))   # route to its pricing source (bbo / l2Book)
+            self._spawn_background(
+                self.ensure_coin(coin), f"ensure_coin:{coin}", critical=False,
+            )
 
-        self._dispatch_fill(addr, coin, key, t, signed, pos0, pos1, px, liq, oid)
+        self._dispatch_fill(
+            addr, coin, key, t, signed, pos0, pos1, px, liq, oid, signal_id=signal_id,
+        )
 
-    def _dispatch_fill(self, addr, coin, key, t, signed, pos0, pos1, px, liq, oid):
+    def _dispatch_fill(self, addr, coin, key, t, signed, pos0, pos1, px, liq, oid, *, signal_id=None):
         book = self.taker
         transition = classify_fill_transition(pos0, pos1)
         target_in_position = abs(pos1) >= config.FLAT
@@ -2342,31 +2882,62 @@ class Observer:
         side = "long" if pos1 > 0 else "short"
         risk_block = self._new_exposure_block_reason(addr, coin, book, side=side) if target_in_position else None
         ep = book.open_ep.get(key)
+        if ep is not None and ep.get("entry_px") is None and transition in ("open", "flip"):
+            ep["open_oid"] = oid
+            self._schedule_signal_task(
+                signal_id, self._resolve_entry(addr, coin, ep, t, px, book), name="resume_open",
+            )
+            return
         if ep is None:
             opening_lifecycle = transition in ("open", "flip")
             if opening_lifecycle and target_in_position:
                 if cooldown_until:
                     self._tally("skip_manual_cooldown", book)
+                    if signal_id is not None:
+                        self._mark_signal(signal_id, "policy_skipped", code="manual_cooldown")
                 elif risk_block:
                     self._tally(f"skip_{risk_block}", book)
+                    if signal_id is not None:
+                        self._mark_signal(signal_id, "policy_skipped", code=risk_block)
                 elif (addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                         and not self.paused           # dashboard pause = no new opens (existing keep to close)
                         and self._sector_allowed(addr, coin)):
-                    self._start_source_open(addr, coin, t, px, pos1, oid, book)
+                    self._start_source_open(
+                        addr, coin, t, px, pos1, oid, book, signal_id=signal_id,
+                    )
                 else:
+                    reason = ("paused" if self.paused else
+                              "heldoff" if addr in self.held_off else
+                              "sector_disabled" if not self._sector_allowed(addr, coin) else
+                              "midway")
                     self._tally("skip_paused" if self.paused else
                                 "skip_heldoff" if addr in self.held_off else
                                 "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
                                 "skip_midway", book)
+                    if signal_id is not None:
+                        if self.execution_state == "reconcile_required":
+                            self._mark_signal(
+                                signal_id, "retryable", code="RECONCILE_REQUIRED",
+                                error="live reconciliation required", retry=True,
+                            )
+                        else:
+                            self._mark_signal(signal_id, "policy_skipped", code=reason)
             elif not target_in_position:
-                pass                                    # target closed a position we never held — nothing to copy
+                if signal_id is not None:
+                    self._mark_signal(signal_id, "completed", code="NO_MANAGED_POSITION")
             else:                                       # a fresh open we chose not to take → tally the reason
-                self._tally("skip_manual_cooldown" if cooldown_until else
-                            f"skip_{risk_block}" if risk_block else
-                            "skip_paused" if self.paused else
-                            "skip_heldoff" if addr in self.held_off else
-                            "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
-                            "skip_midway", book)         # midway = target already in the position when we saw it
+                reason = ("manual_cooldown" if cooldown_until else risk_block if risk_block else
+                          "paused" if self.paused else "heldoff" if addr in self.held_off else
+                          "sector_disabled" if not self._sector_allowed(addr, coin) else "midway")
+                self._tally(f"skip_{reason}", book)
+                if signal_id is not None:
+                    if self.execution_state == "reconcile_required":
+                        self._mark_signal(
+                            signal_id, "retryable", code="RECONCILE_REQUIRED",
+                            error="live reconciliation required", retry=True,
+                        )
+                    else:
+                        self._mark_signal(signal_id, "policy_skipped", code=reason)
             return
         # Persist every observed target size, including tiny reductions that the 10% mirror step suppresses.
         # The protected-tail exit therefore measures the target's true cumulative reduction, not our actions.
@@ -2377,7 +2948,11 @@ class Observer:
         )
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
-            asyncio.create_task(self._apply_flip(addr, coin, ep, t, px, pos0, pos1, liq, oid, book))
+            self._schedule_signal_task(
+                signal_id,
+                self._apply_flip(addr, coin, ep, t, px, pos0, pos1, liq, oid, book),
+                name="flip",
+            )
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if transition == "add":
@@ -2399,6 +2974,8 @@ class Observer:
                     ),
                 )
                 self.db.commit()
+                if signal_id is not None:
+                    self._mark_signal(signal_id, "completed", code="OPEN_ORDER_EXTENSION")
                 return
             if oid is not None and oid in ep.get("seen_oids", ()) and oid not in add_orders:
                 m_now = abs(pos1)
@@ -2413,6 +2990,8 @@ class Observer:
                         (ep["master_open_px"], ep["master_peak"], abs(pos1), ep["pos_id"]),
                     )
                     self.db.commit()
+                if signal_id is not None:
+                    self._mark_signal(signal_id, "completed", code="ORDER_ALREADY_CONSUMED")
                 return
             if (
                 self.paused
@@ -2424,23 +3003,48 @@ class Observer:
                             "skip_heldoff_add" if addr in self.held_off else
                             "skip_retention_probation_add" if addr in self.entry_frozen else
                             "skip_sector_add", book)
+                if signal_id is not None:
+                    if self.execution_state == "reconcile_required":
+                        self._mark_signal(
+                            signal_id, "retryable", code="RECONCILE_REQUIRED",
+                            error="live reconciliation required", retry=True,
+                        )
+                    else:
+                        self._mark_signal(signal_id, "policy_skipped", code="ADD_BLOCKED")
                 return
-            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, oid, book))
+            self._schedule_signal_task(
+                signal_id, self._apply_add(addr, coin, ep, t, px, signed, pos1, oid, book),
+                name="add",
+            )
         else:
-            asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
-                                                   closing=abs(pos1) < config.FLAT, liq=liq, oid=oid, book=book))
+            self._schedule_signal_task(
+                signal_id,
+                self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
+                                   closing=abs(pos1) < config.FLAT, liq=liq, oid=oid, book=book),
+                name="reduce",
+            )
 
-    def _start_source_open(self, addr, coin, t, px, pos1, oid, book=None, *, forced_entry_px=None):
+    def _start_source_open(self, addr, coin, t, px, pos1, oid, book=None, *, forced_entry_px=None,
+                           signal_id=None):
         """Follow every source opening signal; our own sizing surface owns the resulting order amount."""
         book = book or self.taker
         opening_oids = set()
         if oid is not None:
             opening_oids.add(oid)
-        return self._open_position(
+        ep = self._open_position(
             addr, coin, t, px, pos1, oid, book,
             forced_entry_px=forced_entry_px,
             source_open_oids=opening_oids,
+            schedule_entry=signal_id is None,
         )
+        if signal_id is not None:
+            if ep is None:
+                self._mark_signal(signal_id, "policy_skipped", code="OPEN_POLICY")
+            else:
+                self._schedule_signal_task(
+                    signal_id, self._resolve_entry(addr, coin, ep, t, px, book), name="open",
+                )
+        return ep
 
     async def _apply_flip(self, addr, coin, ep, t, master_px, pos0, pos1, liq, oid,
                           book=None, forced_px=None):
@@ -2458,10 +3062,16 @@ class Observer:
         if risk_block:
             self._tally(f"skip_{risk_block}", book)
             return
-        self._start_source_open(addr, coin, t, master_px, pos1, oid, book, forced_entry_px=forced_px)
+        new_ep = self._open_position(
+            addr, coin, t, master_px, pos1, oid, book,
+            forced_entry_px=forced_px, source_open_oids=({oid} if oid is not None else set()),
+            schedule_entry=False,
+        )
+        if new_ep is not None:
+            await self._resolve_entry(addr, coin, new_ep, t, master_px, book)
 
     def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None,
-                       source_open_oids=None):
+                       source_open_oids=None, schedule_entry=True):
         book = book or self.taker
         side = "long" if pos1 > 0 else "short"
         risk_block = self._new_exposure_block_reason(addr, coin, book, side=side)
@@ -2496,7 +3106,11 @@ class Observer:
         if forced_entry_px is not None:
             ep["forced_entry_px"] = forced_entry_px
         book.open_ep[(addr, coin)] = ep
-        asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px, book))
+        if schedule_entry:
+            self._spawn_background(
+                self._resolve_entry(addr, coin, ep, t, px, book),
+                f"entry:{addr[:8]}:{coin}", critical=False,
+            )
         return ep
 
     async def _resolve_entry(self, addr, coin, ep, t, master_px, book=None):
@@ -2546,6 +3160,8 @@ class Observer:
                 self.db.commit()
                 self._tally("skip_live_reconcile", book)
                 _log(f"live open {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                if self.execution_mode == "live" and _SOURCE_EVENT_ID.get():
+                    raise RetryableSignalError("live_open_reconciliation_unavailable") from exc
                 return
             # MARGIN_EQUITY_PCT owns both the per-order base and aggregate fresh-entry budget. Once the
             # budget is full, adds may still use remaining real cash because they preserve copy fidelity.
@@ -2676,23 +3292,25 @@ class Observer:
                         source_time_ms=t, source_order_id=ep.get("open_oid"),
                     )
                 except Exception as exc:  # noqa: BLE001 - state machine owns the sanitized code
-                    state = self.db.execute(
-                        "SELECT state FROM execution_control WHERE id=1"
-                    ).fetchone()
-                    if not state or state[0] != "reconcile_required":
-                        self.db.execute(
-                            f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],),
-                        )
-                        book.open_ep.pop((addr, coin), None)
+                    self.db.execute(
+                        f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],),
+                    )
+                    book.open_ep.pop((addr, coin), None)
                     self.db.commit()
                     self._tally("skip_live_execution", book)
                     _log(f"live open {coin} failed closed: {str(exc)[:120]}")
+                    if _SOURCE_EVENT_ID.get():
+                        raise RetryableSignalError("live_open_execution_failed") from exc
                     return
                 if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
                     self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
                     book.open_ep.pop((addr, coin), None)
                     self.db.commit()
                     self._tally("skip_live_unfilled", book)
+                    if _SOURCE_EVENT_ID.get():
+                        raise TerminalSignalError(
+                            f"live_open_unfilled:{getattr(execution, 'error_code', None) or 'no_fill'}"
+                        )
                     return
                 px = float(execution.average_px)
                 size = float(execution.filled_size)
@@ -2735,6 +3353,21 @@ class Observer:
         """
         book = book or self.taker
         async with ep["lock"]:
+            prior_master_open_px = ep.get("master_open_px")
+            prior_master_peak = ep.get("master_peak", 0.0)
+            prior_add_order = None
+            if oid is not None and oid in ep.setdefault("add_orders", {}):
+                prior_add_order = dict(ep["add_orders"][oid])
+
+            def _restore_retry_state():
+                ep["master_open_px"] = prior_master_open_px
+                ep["master_peak"] = prior_master_peak
+                if oid is not None:
+                    if prior_add_order is None:
+                        ep.setdefault("add_orders", {}).pop(oid, None)
+                    else:
+                        ep.setdefault("add_orders", {})[oid] = prior_add_order
+
             if str(addr or "").lower() in self.safety_frozen:
                 self._tally("skip_wallet_safety_frozen", book)
                 return False
@@ -2853,6 +3486,9 @@ class Observer:
                     except Exception as exc:
                         self._tally("skip_live_reconcile_add", book)
                         _log(f"live add {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                        if self.execution_mode == "live" and _SOURCE_EVENT_ID.get():
+                            _restore_retry_state()
+                            raise RetryableSignalError("live_add_reconciliation_unavailable") from exc
                         return _observe_only()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
@@ -2899,6 +3535,9 @@ class Observer:
                     except Exception as exc:
                         self._tally("skip_live_reconcile_add", book)
                         _log(f"live add {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                        if self.execution_mode == "live" and _SOURCE_EVENT_ID.get():
+                            _restore_retry_state()
+                            raise RetryableSignalError("live_add_reconciliation_unavailable") from exc
                         return _observe_only()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
@@ -2974,9 +3613,17 @@ class Observer:
                 except Exception as exc:  # noqa: BLE001
                     self._tally("skip_live_add_execution", book)
                     _log(f"live add {coin} failed closed: {str(exc)[:120]}")
+                    if _SOURCE_EVENT_ID.get():
+                        _restore_retry_state()
+                        raise RetryableSignalError("live_add_execution_failed") from exc
                     return _observe_only(final=True)
                 if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
                     self._tally("skip_live_add_unfilled", book)
+                    if _SOURCE_EVENT_ID.get():
+                        _restore_retry_state()
+                        raise TerminalSignalError(
+                            f"live_add_unfilled:{getattr(execution, 'error_code', None) or 'no_fill'}"
+                        )
                     return _observe_only(final=True)
                 px = float(execution.average_px)
                 live_add_size = float(execution.filled_size)
@@ -3140,11 +3787,15 @@ class Observer:
                 except Exception as exc:  # noqa: BLE001
                     self._tally("skip_live_reduce_execution", book)
                     _log(f"live reduce {coin} failed closed: {str(exc)[:120]}")
+                    if _SOURCE_EVENT_ID.get():
+                        raise RetryableSignalError("live_reduce_execution_failed") from exc
                     if requested_full_close:
                         self._schedule_live_full_close_retry(addr, coin, ep, book)
                     return
                 if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
                     self._tally("skip_live_reduce_unfilled", book)
+                    if _SOURCE_EVENT_ID.get():
+                        raise RetryableSignalError("live_reduce_unfilled")
                     if requested_full_close:
                         self._schedule_live_full_close_retry(addr, coin, ep, book)
                     return
@@ -3242,6 +3893,8 @@ class Observer:
                 )
             if (self.execution_mode == "live" and requested_full_close and not closing
                     and ep["rem_size"] > config.FLAT):
+                if _SOURCE_EVENT_ID.get():
+                    raise RetryableSignalError("live_full_close_partial")
                 self._schedule_live_full_close_retry(addr, coin, ep, book)
 
     def _schedule_live_full_close_retry(self, addr, coin, ep, book):
@@ -3254,7 +3907,10 @@ class Observer:
         if (addr, coin) not in book.open_ep or ep.get("rem_size", 0.0) <= config.FLAT:
             return
         ep["close_retry_scheduled"] = True
-        asyncio.create_task(self._retry_live_full_close(addr, coin, ep, book))
+        self._spawn_background(
+            self._retry_live_full_close(addr, coin, ep, book),
+            f"full_close_retry:{addr[:8]}:{coin}", critical=False,
+        )
 
     async def _retry_live_full_close(self, addr, coin, ep, book):
         """Bounded continuation for a target full-close whose IOC only partially filled."""
@@ -3293,7 +3949,10 @@ class Observer:
             if c == coin and ep.get("liq_px") and ep["rem_size"] > config.FLAT and not ep.get("liquidating"):
                 hit = mark <= ep["liq_px"] if ep["side"] == "long" else mark >= ep["liq_px"]
                 if hit:
-                    asyncio.create_task(self._liquidate(a, coin, ep, book))
+                    self._spawn_background(
+                        self._liquidate(a, coin, ep, book),
+                        f"paper_liquidate:{a[:8]}:{coin}", critical=False,
+                    )
 
     def _smart_take_profit_decision(self, coin, ep, mark_px):
         sigma = self._sigma(coin)
@@ -3349,8 +4008,9 @@ class Observer:
                 ep["smart_tp_state_write_ms"] = stamp
             if decision.trigger and not ep.get("smart_tp_inflight"):
                 ep["smart_tp_inflight"] = True
-                asyncio.create_task(
-                    self._execute_smart_take_profit(addr, coin, ep, mark_px, decision.stage, book)
+                self._spawn_background(
+                    self._execute_smart_take_profit(addr, coin, ep, mark_px, decision.stage, book),
+                    f"smart_tp:{addr[:8]}:{coin}:{decision.stage}", critical=False,
                 )
         if dirty:
             self.db.executemany(
@@ -3403,27 +4063,45 @@ class Observer:
         """SIGNAL fetch: REST-pull the wallet's fills since `since` (a few seconds back — the live
         poll window, NOT history) and replay through the idempotent process_fill (dedup by tid).
         aggregateByTime MERGES an order's partial fills into one TRADE-level row, so (a) one sliced
-        order = one record (not N), and (b) it isn't mis-counted as N scale-ins. The cursor lives
-        only in memory (self.last_fill_ms): startup is strictly forward-only — we never catch up on
-        fills we missed while down, because copying an entry we didn't see live is meaningless."""
+        order = one record (not N), and (b) it isn't mis-counted as N scale-ins. Live persists the
+        last successfully journalled API window and resumes it after a worker restart; the durable
+        signal inbox then decides whether a recovered fill is executable, policy-skipped or retried."""
         page = await asyncio.to_thread(rest.post_soft, {
             "type": "userFillsByTime", "user": addr, "startTime": int(max(0, since)), "aggregateByTime": True})
-        if isinstance(page, list) and page:
-            previous_cursor = self.last_fill_ms.get(addr)
-            try:
-                for x in sorted(page, key=lambda fl: fl["time"]):
-                    self.process_fill(addr, x)
-                self.db.commit()
-            except Exception:
-                # A scanner write lock must never turn a fetched-but-uncommitted fill into a skipped fill.
-                # Restore the exact prior cursor so the next round re-fetches the whole batch; tid dedup makes
-                # this safe even if an inner path committed one row before a later row failed.
-                self._rollback_db()
-                if previous_cursor is None:
-                    self.last_fill_ms.pop(addr, None)
-                else:
-                    self.last_fill_ms[addr] = previous_cursor
-                raise
+        if not isinstance(page, list):
+            # post_soft deliberately returns None after its bounded transport retries. Treat that as a real
+            # polling failure: leave the cursor untouched and make degradation visible in Observer logs.
+            raise RuntimeError("target_fills_unavailable")
+        previous_cursor = self.last_fill_ms.get(addr)
+        try:
+            for x in sorted(page, key=lambda fl: fl["time"]):
+                self.process_fill(addr, x)
+            # The response is an authoritative view through this receive time.  Persisting it closes
+            # the deploy/crash gap while the normal overlap still absorbs boundary races.
+            next_cursor = max(
+                int(previous_cursor or 0), now_ms(),
+                max((int(x.get("time") or 0) for x in page), default=0),
+            )
+            self.last_fill_ms[addr] = next_cursor
+            if self.execution_mode == "live":
+                self.db.execute(
+                    "INSERT INTO observer_target_cursor "
+                    "(mode,session_id,addr,last_fill_ms,updated_at) VALUES ('live',?,?,?,?) "
+                    "ON CONFLICT(mode,session_id,addr) DO UPDATE SET "
+                    "last_fill_ms=MAX(last_fill_ms,excluded.last_fill_ms),updated_at=excluded.updated_at",
+                    (self.execution_session_id, addr, next_cursor, now_iso()),
+                )
+            self.db.commit()
+        except Exception:
+            # A scanner write lock must never turn a fetched-but-uncommitted fill into a skipped fill.
+            # Restore the exact prior cursor so the next round re-fetches the whole batch; tid dedup makes
+            # this safe even if an inner path committed one row before a later row failed.
+            self._rollback_db()
+            if previous_cursor is None:
+                self.last_fill_ms.pop(addr, None)
+            else:
+                self.last_fill_ms[addr] = previous_cursor
+            raise
 
 
 # ------------------------------------------------------------------------- loaders

@@ -7,7 +7,7 @@ This repository is organized as a multi-product copy-trade workspace. The active
 - leaderboard discovery and wallet profiling;
 - copyability scoring and canonical copy replay;
 - a bounded quality pre-Core pool followed by count-specific adaptive portfolio tuning and strict publication;
-- a forward-only paper Observer;
+- a mode-bound Paper/Mainnet Observer with durable Live signal recovery;
 - a read-oriented Dashboard API and React dashboard;
 - local/VPS process and deployment tooling.
 
@@ -515,17 +515,18 @@ through those retries; only markets still missing after all five attempts are cl
 
 ## Observer and execution model
 
-- Observer is forward-only. It starts each target cursor at the current time and never backfills historical
-  fills into a new copy book.
+- A target newly added to Observer starts at the current time and never backfills historical fills into a new
+  copy book. Within an active Mainnet session, source cursors and received fills are durable: a worker restart
+  resumes the bounded polling window and retries every non-terminal signal with deterministic order ids.
 - Signal source is REST `userFillsByTime`; standard-perp pricing uses WS BBO and builder/stock pricing uses REST
   `l2Book`.
 - Observer normally loads parameters, enabled Core targets, account context and sector policies from the active
   immutable strategy revision whose generation matches the current published selection. The direct published-
   selection/params loader is a rolling-migration fallback only. Existing positions for removed, disabled, or
   no-longer-Core wallets stay polled and managed exit-only.
-- Copy state is persisted in `copy_position` and `copy_action`. Paper execution is taker-only; maker execution
-  will be designed separately before a real-money deployment. Live `copy_position` PnL includes realized closed
-  PnL plus unrealized PnL for open rows.
+- Paper state is persisted in `copy_position`/`copy_action`; Mainnet state is independently persisted in
+  `live_copy_position`/`live_copy_action`. Both are taker-only. Live PnL includes realized closed PnL plus
+  unrealized PnL for open rows.
 - The source-wallet membership high-water breaker is retired. Observer and canonical replay do not freeze,
   reduce or exit a wallet merely because it gave back prior profit; historical `wallet_risk_state` rows and
   `WALLET_HWM_*` values are migration-only and cannot affect qualification or execution. Path-risk telemetry,

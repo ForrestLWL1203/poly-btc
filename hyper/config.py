@@ -84,13 +84,14 @@ SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means 
 CORE_SEARCH_ROBUST_FINALISTS = 12
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
-POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
-#                            it) so a fill landing between poll rounds isn't missed. This is the ONLY
-#                            look-back — the observer is forward-only, it never catches up on history.
-#                            (Widened from 5s so a slower round can't slip a fill past the boundary.)
+POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet cursor (tid-dedup absorbs it) so a fill
+#                            landing between poll rounds isn't missed. New targets start at now; active Live
+#                            sessions persist the cursor and durable signal inbox across worker restarts.
 POLL_CONCURRENCY = 10      # signal-poll fan-out: fetch this many wallets' fills concurrently. The global
 #                            pacer still spaces the SPAWN of each POST, but the network round-trips overlap
 #                            instead of running serially → a round's wall-time ≈ (N × pace), not (N × (pace+RTT)).
+LIVE_SIGNAL_RETRY_BASE_S = 2.0   # durable Live signal inbox retry; exponential, capped below
+LIVE_SIGNAL_RETRY_MAX_S = 30.0
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap
 ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5-minute snapshots)
 #                                window; the rest is audit) — keeps the only unbounded table bounded
@@ -259,9 +260,9 @@ VOL_REFRESH_S = 43200       # re-fetch each tracked coin's σ at most this often
 VOL_FALLBACK_SIGMA = 0.07   # neutral MID-tier σ when a valid market has too little closed-candle history.
 VOL_PREWARM_TOP = 30        # at startup, warm σ for the top-N by 24h volume in crypto + EACH builder dex
 
-# PERIODIC orphan reconcile: forward-only polling normally catches a master's close in real time, but a
-# missed fill (poll gap / aggregation quirk / blip) would leave us dumb-holding a position the master
-# already exited. Re-run the startup reconcile this often so an orphan is closed within minutes.
+# PERIODIC orphan reconcile: polling normally catches a master's close in real time, but an upstream API
+# omission/aggregation quirk can still leave us holding after the master exits. Re-run startup reconcile
+# this often so an orphan is closed within minutes.
 RECONCILE_INTERVAL_S = 300  # 5 min
 #                             (the liquid coins our targets most likely trade) → no first-open latency,
 #                             warm restart. The long tail is still lazy-fetched on first fill.

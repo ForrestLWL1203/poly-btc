@@ -178,6 +178,57 @@ class LiveExecutorTests(unittest.TestCase):
         )
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
 
+    def test_paused_session_may_recover_existing_fill_without_new_submission(self):
+        broker = FakeLiveBroker()
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+        first = self.execute(executor)
+        self.db.execute(
+            "UPDATE execution_session SET state='paused' WHERE session_id='live-test'"
+        )
+        self.db.execute("UPDATE execution_control SET state='paused' WHERE id=1")
+        self.db.commit()
+
+        recovered = self.execute(executor)
+
+        self.assertEqual(recovered.cloids, first.cloids)
+        self.assertAlmostEqual(recovered.filled_size, first.filled_size)
+        self.assertEqual(broker.submit_calls, 1)
+
+    def test_verified_canceled_ambiguous_order_retries_only_remaining_size(self):
+        broker = FakeLiveBroker()
+        cloid = deterministic_cloid(
+            "live-test", "revision-one", "0xsource", "source-fill-1", "7",
+            "BTC", "open", 1, 0,
+        )
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_order_intent "
+            "(cloid,session_id,strategy_revision,source_address,source_fill_id,source_order_id,"
+            "source_time_ms,action_seq,action,coin,side,reduce_only,leverage,requested_size,"
+            "requested_limit_px,state,error_code,created_at,updated_at) "
+            "VALUES (?,'live-test','revision-one','0xsource','source-fill-1','7',123456789,1,"
+            "'open','BTC','buy',0,10,.2,100,'ambiguous','transport_ambiguous',?,?)",
+            (cloid, stamp, stamp),
+        )
+        self.db.commit()
+        broker.statuses[cloid] = {
+            "status": "order",
+            "order": {"status": "canceled", "order": {"oid": 999, "status": "canceled"}},
+        }
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(executor)
+
+        self.assertAlmostEqual(result.filled_size, 0.2)
+        self.assertEqual(broker.submit_calls, 1)
+        self.assertEqual(len(result.cloids), 2)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state FROM execution_order_intent WHERE cloid=?", (cloid,),
+            ).fetchone()[0],
+            "canceled",
+        )
+
     def test_lease_reclaims_immediately_when_previous_worker_pid_is_dead(self):
         self.db.execute(
             "INSERT INTO execution_lease (id,owner,acquired_at,heartbeat_at,expires_at_ms) "

@@ -348,8 +348,10 @@ class LiveExecutor:
                 )
             elif queried_state in TERMINAL_INTENT_STATES or queried_state == "resting":
                 self.db.execute(
-                    "UPDATE execution_order_intent SET state=?,oid=COALESCE(oid,?),updated_at=? WHERE cloid=?",
-                    (queried_state, status_oid, now_iso(), cloid),
+                    "UPDATE execution_order_intent SET state=?,oid=COALESCE(oid,?),"
+                    "error_code=CASE WHEN ?='canceled' THEN NULL ELSE error_code END,updated_at=? "
+                    "WHERE cloid=?",
+                    (queried_state, status_oid, queried_state, now_iso(), cloid),
                 )
             elif current_state != "ambiguous":
                 # A durable pre-send row with no terminal evidence is
@@ -606,6 +608,15 @@ class LiveExecutor:
             (cloid,),
         ).fetchone()
 
+    def _logical_cloid(
+        self, *, coin, action, source_address, source_fill_id, source_order_id,
+        action_seq, attempt_index,
+    ) -> str:
+        return deterministic_cloid(
+            self.session["session_id"], self.session["strategy_revision"], source_address.lower(),
+            source_fill_id, source_order_id, coin, action, int(action_seq), int(attempt_index),
+        )
+
     def _submit_attempt(
         self,
         *,
@@ -622,9 +633,10 @@ class LiveExecutor:
         action_seq: int,
         attempt_index: int,
     ) -> LiveExecutionResult:
-        cloid = deterministic_cloid(
-            self.session["session_id"], self.session["strategy_revision"], source_address.lower(),
-            source_fill_id, source_order_id, coin, action, int(action_seq), int(attempt_index),
+        cloid = self._logical_cloid(
+            coin=coin, action=action, source_address=source_address,
+            source_fill_id=source_fill_id, source_order_id=source_order_id,
+            action_seq=action_seq, attempt_index=attempt_index,
         )
         existing = self._existing_intent(cloid)
         if existing:
@@ -749,32 +761,49 @@ class LiveExecutor:
             if not reconcile.get("ok"):
                 raise RuntimeError("live_reconcile_required")
             mark = self._mid(coin)
+            recovery_cloids = {
+                attempt_index: self._logical_cloid(
+                    coin=coin, action=action, source_address=source_address,
+                    source_fill_id=source_fill_id, source_order_id=source_order_id,
+                    action_seq=action_seq, attempt_index=attempt_index,
+                )
+                for attempt_index in range(int(config.LIVE_ORDER_MAX_ATTEMPTS))
+            }
+            recovery_only = False
             if not reduce_only:
-                allowed_margin = self._increase_margin_cap(coin, size * mark / leverage)
-                size = min(size, allowed_margin * leverage / mark)
-                if size * mark < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
-                    raise RuntimeError("NO_EXECUTABLE_CAPACITY")
-                leverage_result = None
-                for leverage_attempt in range(int(config.LIVE_QUOTE_READ_ATTEMPTS)):
-                    try:
-                        leverage_result = self.coordinator.run_signed(
-                            lambda: self.broker.set_isolated_leverage(coin, int(leverage))
-                        )
-                        break
-                    except SigningClockError:
-                        raise RuntimeError("live_signing_clock_invalid") from None
-                    except BrokerError:
-                        if leverage_attempt + 1 < int(config.LIVE_QUOTE_READ_ATTEMPTS):
-                            time.sleep(0.05)
-                            continue
-                        raise RuntimeError("live_leverage_status_ambiguous") from None
-                if not leverage_result.ok:
-                    raise RuntimeError(f"live_leverage_rejected:{leverage_result.error_code}")
+                state = self._refresh_session_state()
+                recovery_only = state not in INCREASE_STATES
+                if recovery_only:
+                    if not any(self._existing_intent(cloid) for cloid in recovery_cloids.values()):
+                        raise RuntimeError(f"live_increase_blocked:{state}")
+                else:
+                    allowed_margin = self._increase_margin_cap(coin, size * mark / leverage)
+                    size = min(size, allowed_margin * leverage / mark)
+                    if size * mark < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
+                        raise RuntimeError("NO_EXECUTABLE_CAPACITY")
+                    leverage_result = None
+                    for leverage_attempt in range(int(config.LIVE_QUOTE_READ_ATTEMPTS)):
+                        try:
+                            leverage_result = self.coordinator.run_signed(
+                                lambda: self.broker.set_isolated_leverage(coin, int(leverage))
+                            )
+                            break
+                        except SigningClockError:
+                            raise RuntimeError("live_signing_clock_invalid") from None
+                        except BrokerError:
+                            if leverage_attempt + 1 < int(config.LIVE_QUOTE_READ_ATTEMPTS):
+                                time.sleep(0.05)
+                                continue
+                            raise RuntimeError("live_leverage_status_ambiguous") from None
+                    if not leverage_result.ok:
+                        raise RuntimeError(f"live_leverage_rejected:{leverage_result.error_code}")
 
             remaining = size
             results: list[LiveExecutionResult] = []
             for attempt_index in range(int(config.LIVE_ORDER_MAX_ATTEMPTS)):
                 if remaining <= 1e-12:
+                    break
+                if recovery_only and not self._existing_intent(recovery_cloids[attempt_index]):
                     break
                 result = self._submit_attempt(
                     coin=coin, is_buy=is_buy, requested_size=remaining, leverage=leverage,

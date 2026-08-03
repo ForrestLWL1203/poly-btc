@@ -18,6 +18,7 @@ import threading
 from hyper import config, params, storage
 from hyper.discovery import frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
+from hyper.execution.mode import selected_book
 from hyper.market import rest
 from hyper.ops import paper_reset, procman, scan_lock, storage_guard
 from hyper.util import now_iso
@@ -49,8 +50,9 @@ def _start_adaptive_pace(db_path, slow_interval):
                 "SELECT generation FROM scan_generation WHERE status='published' AND complete=1 "
                 "AND is_current=1 ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            position_table = selected_book(con).position
             open_n = con.execute(
-                "SELECT COUNT(*) FROM copy_position WHERE status='open'"
+                f"SELECT COUNT(*) FROM {position_table} WHERE status='open'"
             ).fetchone()[0]
             if generation:
                 target_n = con.execute(

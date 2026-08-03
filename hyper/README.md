@@ -15,7 +15,7 @@ hyper/
 ├── copy/       fill normalization, canonical replay, copy policy, position transitions
 ├── selection/  wallet scoring, Core formation, optimization, strategy revisions
 ├── market/     Hyperliquid REST/WS, market universe, price paths, volatility
-├── execution/  forward-only Observer, Paper/Live broker, order recovery, and risk assessment
+├── execution/  mode-bound Observer, Paper/Live broker, durable signal/order recovery, and risk assessment
 ├── ops/        process control, Paper reset, storage guard
 ├── cli/        stable command-line entry points
 ├── launcher/   local/VPS deployment tooling
@@ -45,8 +45,8 @@ Final strict individual/shared Copy
     ↓ tuned-surface Top32 certification → final Top16/prefix → exact-Core retune/closure
     ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
-    ↓ forward-only Observer
-Paper copy positions, PnL, and execution audit
+    ↓ mode-bound Observer (new targets start now; active Live sessions recover durably)
+Independent Paper/Mainnet positions, PnL, and execution audit
 ```
 
 The Dashboard and API expose the same published generation. `watchlist` is a derived ranked view; it is not the
@@ -557,7 +557,9 @@ the local mock dashboard and inspect the rendered result.
 ## Operations and safety
 
 - Dashboard writes only commands/params; workers own business-state writes.
-- Observer is forward-only and has priority for Hyperliquid REST weight.
+- Newly-added targets start forward-only. Active Mainnet sessions persist polling cursors and a terminal-state
+  signal inbox, so a worker/SQLite interruption cannot silently consume a received target fill. Observer has
+  priority for Hyperliquid REST weight.
 - With no executable Observer work, Scanner switches from a fixed request interval to a 95%-budget weighted
   token bucket and backs off automatically on HTTP 429. Once Observer has a Core target or open position, Scanner
   immediately returns to its configured slow interval.

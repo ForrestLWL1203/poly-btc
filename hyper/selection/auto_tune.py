@@ -31,6 +31,7 @@ from hyper.copy.economics import (
 )
 from hyper.copy.sector import parse_json_obj
 from hyper.market import generation_market, price_path
+from hyper.execution.mode import selected_book
 from hyper.util import f, now_iso
 from . import state as selection, strategy_revision
 
@@ -1656,8 +1657,10 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
     shadow_days = max(0.0, (now_ts - (_iso_epoch(started_at) or now_ts)) / 86400.0)
     if addrs:
         marks = ",".join("?" for _ in addrs)
+        position_table = selected_book(db).position
         row = db.execute(
-            f"SELECT COUNT(*) FROM copy_position WHERE status!='open' AND lower(addr) IN ({marks})",
+            f"SELECT COUNT(*) FROM {position_table} WHERE status!='open' "
+            f"AND lower(addr) IN ({marks})",
             tuple(sorted(addrs)),
         ).fetchone()
         forward_closed = int((row[0] if row else 0) or 0)

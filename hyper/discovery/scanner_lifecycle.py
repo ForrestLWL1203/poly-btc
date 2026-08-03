@@ -8,6 +8,7 @@ import time
 from typing import Iterable
 
 from hyper import config
+from hyper.execution.mode import selected_book
 from hyper.selection import core_retention
 
 
@@ -285,6 +286,7 @@ def prune_discovery_cache(db, *, attempts: int = 3, retry_sleep_s: float = 2.0):
 
 
 def _prune_discovery_cache_once(db):
+    position_table = selected_book(db).position
     db.execute("CREATE TEMP TABLE IF NOT EXISTS prune_discovery_addrs (addr TEXT PRIMARY KEY)")
     db.execute("DELETE FROM prune_discovery_addrs")
     db.execute(
@@ -292,7 +294,7 @@ def _prune_discovery_cache_once(db):
         "SELECT p.addr FROM profile p "
         "WHERE COALESCE(p.status,'')!='active' "
         "AND NOT EXISTS (SELECT 1 FROM leaderboard l WHERE l.addr=p.addr AND l.is_candidate=1) "
-        "AND NOT EXISTS (SELECT 1 FROM copy_position cp WHERE cp.addr=p.addr AND cp.status='open') "
+        f"AND NOT EXISTS (SELECT 1 FROM {position_table} cp WHERE cp.addr=p.addr AND cp.status='open') "
         "AND NOT EXISTS (SELECT 1 FROM follow_selection fs JOIN scan_generation sg "
         "ON sg.generation=fs.generation WHERE fs.addr=p.addr AND sg.is_current=1 "
         "AND fs.role IN ('core','challenger','exit_only'))"
@@ -310,7 +312,7 @@ def _prune_discovery_cache_once(db):
         "DELETE FROM candidate_fills WHERE addr NOT IN "
         "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
         " UNION SELECT addr FROM profile WHERE status='active'"
-        " UNION SELECT addr FROM copy_position WHERE status='open'"
+        f" UNION SELECT addr FROM {position_table} WHERE status='open'"
         " UNION SELECT fs.addr FROM follow_selection fs JOIN scan_generation sg "
         " ON sg.generation=fs.generation WHERE sg.is_current=1 "
         " AND fs.role IN ('core','challenger','exit_only'))"
@@ -321,7 +323,7 @@ def _prune_discovery_cache_once(db):
         "DELETE FROM fill_cache_state WHERE addr NOT IN "
         "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
         " UNION SELECT addr FROM profile WHERE status='active'"
-        " UNION SELECT addr FROM copy_position WHERE status='open'"
+        f" UNION SELECT addr FROM {position_table} WHERE status='open'"
         " UNION SELECT fs.addr FROM follow_selection fs JOIN scan_generation sg "
         " ON sg.generation=fs.generation WHERE sg.is_current=1 "
         " AND fs.role IN ('core','challenger','exit_only'))"

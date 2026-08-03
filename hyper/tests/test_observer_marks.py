@@ -2,13 +2,14 @@ import asyncio
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from hyper import config, storage
 from hyper.execution.live_executor import LiveExecutionResult
-from hyper.execution.observer import Observer
+from hyper.execution.observer import Observer, RetryableSignalError, TerminalSignalError
 from hyper.market import volatility
 from hyper.util import now_iso, now_ms
 
@@ -31,6 +32,31 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         )
         db.commit()
         return db
+
+    def _activate_live(self, db, session_id="live-signal-test"):
+        stamp = now_iso()
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,started_at,updated_at) "
+            "VALUES (?,'live','mainnet','live_running',?,?, 'revision-one',200,1,200,0,?,?)",
+            (session_id, "0x" + "a" * 40, "0x" + "b" * 40, stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running',?,?) ON CONFLICT(id) DO UPDATE SET "
+            "selected_mode='live',state='live_running',active_session_id=excluded.active_session_id,"
+            "updated_at=excluded.updated_at",
+            (session_id, stamp),
+        )
+        db.execute(
+            "INSERT INTO live_copy_account (id,initial_balance,balance,available,updated_at) "
+            "VALUES (1,200,200,200,?) ON CONFLICT(id) DO UPDATE SET balance=200,available=200,"
+            "updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        db.commit()
+        return session_id
 
     def _live_ep(self, pos_id, side, entry_px, size):
         ready = asyncio.Event()
@@ -70,6 +96,347 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         self.assertTrue(restarted.paused)
         self.assertEqual(restarted._proc_state, "paused")
+
+    def test_live_fill_is_journalled_before_dispatch_and_cursor_is_persisted(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, ["0xsource"], {})
+            fill = {
+                "tid": 123, "time": 1_900_000_000_000, "coin": "BTC", "side": "B",
+                "dir": "Open Long", "px": "100", "sz": "1", "startPosition": "0",
+                "oid": 77, "closedPnl": "0", "crossed": True,
+            }
+            with patch("hyper.execution.observer.rest.post_soft", return_value=[fill]), \
+                    patch.object(obs, "_dispatch_fill") as dispatch:
+                await obs._poll_fills("0xsource", fill["time"] - 1000)
+
+            signal = db.execute(
+                "SELECT state,tid,payload_json FROM execution_signal WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            self.assertEqual((signal["state"], signal["tid"]), ("pending", 123))
+            self.assertEqual(json.loads(signal["payload_json"])["oid"], 77)
+            cursor = db.execute(
+                "SELECT last_fill_ms FROM observer_target_cursor WHERE session_id=? AND addr='0xsource'",
+                (session_id,),
+            ).fetchone()[0]
+            self.assertGreaterEqual(cursor, fill["time"])
+            dispatch.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_failed_target_fill_read_does_not_advance_live_cursor(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, ["0xsource"], {})
+            obs.last_fill_ms["0xsource"] = 1234
+
+            with patch("hyper.execution.observer.rest.post_soft", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "target_fills_unavailable"):
+                    await obs._poll_fills("0xsource", 1000)
+
+            self.assertEqual(obs.last_fill_ms["0xsource"], 1234)
+            self.assertIsNone(db.execute(
+                "SELECT last_fill_ms FROM observer_target_cursor "
+                "WHERE session_id=? AND addr='0xsource'",
+                (session_id,),
+            ).fetchone())
+
+        asyncio.run(run())
+
+    def test_live_signal_consumer_dispatches_journal_in_order(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            payload = {
+                "tid": 124, "time": 1_900_000_000_001, "coin": "BTC", "side": "S",
+                "dir": "Close Long", "px": "100", "sz": "1", "startPosition": "1",
+                "oid": 78,
+            }
+            signal_id = db.execute(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,source_order_id,payload_json,state,"
+                "received_at,updated_at) VALUES ('live',?,'0xsource','BTC',124,?,78,?,'pending',?,?)",
+                (session_id, payload["time"], json.dumps(payload), stamp, stamp),
+            ).lastrowid
+            db.commit()
+
+            task = asyncio.create_task(obs.signal_retry_loop())
+            for _ in range(20):
+                state = db.execute(
+                    "SELECT state FROM execution_signal WHERE signal_id=?", (signal_id,),
+                ).fetchone()[0]
+                if state == "completed":
+                    break
+                await asyncio.sleep(0.02)
+            obs.stop = True
+            await task
+
+            row = db.execute(
+                "SELECT state,decision_code FROM execution_signal WHERE signal_id=?", (signal_id,),
+            ).fetchone()
+            self.assertEqual((row["state"], row["decision_code"]),
+                             ("completed", "NO_MANAGED_POSITION"))
+
+        asyncio.run(run())
+
+    def test_flip_signal_with_only_close_action_resumes_reverse_open(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            payload = {
+                "tid": 125, "time": 1_900_000_000_002, "coin": "BTC", "side": "S",
+                "dir": "Long > Short", "px": "100", "sz": "2", "startPosition": "1",
+                "oid": 79,
+            }
+            signal_id = db.execute(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,source_order_id,payload_json,state,"
+                "received_at,updated_at) VALUES ('live',?,'0xsource','BTC',125,?,79,?,'pending',?,?)",
+                (session_id, payload["time"], json.dumps(payload), stamp, stamp),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO live_copy_action "
+                "(addr,coin,ts,action,master_oid,our_qty_delta) VALUES "
+                "('0xsource','BTC',?,'close',79,-1)",
+                (payload["time"],),
+            )
+            db.commit()
+
+            def finish(*_args, **kwargs):
+                obs._mark_signal(kwargs["signal_id"], "completed", code="TEST")
+                obs.stop = True
+
+            with patch.object(obs, "_dispatch_fill", side_effect=finish) as dispatch:
+                await obs.signal_retry_loop()
+
+            dispatch.assert_called_once()
+            self.assertEqual(
+                db.execute(
+                    "SELECT state FROM execution_signal WHERE signal_id=?", (signal_id,),
+                ).fetchone()[0],
+                "completed",
+            )
+
+        asyncio.run(run())
+
+    def test_later_same_market_signal_waits_for_retryable_predecessor(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            rows = [
+                (
+                    126, 100, "retryable", now_ms() + 60_000,
+                    {"tid": 126, "time": 100, "coin": "BTC", "side": "B",
+                     "px": "100", "sz": "1", "startPosition": "0", "oid": 80},
+                ),
+                (
+                    127, 101, "pending", 0,
+                    {"tid": 127, "time": 101, "coin": "BTC", "side": "B",
+                     "px": "99", "sz": "1", "startPosition": "1", "oid": 81},
+                ),
+            ]
+            db.executemany(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,source_order_id,payload_json,state,"
+                "next_attempt_ms,received_at,updated_at) "
+                "VALUES ('live',?,'0xsource','BTC',?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        session_id, tid, source_ms, payload["oid"], json.dumps(payload), state,
+                        next_ms, stamp, stamp,
+                    )
+                    for tid, source_ms, state, next_ms, payload in rows
+                ],
+            )
+            db.commit()
+
+            with patch.object(obs, "_dispatch_fill") as dispatch:
+                task = asyncio.create_task(obs.signal_retry_loop())
+                await asyncio.sleep(0.1)
+                obs.stop = True
+                await task
+
+            dispatch.assert_not_called()
+            self.assertEqual(
+                db.execute(
+                    "SELECT state FROM execution_signal WHERE tid=127"
+                ).fetchone()[0],
+                "pending",
+            )
+
+        asyncio.run(run())
+
+    def test_retryable_live_signal_is_not_marked_completed(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            signal_id = db.execute(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,payload_json,state,received_at,updated_at) "
+                "VALUES ('live',?,'0xsource','BTC',1,1,'{}','pending',?,?)",
+                (session_id, stamp, stamp),
+            ).lastrowid
+            db.commit()
+
+            async def fail_once():
+                raise RetryableSignalError("temporary")
+
+            task = obs._schedule_signal_task(signal_id, fail_once(), name="test")
+            await task
+
+            row = db.execute(
+                "SELECT state,attempt_count,last_error,next_attempt_ms FROM execution_signal "
+                "WHERE signal_id=?", (signal_id,),
+            ).fetchone()
+            self.assertEqual(row["state"], "retryable")
+            self.assertEqual(row["attempt_count"], 1)
+            self.assertIn("temporary", row["last_error"])
+            self.assertGreater(row["next_attempt_ms"], now_ms())
+
+        asyncio.run(run())
+
+    def test_verified_terminal_signal_failure_is_not_retried(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            signal_id = db.execute(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,payload_json,state,received_at,updated_at) "
+                "VALUES ('live',?,'0xsource','BTC',2,2,'{}','pending',?,?)",
+                (session_id, stamp, stamp),
+            ).lastrowid
+            db.commit()
+
+            async def fail_terminal():
+                raise TerminalSignalError("verified_rejected")
+
+            task = obs._schedule_signal_task(signal_id, fail_terminal(), name="test-terminal")
+            await task
+
+            row = db.execute(
+                "SELECT state,attempt_count,last_error,next_attempt_ms FROM execution_signal "
+                "WHERE signal_id=?", (signal_id,),
+            ).fetchone()
+            self.assertEqual(row["state"], "failed_terminal")
+            self.assertEqual(row["attempt_count"], 1)
+            self.assertIn("verified_rejected", row["last_error"])
+            self.assertEqual(row["next_attempt_ms"], 0)
+
+        asyncio.run(run())
+
+    def test_manual_cooldown_is_scoped_by_execution_mode(self):
+        db = self._db()
+        self._activate_live(db)
+        db.execute(
+            "INSERT INTO execution_manual_close_cooldown "
+            "(mode,addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES ('paper','0xsource','BTC',1,'manual_stop_loss',?,?)",
+            (now_iso(), "2999-01-01T00:00:00Z"),
+        )
+        db.commit()
+
+        live = Observer(db, [], {})
+
+        self.assertIsNone(live._manual_close_cooldown_until("0xsource", "BTC"))
+        self.assertEqual(
+            db.execute(
+                "SELECT COUNT(*) FROM execution_manual_close_cooldown WHERE mode='paper'"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_live_ledger_projection_drift_fails_closed(self):
+        db = self._db()
+        session_id = self._activate_live(db)
+        db.execute(
+            "INSERT INTO live_copy_position "
+            "(addr,coin,side,status,entry_px,size,rem_size,opened_at) "
+            "VALUES ('0xsource','BTC','long','open',100,1,1,?)",
+            (now_iso(),),
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+
+        self.assertFalse(obs._verify_live_ledger_projection())
+        self.assertEqual(
+            db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()[0],
+            "reconcile_required",
+        )
+
+    def test_running_live_observer_fails_closed_on_mode_change(self):
+        db = self._db()
+        self._activate_live(db)
+        obs = Observer(db, [], {})
+        db.execute(
+            "UPDATE execution_control SET selected_mode='paper',state='paper',active_session_id=NULL "
+            "WHERE id=1"
+        )
+        db.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "execution_mode_changed"):
+            obs._assert_mode_binding()
+
+    def test_close_all_never_reports_success_with_remaining_positions(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.taker.open_ep = {
+                ("0xaaa", "BTC"): {"pos_id": 1},
+                ("0xbbb", "ETH"): {"pos_id": 2},
+            }
+            with patch.object(
+                obs, "_cmd_close", new=AsyncMock(side_effect=RuntimeError("unfilled")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "close_all_incomplete"):
+                    await obs._cmd_close_all()
+
+        asyncio.run(run())
+
+    def test_cancelling_live_order_await_still_returns_confirmed_worker_result(self):
+        async def run():
+            db = self._db()
+            self._activate_live(db)
+            obs = Observer(db, [], {})
+            started = threading.Event()
+            release = threading.Event()
+            expected = LiveExecutionResult(1.0, 100.0, 0.05, 0.0, ("cloid",), (1,), "filled")
+
+            def execute(**_kwargs):
+                started.set()
+                release.wait(2)
+                return expected
+
+            obs.live_executor = Mock(execute=execute)
+            task = asyncio.create_task(obs._execute_live_order(
+                ep={"num_actions": 0}, addr="0xsource", coin="BTC", action="open",
+                is_buy=True, size=1, leverage=5, reduce_only=False,
+                source_time_ms=1, source_order_id=2,
+            ))
+            for _ in range(50):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            task.cancel()
+            release.set()
+
+            self.assertIs(await task, expected)
+            self.assertEqual(obs._live_order_inflight, 0)
+
+        asyncio.run(run())
 
     def test_null_sigma_placeholder_is_not_loaded_as_warm_cache(self):
         db = self._db()
@@ -914,8 +1281,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             res = await obs._cmd_close(pos_id)
 
             row = db.execute(
-                "SELECT addr,coin,pos_id,reason,created_at,expires_at FROM manual_close_cooldown "
-                "WHERE addr='0xaaa' AND coin='BTC'"
+                "SELECT addr,coin,pos_id,reason,created_at,expires_at "
+                "FROM execution_manual_close_cooldown "
+                "WHERE mode='paper' AND addr='0xaaa' AND coin='BTC'"
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["pos_id"], pos_id)
@@ -949,7 +1317,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         open_position.assert_called_once()
         self.assertEqual(
             db.execute(
-                "SELECT COUNT(*) FROM manual_close_cooldown "
+                "SELECT COUNT(*) FROM execution_manual_close_cooldown "
                 "WHERE reason LIKE 'liquidation_%'"
             ).fetchone()[0],
             0,
@@ -970,7 +1338,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertGreater(res["realizedPnl"], 0)
             self.assertIsNone(res["cooldownUntil"])
             self.assertEqual(db.execute(
-                "SELECT COUNT(*) FROM manual_close_cooldown"
+                "SELECT COUNT(*) FROM execution_manual_close_cooldown"
             ).fetchone()[0], 0)
             obs.target_sector_policy = {
                 "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
@@ -996,7 +1364,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
             res = await obs._cmd_close(pos_id, frac=0.5)
 
-            n = db.execute("SELECT COUNT(*) FROM manual_close_cooldown").fetchone()[0]
+            n = db.execute("SELECT COUNT(*) FROM execution_manual_close_cooldown").fetchone()[0]
             self.assertEqual(n, 0)
             self.assertFalse(res["closed"])
             self.assertIsNone(res.get("cooldownUntil"))
@@ -1058,8 +1426,10 @@ class ObserverMarkRefreshTests(unittest.TestCase):
     def test_manual_cooldown_blocks_new_open_same_wallet_coin(self):
         db = self._db()
         db.execute(
-            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
-            "VALUES ('0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z','2999-01-01T00:00:00Z')"
+            "INSERT INTO execution_manual_close_cooldown "
+            "(mode,addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES ('paper','0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z',"
+            "'2999-01-01T00:00:00Z')"
         )
         db.commit()
         loop = asyncio.new_event_loop()
@@ -1166,8 +1536,8 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 "VALUES ('0xloss','HYPE','long','closed',100,-12,'old','old')"
             ).lastrowid
             db.executemany(
-                "INSERT INTO manual_close_cooldown "
-                "(addr,coin,pos_id,reason,created_at,expires_at) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO execution_manual_close_cooldown "
+                "(mode,addr,coin,pos_id,reason,created_at,expires_at) VALUES ('paper',?,?,?,?,?,?)",
                 [
                     ("0xprofit", "SOL", profit_pos, "manual_close", "old", "2999-01-01T00:00:00Z"),
                     ("0xloss", "HYPE", loss_pos, "manual_close", "old", "2999-01-01T00:00:00Z"),
@@ -1178,7 +1548,8 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             Observer(db, [], {})._reload_open()
 
             rows = db.execute(
-                "SELECT addr,coin FROM manual_close_cooldown ORDER BY addr"
+                "SELECT addr,coin FROM execution_manual_close_cooldown "
+                "WHERE mode='paper' ORDER BY addr"
             ).fetchall()
             self.assertEqual([tuple(row) for row in rows], [("0xloss", "HYPE")])
 
@@ -1187,8 +1558,10 @@ class ObserverMarkRefreshTests(unittest.TestCase):
     def test_expired_manual_cooldown_allows_new_open(self):
         db = self._db()
         db.execute(
-            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
-            "VALUES ('0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')"
+            "INSERT INTO execution_manual_close_cooldown "
+            "(mode,addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES ('paper','0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z',"
+            "'2026-01-02T00:00:00Z')"
         )
         db.commit()
         loop = asyncio.new_event_loop()
@@ -1216,7 +1589,8 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             open_position.assert_called_once()
             self.assertIsNone(
                 db.execute(
-                    "SELECT expires_at FROM manual_close_cooldown WHERE addr='0xaaa' AND coin='BTC'"
+                    "SELECT expires_at FROM execution_manual_close_cooldown "
+                    "WHERE mode='paper' AND addr='0xaaa' AND coin='BTC'"
                 ).fetchone()
             )
         finally:

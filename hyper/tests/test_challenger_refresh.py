@@ -102,6 +102,30 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(base, "g-full")
         self.assertEqual(pool, ["0xchallenge", "0xcore"])
 
+    def test_live_refresh_pool_ignores_inactive_paper_positions(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,opened_at) "
+                "VALUES ('0xpaper-held','BTC','long','open','now')"
+            )
+            db.execute(
+                "INSERT INTO live_copy_position (addr,coin,side,status,opened_at) "
+                "VALUES ('0xlive-held','ETH','short','open','now')"
+            )
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,updated_at) "
+                "VALUES (1,'live','live_ready','now') ON CONFLICT(id) DO UPDATE SET "
+                "selected_mode='live',state='live_ready',updated_at='now'"
+            )
+            db.commit()
+
+            base, pool = scanner.challenger_refresh_pool(db)
+
+        self.assertEqual(base, "g-full")
+        self.assertIn("0xlive-held", pool)
+        self.assertNotIn("0xpaper-held", pool)
+
     def test_daily_skips_a_legacy_full_generation(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

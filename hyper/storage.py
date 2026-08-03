@@ -8,7 +8,7 @@ One db file (data/hl.db), layered by concern:
                 UI-facing, rebuilt each scan)
   control     : target_controls (operator settings: enabled/pinned/note — survive scans)
   diagnostics : scan_runs (one row per scan: counts + duration, for ops/UI history)
-  execution   : live_fills, copy_account, copy_position and copy_action
+  execution   : durable source signals/cursors, independent Paper/Live ledgers, and signed-order audit
 """
 import sqlite3
 import re
@@ -805,6 +805,46 @@ CREATE TABLE IF NOT EXISTS live_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_lf_addr ON live_fills(addr, time_ms);
 
+-- Durable signal inbox for real-money execution.  Receipt, policy decision and
+-- order/ledger completion are separate states: a fetched target fill is never
+-- considered handled merely because it reached SQLite.  ``payload_json`` is
+-- bounded to one normalized Hyperliquid fill and contains no credential data.
+CREATE TABLE IF NOT EXISTS execution_signal (
+    signal_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode            TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    addr            TEXT NOT NULL,
+    coin            TEXT NOT NULL,
+    tid             INTEGER NOT NULL,
+    source_time_ms  INTEGER NOT NULL,
+    source_order_id TEXT,
+    payload_json    TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'pending',
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+    decision_code   TEXT,
+    last_error      TEXT,
+    received_at     TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    UNIQUE(mode, session_id, addr, tid)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_signal_pending
+    ON execution_signal(mode, session_id, state, next_attempt_ms, signal_id);
+CREATE INDEX IF NOT EXISTS idx_execution_signal_episode_order
+    ON execution_signal(mode, session_id, addr, coin, source_time_ms, signal_id);
+
+-- Per-session source cursor.  Live restarts resume from the last successfully
+-- journalled API window instead of resetting every target to process start.
+CREATE TABLE IF NOT EXISTS observer_target_cursor (
+    mode         TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    addr         TEXT NOT NULL,
+    last_fill_ms INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY(mode, session_id, addr)
+);
+
 -- Per-coin realized volatility for risk-targeted sizing (one row/coin), refreshed periodically off
 -- the signal hot path. sigma = max(sigma_fast, sigma_slow) — regime-aware (de-risk fast, re-risk
 -- slow). The sizing code reads `sigma`; fast/slow/n are kept for inspection + tuning. n=0 + null
@@ -904,6 +944,21 @@ CREATE TABLE IF NOT EXISTS manual_close_cooldown (
     PRIMARY KEY (addr, coin)
 );
 CREATE INDEX IF NOT EXISTS idx_manual_close_cooldown_expires ON manual_close_cooldown(expires_at);
+
+-- Mode-scoped replacement for the legacy cooldown table above.  A Paper loss
+-- exit must never suppress a Live entry (or vice versa).
+CREATE TABLE IF NOT EXISTS execution_manual_close_cooldown (
+    mode       TEXT NOT NULL,
+    addr       TEXT NOT NULL,
+    coin       TEXT NOT NULL,
+    pos_id     INTEGER,
+    reason     TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (mode, addr, coin)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_manual_close_cooldown_expires
+    ON execution_manual_close_cooldown(mode, expires_at);
 
 -- One row per master action on a tracked position (open / add / reduce / close), with
 -- full detail + OUR mirrored fill at the primary 2s latency. UI "timeline / drill-down".
@@ -1617,6 +1672,7 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
         _migrate_episode_seq(db)
         _migrate_target_control_intents(db)
         _migrate_risk_compatibility(db)
+        _migrate_execution_cooldowns(db)
         db.commit()
     except Exception:
         db.rollback()
@@ -1703,6 +1759,39 @@ def _migrate_risk_compatibility(db: sqlite3.Connection) -> None:
                 "UPDATE wallet_registry SET risk_level='medium' "
                 "WHERE risk_level='normal' AND core_retention_status='medium_risk'"
             )
+
+
+def _migrate_execution_cooldowns(db: sqlite3.Connection) -> None:
+    """Copy legacy unscoped cooldowns into every ledger they can belong to.
+
+    Position ids are independently allocated in Paper and Live and can overlap,
+    so an ambiguous legacy row is deliberately copied to both modes.  New writes
+    are mode-scoped and no longer need this compatibility path.
+    """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    required = {
+        "manual_close_cooldown", "execution_manual_close_cooldown",
+        "copy_position", "live_copy_position",
+    }
+    if not required.issubset(tables):
+        return
+    for mode, position_table in (
+        ("paper", "copy_position"), ("live", "live_copy_position"),
+    ):
+        db.execute(
+            "INSERT OR IGNORE INTO execution_manual_close_cooldown "
+            "(mode,addr,coin,pos_id,reason,created_at,expires_at) "
+            "SELECT ?,c.addr,c.coin,c.pos_id,c.reason,c.created_at,c.expires_at "
+            "FROM manual_close_cooldown c WHERE EXISTS ("
+            f"SELECT 1 FROM {position_table} p WHERE p.pos_id=c.pos_id "
+            "AND lower(p.addr)=lower(c.addr) AND lower(p.coin)=lower(c.coin))",
+            (mode,),
+        )
+    # The legacy table is retired.  Leaving copied rows behind would resurrect a cooldown that the
+    # mode-scoped runtime later cleared, because connect() intentionally makes migrations idempotent.
+    db.execute("DELETE FROM manual_close_cooldown")
 
 
 def _retire_maker_shadow(db: sqlite3.Connection) -> None:

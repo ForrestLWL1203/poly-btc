@@ -42,6 +42,7 @@ from hyper.copy.sector import (
 )
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.market import generation_market, price_path, rest
+from hyper.execution.mode import selected_book
 from hyper.selection import (
     auto_tune,
     core_retention,
@@ -72,6 +73,10 @@ from hyper.util import f, now_iso
 
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 _STRICT_REPLAY_PROCESS_CONTEXT = {}
+
+
+def _execution_position_table(db) -> str:
+    return selected_book(db).position
 
 _SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
     "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
@@ -2187,13 +2192,18 @@ def _store_formation_prefix_evidence(
 
 
 def _paper_account_equity(db) -> float:
-    """Current Paper equity used for the second publication-scale replay."""
-    row = db.execute(
-        "SELECT ca.balance + COALESCE(("
-        "SELECT SUM(COALESCE(cp.unrealized_pnl,0)) FROM copy_position cp "
-        "WHERE cp.status='open'"
-        "),0) FROM copy_account ca WHERE ca.id=1"
-    ).fetchone()
+    """Current selected-ledger equity used for publication-scale replay."""
+    book = selected_book(db)
+    if book.mode == "live":
+        # live_copy_account.balance is exchange-authoritative total equity and already includes uPnL.
+        row = db.execute(f"SELECT balance FROM {book.account} WHERE id=1").fetchone()
+    else:
+        row = db.execute(
+            f"SELECT ca.balance + COALESCE(("
+            f"SELECT SUM(COALESCE(cp.unrealized_pnl,0)) FROM {book.position} cp "
+            "WHERE cp.status='open'"
+            f"),0) FROM {book.account} ca WHERE ca.id=1"
+        ).fetchone()
     value = f(row[0]) if row else 0.0
     return value if value > 0.0 else float(config.INITIAL_BALANCE)
 
@@ -2234,6 +2244,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
     ``core_only=False`` returns the bounded Core+Challenger workset needed for final-parameter
     requalification; the default preserves the original Core-ready contract for callers/tests.
     """
+    position_table = _execution_position_table(db)
     cur = db.execute(
         "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
         "p.official_perp_status,p.official_perp_reason,p.official_perp_evidence_json,"
@@ -2291,7 +2302,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
             "THEN COALESCE(unrealized_pnl,0) ELSE 0 END),0),"
             "SUM(CASE WHEN COALESCE(was_liq,0)=1 AND julianday(closed_at)>=julianday('now','-30 days') "
             "THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
+            f"SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM {position_table} GROUP BY lower(addr)"
         ).fetchall()
     }
     rows = []
@@ -5552,8 +5563,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         }
         previous_roles = {addr: row.role for addr, row in previous_selection.items()}
 
+    position_table = _execution_position_table(db)
     held = {(addr or "").lower() for (addr,) in db.execute(
-        "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+        f"SELECT DISTINCT addr FROM {position_table} WHERE status='open'"
     ).fetchall()}
     controls = {
         (addr or "").lower(): level != wallet_risk.HIGH
@@ -5614,7 +5626,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             "THEN COALESCE(unrealized_pnl,0) ELSE 0 END),0),"
             "SUM(CASE WHEN COALESCE(was_liq,0)=1 AND julianday(closed_at)>=julianday('now','-30 days') "
             "THEN 1 ELSE 0 END),"
-            "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
+            f"SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM {position_table} GROUP BY lower(addr)"
         ).fetchall()
     }
     # watchlist.score is the published final Copy-follow score.  Selection must consume that exact value
@@ -5856,6 +5868,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     repair_now_ms = int(meta[2] or 0)
     if repair_now_ms <= 0:
         raise RuntimeError("selection_repair_generation_asof_missing")
+    position_table = _execution_position_table(db)
     existing_core = selection.published_core_addrs(db) or []
     expected_strategy_revision = strategy_revision.active_revision_id(db)
     if existing_core and not replace_existing:
@@ -5870,7 +5883,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
             "AND COALESCE(p.profile_generation,'')<>? AND ("
             "EXISTS (SELECT 1 FROM follow_selection fs WHERE fs.generation=? "
             "AND lower(fs.addr)=lower(p.addr) AND fs.role IN ('core','challenger')) OR "
-            "EXISTS (SELECT 1 FROM copy_position cp WHERE lower(cp.addr)=lower(p.addr) "
+            f"EXISTS (SELECT 1 FROM {position_table} cp WHERE lower(cp.addr)=lower(p.addr) "
             "AND cp.status='open'))",
             (generation_id, generation_id),
         ).fetchone()[0] or 0)
@@ -5881,7 +5894,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db.execute(
             "UPDATE profile SET status='retired',reason='stale_generation_not_profiled' "
             "WHERE status='active' AND COALESCE(profile_generation,'')<>? "
-            "AND NOT EXISTS (SELECT 1 FROM copy_position cp WHERE lower(cp.addr)=lower(profile.addr) "
+            f"AND NOT EXISTS (SELECT 1 FROM {position_table} cp WHERE lower(cp.addr)=lower(profile.addr) "
             "AND cp.status='open')",
             (generation_id,),
         )
@@ -6197,6 +6210,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     rebuild the watchlist. Thresholds (win/roiEq/dd/tpd/hold/...) can be tuned in seconds without a
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
     now = int(time.time() * 1000)
+    position_table = _execution_position_table(db)
     stamp = stamp or now_iso()
     published_generation = selection.latest_published_generation(db)
     if published_generation and not generation_market.has_snapshot(db, published_generation):
@@ -6220,7 +6234,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     open_copy_pnl_by_addr = {
         str(row[0] or "").lower(): f(row[1])
         for row in db.execute(
-            "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+            f"SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM {position_table} "
             "WHERE status='open' GROUP BY addr"
         ).fetchall()
     }
@@ -6947,6 +6961,7 @@ def _latest_complete_scan_generation(db):
 
 def challenger_refresh_pool(db, base_generation=None):
     """Freeze the daily workset to the latest complete discovery generation."""
+    position_table = _execution_position_table(db)
     base_generation = base_generation or _latest_complete_scan_generation(db)
     if not base_generation:
         return None, []
@@ -6967,7 +6982,7 @@ def challenger_refresh_pool(db, base_generation=None):
     held = {
         str(addr or "").lower()
         for (addr,) in db.execute(
-            "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+            f"SELECT DISTINCT addr FROM {position_table} WHERE status='open'"
         ).fetchall()
         if addr
     }
@@ -7240,10 +7255,11 @@ def refresh_challengers(db, p) -> dict:
         incomplete_cache = set(_incomplete_fill_cache_addrs(
             db, workset, desired_cache_start_ms,
         ))
+        position_table = _execution_position_table(db)
         open_copy_pnl_by_addr = {
             str(addr or "").lower(): f(unrealized)
             for addr, unrealized in db.execute(
-                "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+                f"SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM {position_table} "
                 "WHERE status='open' GROUP BY addr"
             ).fetchall()
         }
@@ -8073,10 +8089,11 @@ def scan(db, p) -> None:
     warmup_backfill_addrs = _copy_warmup_backfill_addrs(
         db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
     )
+    position_table = _execution_position_table(db)
     open_copy_pnl_by_addr = {
         str(addr or "").lower(): f(unrealized)
         for addr, unrealized in db.execute(
-            "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+            f"SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM {position_table} "
             "WHERE status='open' GROUP BY addr"
         ).fetchall()
     }
@@ -8503,7 +8520,7 @@ def scan(db, p) -> None:
             }
             if selection_mode == "manual":
                 held = {(addr or "").lower() for (addr,) in db.execute(
-                    "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+                    f"SELECT DISTINCT addr FROM {position_table} WHERE status='open'"
                 ).fetchall()}
                 manual_core_ok = {
                     row["addr"] for row in _quality_core_profiles(
