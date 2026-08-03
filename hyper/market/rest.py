@@ -63,8 +63,9 @@ def configure_post_budget(*, weight_per_min: float | None, burst_weight: float =
 
     Hyperliquid accounts ``/info`` traffic by request weight, so one fixed sleep wastes most of the
     allowance on weight-2 metadata calls while still being too aggressive for weight-20 fill calls.  The
-    scanner enables this weighted leaky bucket only while Observer has no work.  Observer-active scans and
-    the Observer process itself retain the conservative ``MIN_POST_INTERVAL`` contract.
+    scanner uses this weighted leaky bucket in both modes: while Observer has work it preserves the
+    former weight-20 request allowance, and while Observer is idle it uses the larger scan-only budget.  The
+    Observer runs in its own process and retains its independent low-latency request path.
     """
     with _pace_lock:
         enabled = weight_per_min is not None and float(weight_per_min) > 0.0

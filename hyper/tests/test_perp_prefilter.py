@@ -30,6 +30,69 @@ def _portfolio(*, perp_week_volume=1_000_000, perp_month_pnl=100):
 
 
 class PerpPrefilterTests(unittest.TestCase):
+    def test_complete_cache_local_volume_proves_gate_without_portfolio(self):
+        now_ms = 10 * 86_400_000
+        fills = [{
+            "time": now_ms - 1_000,
+            "coin": "BTC",
+            "px": "100",
+            "sz": "2500",
+        }]
+        policy = SimpleNamespace(week_vlm_min=250_000)
+
+        with mock.patch.object(scanner.rest, "portfolio") as portfolio:
+            result = scanner._resolve_profile_perp_prefilter(
+                "0xabc", fills, now_ms, policy,
+            )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.reason, "copyable_perp_week_volume_proven")
+        self.assertEqual(
+            result.windows["scanResolution"]["source"], "local_copyable_volume",
+        )
+        portfolio.assert_not_called()
+
+    def test_inconclusive_local_volume_falls_back_to_official_portfolio(self):
+        now_ms = 10 * 86_400_000
+        fills = [{
+            "time": now_ms - 1_000,
+            "coin": "BTC",
+            "px": "100",
+            "sz": "10",
+        }]
+        policy = SimpleNamespace(week_vlm_min=250_000)
+
+        with mock.patch.object(
+            scanner.rest, "portfolio", return_value=_portfolio(perp_week_volume=300_000),
+        ) as portfolio:
+            result = scanner._resolve_profile_perp_prefilter(
+                "0xabc", fills, now_ms, policy,
+            )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.reason, "perp_week_volume_confirmed")
+        self.assertEqual(
+            result.windows["scanResolution"]["source"], "portfolio_fallback",
+        )
+        portfolio.assert_called_once_with("0xabc")
+
+    def test_structural_skip_result_remains_auditable_without_becoming_passed(self):
+        result = perp_prefilter.Result(
+            "skipped",
+            "structural_rejected_before_perp_prefilter",
+            {"scanResolution": {"source": "structural_short_circuit"}},
+        )
+        fields = scanner._official_profile_fields(result)
+        restored = scanner._profile_official_result(fields)
+
+        self.assertIsNotNone(restored)
+        self.assertFalse(restored.passed)
+        self.assertEqual(restored.status, "skipped")
+        self.assertEqual(
+            restored.windows["scanResolution"]["source"],
+            "structural_short_circuit",
+        )
+
     def test_only_perp_week_volume_is_a_business_gate(self):
         self.assertEqual(
             perp_prefilter.evaluate(

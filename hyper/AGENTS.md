@@ -89,8 +89,9 @@ Repository boundaries:
 
 The production flow is:
 
-`Leaderboard staging → $250k Perp-volume/PnL-direction recall → executable-market fill cache → structural hard
-gates → generation-frozen activity + fills-only conservative Copy/PF/lottery gates → scored Top32 →
+`Leaderboard staging → $250k volume/PnL-direction recall → hybrid eager-new/fill-first cached Perp-volume proof
+→ executable-market fill cache → structural hard gates → generation-frozen activity + fills-only conservative
+Copy/PF/lottery gates → scored Top32 →
 current-surface strict path and profit-aligned-score Top16 tune seed → count-specific adaptive tune → tuned-surface
 individual strict across the complete path-valid Top32 → score Top16/prefix shared replay → exact-Core
 retune and bounded membership/parameter closure → atomic generation/selection/strategy revision publish →
@@ -113,8 +114,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 ### 2. Candidate workset and profiles
 
 - New-wallet Leaderboard recall requires leveraged 7d notional volume `$250,000` and non-negative 7d/30d PnL.
-  Nominal leveraged volume is activity evidence, never a profitability denominator. Before fill history is
-  downloaded, official `perpWeek` must independently confirm at least `$250,000` of Perp-only seven-day volume.
+  Nominal leveraged volume is activity evidence, never a profitability denominator. A new or incomplete-cache
+  wallet first asks official `perpWeek` to confirm at least `$250,000` of Perp-only seven-day volume so a clear
+  miss does not trigger a multi-page history bootstrap. A complete-cache wallet refreshes its source delta and
+  current structural evidence first: a structural failure ends the profile without Portfolio/state/replay, and
+  at least `$250,000` of seven-day executable Perp notional is a one-way local proof of the same official floor.
+  An inconclusive local volume result always falls back to official Portfolio; it is never a local rejection.
   Account value, official ROI magnitude, positive-equity history duration, Perp PnL share and official
   `perpMonth` profitability are not admission gates. Core, strict Challenger and open-position owners bypass
   cheap recall only so the same generation can refresh or safely remove them; they receive no final-qualification
@@ -151,6 +156,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
   missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
   continuation cursor; it must not restart from the 37-day boundary on the next run.
+- Prior HFT, grid, bot, Heavy-DCA and concurrency decisions are not permanent blacklists. Their complete cache
+  receives the same delta and rolling-window structural recomputation, but a repeated structural failure does
+  not pay Portfolio, clearinghouse-state or Copy replay calls. New fills or expired evidence can therefore
+  restore eligibility without repeatedly executing the whole expensive profile.
 - Complete discovery runs Monday and Thursday at 04:00 `Asia/Shanghai`. They refresh the complete Leaderboard,
   discover the candidate universe, repair missing 37-day caches, and evaluate every cheap-recall +
   Perp-volume survivor. Core, strict Challenger and open-position owners are also evaluated for safe
@@ -631,9 +640,10 @@ python3 dashboard/web/dev/mock_consumer.py data/hl_mock.db
 DASH_PASSWORD=mock123 python3 -m dashboard.server --db data/hl_mock.db --static dashboard/web --host 127.0.0.1 --port 8810
 ```
 
-`scan --full` means a full candidate-universe harvest and evaluation and bypasses the short-lived official
-Portfolio prefilter cache. It does not re-download a complete wallet fill cache; only new or incomplete
-wallets fetch the 37-day bootstrap window. Except for the forced
+`scan --full` means a full candidate-universe harvest and evaluation. New/incomplete caches bypass the
+short-lived official Portfolio cache; complete caches instead use current delta-first structural and local
+volume evidence with an official fallback. It does not re-download a complete wallet fill cache; only new or
+incomplete wallets fetch the 37-day bootstrap window. Except for the forced
 first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
 `full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` first
 re-scores/re-ranks the current generation's frozen pre-strict evidence with the deployed model, then re-forms

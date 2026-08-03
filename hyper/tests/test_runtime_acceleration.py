@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hyper import storage
+from hyper.cli import discover
 from hyper.copy import replay_parallel
 from hyper.copy.copy_backtest import (
     prepare_price_path,
@@ -37,6 +38,20 @@ class RuntimeAccelerationTests(unittest.TestCase):
             self.assertEqual(rest._reserve_post(20), 0.0)
             self.assertAlmostEqual(rest._reserve_post(20), 1.0)
             self.assertAlmostEqual(rest._reserve_post(2), 0.1)
+
+    def test_active_scan_weight_budget_preserves_heavy_interval(self):
+        self.assertAlmostEqual(
+            discover._scan_post_weight_budget(True, 8.0),
+            150.0,
+        )
+        self.assertAlmostEqual(
+            discover._scan_post_weight_budget(True, 6.0),
+            200.0,
+        )
+        self.assertAlmostEqual(
+            discover._scan_post_weight_budget(False, 8.0),
+            1140.0,
+        )
 
     def test_weighted_rest_budget_backs_off_and_recovers(self):
         rest.configure_post_budget(

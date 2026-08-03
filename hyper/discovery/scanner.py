@@ -805,6 +805,148 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
     return results
 
 
+def _copyable_perp_week_volume(fills, now_ms: int) -> float:
+    """Return exact seven-day notional from the already-scoped executable fill cache.
+
+    ``candidate_fills`` contains only executable Perp contracts.  Reaching the official Perp-volume
+    floor on this narrower surface is therefore a one-way proof that the exchange-wide ``perpWeek``
+    volume also reaches the floor.  Falling below the floor is *not* a rejection proof because the
+    source may also trade a non-executable builder namespace; callers must fall back to Portfolio.
+    """
+    cutoff = int(now_ms) - 7 * 86_400_000
+    return sum(
+        abs(f(fill.get("px")) * f(fill.get("sz")))
+        for fill in (fills or ())
+        if int(fill.get("time") or 0) >= cutoff
+    )
+
+
+def _with_prefilter_resolution(result, *, source: str, local_week_volume=None):
+    windows = dict((result.windows if result is not None else {}) or {})
+    windows["scanResolution"] = {
+        "source": str(source),
+        "localCopyablePerpWeekVolume": (
+            float(local_week_volume) if local_week_volume is not None else None
+        ),
+    }
+    return perp_prefilter.Result(result.status, result.reason, windows)
+
+
+def _resolve_profile_perp_prefilter(addr, perp_fills, now_ms, p, existing=None):
+    """Resolve the volume-only official gate after cached structure is known.
+
+    Complete-cache wallets no longer pay a Portfolio request before the latest delta can reject an
+    unchanged HFT/grid/DCA structure.  A local executable-volume pass is a sufficient proof; every
+    inconclusive local result preserves the old official Portfolio fallback and its exact decision.
+    """
+    if existing is not None:
+        return _with_prefilter_resolution(existing, source="eager_or_retention")
+    week_floor = float(getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN))
+    local_volume = _copyable_perp_week_volume(perp_fills, int(now_ms))
+    if local_volume >= week_floor:
+        return perp_prefilter.Result(
+            "passed",
+            "copyable_perp_week_volume_proven",
+            {
+                "week": {
+                    "perpVlm": local_volume,
+                    "hardGate": True,
+                    "auditStatus": "local_executable_volume_proof",
+                },
+                "scanResolution": {
+                    "source": "local_copyable_volume",
+                    "localCopyablePerpWeekVolume": local_volume,
+                },
+            },
+        )
+    try:
+        payload = rest.portfolio(addr)
+    except Exception as exc:  # noqa: BLE001
+        result = perp_prefilter.Result(
+            "deferred_data_error", f"portfolio_error:{type(exc).__name__}", {},
+        )
+    else:
+        result = perp_prefilter.evaluate(payload, min_week_perp_volume=week_floor)
+    return _with_prefilter_resolution(
+        result, source="portfolio_fallback", local_week_volume=local_volume,
+    )
+
+
+def _official_profile_fields(result) -> dict:
+    result = result or perp_prefilter.Result(
+        "deferred_data_error", "perp_prefilter_result_missing", {},
+    )
+    official_month = dict((result.windows or {}).get("month") or {})
+    official_return = dict((result.windows or {}).get("officialPerp30d") or {})
+    return {
+        "official_perp_status": result.status,
+        "official_perp_reason": result.reason,
+        "official_perp_evidence_json": json.dumps(
+            result.payload(), sort_keys=True, separators=(",", ":"),
+        ),
+        "official_perp_return_30d": official_return.get("return"),
+        "official_perp_pnl_30d": official_month.get("perpPnl"),
+        "official_perp_pnl_share": official_month.get("perpShare"),
+    }
+
+
+def _profile_official_result(row):
+    status = str((row or {}).get("official_perp_status") or "")
+    if not status:
+        return None
+    try:
+        payload = json.loads((row or {}).get("official_perp_evidence_json") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    return perp_prefilter.Result(
+        status,
+        str((row or {}).get("official_perp_reason") or "perp_prefilter_result_missing"),
+        dict(payload.get("windows") or {}),
+    )
+
+
+def _record_perp_prefilter_results(db, addrs, results, stamp, *, p=None, source="scan") -> None:
+    """Seal eager, local-proof, fallback and structural-skip decisions into one audit surface."""
+    pipeline_audit._delete_stage(db, stamp, source, "perp_prefilter")
+    week_floor = float(getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN))
+    for rank, addr in enumerate(addrs, 1):
+        result = results.get(addr) or perp_prefilter.Result(
+            "deferred_data_error", "perp_prefilter_result_missing", {},
+        )
+        pipeline_audit._insert_event(
+            db,
+            stamp=stamp,
+            source=source,
+            stage="perp_prefilter",
+            addr=addr,
+            rank=rank,
+            status=result.status,
+            reason=result.reason,
+            payload={
+                **result.payload(),
+                "policy": {
+                    # Keep the decision-policy version stable: fill-first changes transport/order only. A
+                    # fresh local executable-volume proof satisfies the same volume gate and remains safe for
+                    # the existing short-TTL restart/daily cache.
+                    "version": "official_perp_week_volume_v10",
+                    "weekPerpVolumeMin": week_floor,
+                },
+                "cacheHit": False,
+            },
+        )
+    db.commit()
+
+
+def _perp_prefilter_resolution_counts(results, addrs) -> dict:
+    counts = {}
+    for addr in addrs:
+        result = results.get(addr)
+        resolution = dict(((result.windows if result else {}) or {}).get("scanResolution") or {})
+        source = str(resolution.get("source") or "eager_portfolio")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
 # -------------------------------------------------------------------------- profile
 def _self_liquidations(fills, addr, acct):
     """Self-liquidation events (liquidation.liquidatedUser == this wallet, NOT where it was the
@@ -1283,11 +1425,17 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
         else:
             raw_full, hit_cap, new_fills, _fetched_full_window, cache_cursor = fetched
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
-        return _defer_profile(
+        outcome = _defer_profile(
             db, addr, prior, stamp, f"fills_error:{type(exc).__name__}",
-            generation_id=getattr(p, "scan_generation", None),
-            persist=persist,
+            generation_id=getattr(p, "scan_generation", None), persist=False,
         )
+        deferred = outcome[2]
+        deferred.update(_official_profile_fields(perp_prefilter.Result(
+            "deferred_data_error", "fills_unavailable_before_perp_prefilter", {},
+        )))
+        if persist:
+            _persist_profile_batch(db, [deferred])
+        return outcome
     for x in raw_full:
         x["user"] = addr
     # `_fetch_profile_fills` already crossed the collection boundary: only current standard Crypto
@@ -1344,21 +1492,6 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
     official = dict(getattr(p, "official_perp_results", {}) or {}).get(addr)
-    m["official_perp_status"] = official.status if official is not None else "missing"
-    m["official_perp_reason"] = (
-        official.reason if official is not None else "official_perp_evidence_missing"
-    )
-    m["official_perp_evidence_json"] = (
-        json.dumps(official.payload(), sort_keys=True, separators=(",", ":"))
-        if official is not None else None
-    )
-    official_month = dict((official.windows if official is not None else {}).get("month") or {})
-    official_return = dict(
-        (official.windows if official is not None else {}).get("officialPerp30d") or {}
-    )
-    m["official_perp_return_30d"] = official_return.get("return")
-    m["official_perp_pnl_30d"] = official_month.get("perpPnl")
-    m["official_perp_pnl_share"] = official_month.get("perpShare")
 
     # STAGE A — cheap structural copyability (NO api). Front-of-funnel rejects (MM/HFT/grid/spot) that do
     # NOT kill a genuine trend trader. n_trades==0 (pure-hold) skips the episode-based checks → judged on
@@ -1384,6 +1517,9 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
             generation_id=getattr(p, "scan_generation", None),
             persist=False,
         )
+        deferred.update(_official_profile_fields(perp_prefilter.Result(
+            "deferred_data_error", "fill_cache_incomplete_before_perp_prefilter", {},
+        )))
         _queue_profile_persist(
             deferred,
             cache={
@@ -1409,6 +1545,50 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
             and sector_structure.get("allowed")
         ):
             ok, reason = True, "ok"
+
+    # Resolve the volume-only Perp gate only after the refreshed cache has had a chance to terminate a
+    # structural reject. New/incomplete-cache wallets already carry an eager official result; complete-cache
+    # wallets use a one-way local proof and fall back to Portfolio whenever that proof is inconclusive.
+    if official is None and not ok:
+        official = perp_prefilter.Result(
+            "skipped",
+            "structural_rejected_before_perp_prefilter",
+            {
+                "scanResolution": {
+                    "source": "structural_short_circuit",
+                    "structuralReason": reason,
+                },
+            },
+        )
+    elif ok:
+        official = _resolve_profile_perp_prefilter(
+            addr, perp_full, now_ms, p, existing=official,
+        )
+    m.update(_official_profile_fields(official))
+    # Any later deferred-data path copies these current-generation official fields instead of reviving stale
+    # evidence from the prior profile.
+    prior = {**(prior or {}), **_official_profile_fields(official)}
+    if ok and official.deferred:
+        status, deferred_reason, deferred, _ = _defer_profile(
+            db, addr, prior, stamp, official.reason,
+            generation_id=getattr(p, "scan_generation", None), persist=False,
+        )
+        _queue_profile_persist(
+            deferred,
+            cache={
+                "fills": new_fills,
+                "window_start": window_start,
+                "coverage_complete": True,
+                "coverage_end": now_ms,
+                "universe": universe,
+            },
+            episodes=eps,
+        )
+        if persist:
+            _persist_profile_batch(db, [deferred])
+        return status, deferred_reason, deferred, False
+    if ok and not official.passed:
+        ok, reason = False, official.reason
 
     # STAGE B — fetch the LIVE open-position snapshot (un-blinds the funnel to held positions), fold in
     # realized+unrealized roi, then re-judge: held position = ACTIVE, 扛单 bags drag roi_total negative,
@@ -7880,23 +8060,6 @@ def scan(db, p) -> None:
         (generation_id,),
     ).fetchall()]
     _leaderboard_recall_audit(db, generation_id, stamp, p)
-    prefilter_started_at = time.time()
-    _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=0,
-                       candidates_total=len(recall_cand))
-    # A complete production scan means a real Portfolio refresh, not merely a complete workset fed by the
-    # two-hour restart cache. Direct recovery/test callers may still opt into exact-policy cache reuse.
-    perp_results = _run_perp_prefilter(
-        db, recall_cand, p, stamp,
-        allow_cache=not bool(getattr(p, "full_scan", False)),
-    )
-    p.official_perp_results = dict(perp_results)
-    prefilter_done_at = time.time()
-    prefilter_api_stats = rest.request_stats()
-    cand = [addr for addr in recall_cand if perp_results[addr].passed]
-    print(
-        f"  coarse recall {len(recall_cand)} · Portfolio/Perp precheck passed {len(cand)} · "
-        f"deferred {sum(result.deferred for result in perp_results.values())}", flush=True,
-    )
     current_selection_generation = selection.latest_published_generation(db)
     core_addrs = selection.published_core_membership(db) or []
     challenger_addrs = []
@@ -7927,6 +8090,28 @@ def scan(db, p) -> None:
         set(core_addrs) | set(challenger_addrs)
         | set(position_addrs) | set(former_core_addrs)
     )
+
+    # Hybrid fill-first transport:
+    #   * new/incomplete caches keep the eager official volume precheck, avoiding multi-page history for an
+    #     obvious Perp-volume miss;
+    #   * complete caches refresh their delta and structure first, then resolve the volume gate lazily only
+    #     when structure survives. This is the high-value reuse path for repeated HFT/grid/DCA rejects.
+    prefilter_started_at = time.time()
+    desired_cache_start_ms = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
+    bootstrap_recall = set(_incomplete_fill_cache_addrs(
+        db, recall_cand, desired_cache_start_ms,
+    ))
+    eager_prefilter_addrs = [
+        addr for addr in recall_cand
+        if addr in bootstrap_recall and addr not in retention_addrs
+    ]
+    _set_scan_progress(
+        db, stage="perp_prefilter", candidates_scanned=0,
+        candidates_total=len(eager_prefilter_addrs),
+    )
+    perp_results = _run_perp_prefilter(
+        db, eager_prefilter_addrs, p, stamp, allow_cache=False,
+    )
     for addr in retention_addrs:
         perp_results.setdefault(
             addr,
@@ -7936,6 +8121,22 @@ def scan(db, p) -> None:
             ),
         )
     p.official_perp_results = dict(perp_results)
+    prefilter_done_at = time.time()
+    prefilter_api_stats = rest.request_stats()
+    eager_set = set(eager_prefilter_addrs)
+    # Complete-cache candidates are intentionally optimistic here: their current-generation local structure
+    # and lazy official proof are resolved inside `_profile_one`. Eager bootstrap candidates retain the old
+    # requirement that Portfolio pass before history collection.
+    cand = [
+        addr for addr in recall_cand
+        if addr not in eager_set or (perp_results.get(addr) and perp_results[addr].passed)
+    ]
+    print(
+        f"  coarse recall {len(recall_cand)} · eager Portfolio {len(eager_prefilter_addrs)} "
+        f"({sum(bool(perp_results.get(addr) and perp_results[addr].passed) for addr in eager_prefilter_addrs)} passed) "
+        f"· cached fill-first {len(recall_cand) - len(eager_prefilter_addrs)}",
+        flush=True,
+    )
     # Freeze the open-copy PnL surface for the generation. Worker threads use it only to distinguish a
     # profitable carried mirrored episode from a dormant/losing wallet; it never bypasses economic/risk gates.
     p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
@@ -7945,7 +8146,6 @@ def scan(db, p) -> None:
         "WHERE COALESCE(profiled,probed_new)>0 AND complete=1 ORDER BY id DESC LIMIT 1"
     ).fetchone()
     estimated_profile_s = max(1.0, min(120.0, (f(recent[0]) / int(recent[1])))) if recent else 12.0
-    desired_cache_start_ms = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
     full_refetch_due = set(_incomplete_fill_cache_addrs(
         db,
         set(cand) | retention_addrs,
@@ -7977,6 +8177,8 @@ def scan(db, p) -> None:
         "warmupBackfillDue": len(warmup_backfill_addrs),
         "warmupBackfillScheduled": len(migration_backfill),
         "formerCoreRecheck": len(former_core_addrs),
+        "eagerPortfolioPrefilter": len(eager_prefilter_addrs),
+        "cachedFillFirst": len(recall_cand) - len(eager_prefilter_addrs),
         "marginEquityPct": float(p.margin_equity_pct),
         "initialMarginEquity": float(config.INITIAL_BALANCE),
     }
@@ -8021,28 +8223,6 @@ def scan(db, p) -> None:
 
     def _work(addr):
         prior = priors.get(addr)
-        gate = perp_results.get(addr)
-        if gate is None:
-            return addr, prior, _reject_prefilter_profile(
-                db, addr, prior, stamp, generation_id, "official_roi_below_floor",
-                persist=False,
-            )
-        if gate.deferred:
-            if gate.reason in {
-                "history_under_7d", "history_under_28d",
-                "boundary_sample_gap", "zero_start_equity",
-            }:
-                return addr, prior, _defer_official_evidence_profile(
-                    db, addr, prior, stamp, generation_id, gate, persist=False,
-                )
-            return addr, prior, _defer_profile(
-                db, addr, prior, stamp, gate.reason,
-                generation_id=generation_id, persist=False,
-            )
-        if not gate.passed:
-            return addr, prior, _reject_prefilter_profile(
-                db, addr, prior, stamp, generation_id, gate.reason, persist=False,
-            )
         return addr, prior, _profile_one(
             db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
             force_full=addr in full_refetch,
@@ -8091,6 +8271,16 @@ def scan(db, p) -> None:
                         failed += 1
                         print(f"  [{done}/{len(workset)}] FAIL: {exc}")
                         continue
+                    resolved_official = _profile_official_result(m)
+                    if resolved_official is None:
+                        # Compatibility for tests/offline profile adapters. Production `_profile_one` always
+                        # seals one of eager/local/fallback/structural-skip into the row.
+                        resolved_official = perp_results.get(addr) or perp_prefilter.Result(
+                            "passed" if status == "active" else "skipped",
+                            "profile_adapter_without_prefilter_result",
+                            {"scanResolution": {"source": "profile_adapter"}},
+                        )
+                    perp_results[addr] = resolved_official
                     profiled_ok += 1
                     profiled_addrs.append(addr)
                     persist_rows.append(m)
@@ -8127,6 +8317,13 @@ def scan(db, p) -> None:
         flush_persist()
 
     _profile_batch(list(workset))
+    # Replace the temporary eager-only audit with one complete generation surface. Cached candidates now
+    # contribute their local proof, Portfolio fallback, or structural short-circuit decision here.
+    _record_perp_prefilter_results(db, recall_cand, perp_results, stamp, p=p)
+    cand = [
+        addr for addr in recall_cand
+        if perp_results.get(addr) is not None and perp_results[addr].passed
+    ]
     # A complete generation owns the same catastrophic source-risk proof as the daily safety path.  Historical
     # fills alone identify only a possible self-liquidation; the fresh clearinghouse snapshot is what turns it
     # into a hard source-account-zero rejection.  This check is sparse because it requests state only for
@@ -8565,6 +8762,9 @@ def scan(db, p) -> None:
                 "coarseRecallPassed": len(recall_cand),
                 "perpPrefilterPassed": len(cand),
                 "perpPrefilterDeferred": sum(result.deferred for result in perp_results.values()),
+                "perpPrefilterResolution": _perp_prefilter_resolution_counts(
+                    perp_results, recall_cand,
+                ),
                 "structurePassed": len(source_pool),
                 **pre_strict_counts,
                 "apiByStage": {

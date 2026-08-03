@@ -33,8 +33,8 @@ Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
     ↓ 7d notional volume ≥ $250k; 7d/30d PnL non-negative (ROI magnitude is ignored)
-Official Portfolio Perp prefilter
-    ↓ independently confirms Perp-only 7d notional volume ≥ $250k
+Hybrid Perp-volume proof
+    ↓ new/incomplete cache: eager Portfolio; complete cache: delta/structure first, local proof or Portfolio fallback
 Deep fills structure + source quality
     ↓ executable markets; no bot/grid/hedge/blow-up/data hard failure
 Fills-only rough Copy
@@ -153,9 +153,11 @@ private local rollout and external-gate checklist in `hyper/docs/live-trading-ro
 Wallet quality and funded-account membership are separate decisions.
 
 - Cheap recall uses only useful activity and PnL direction: Leaderboard 7-day leveraged notional must be at
-  least `$250,000`, and 7-day/30-day PnL may not be negative. Official Portfolio independently confirms
-  Perp-only 7-day notional of at least `$250,000`. Account balance, official ROI magnitude, positive-equity
-  history length, and Perp-profit share are not admission gates.
+  least `$250,000`, and 7-day/30-day PnL may not be negative. New/incomplete caches use official Portfolio to
+  confirm Perp-only 7-day notional before bootstrapping history. Complete caches refresh their delta and
+  structural evidence first; executable 7-day Perp notional at the same floor proves the gate locally, while
+  an inconclusive local result falls back to Portfolio. Account balance, official ROI magnitude,
+  positive-equity history length, and Perp-profit share are not admission gates.
 - Deep fills first reject structural or catastrophic risk: second-scale HFT, OID-level robot density,
   systematic grid/heavy DCA, spot hedge, opaque markets, extreme concurrency, confirmed source-account
   zeroing, a major Copy liquidation, or incomplete data/valuation/market scope. Fill fragments sharing one
@@ -246,12 +248,15 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - New candidates get a full configured profile window.
 - Existing candidates use `candidate_fills` cursors and fetch only new fills, merging them into the 37-day
   cache.
+- A repeated cached HFT/grid/bot/Heavy-DCA/concurrency failure stops after the current delta and local rolling
+  structural recomputation; it does not pay Portfolio, clearinghouse-state or Copy replay requests. These are
+  not permanent blacklists, so new behavior or expired evidence can still restore eligibility.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$250,000` leveraged 7-day notional volume and non-negative 7-day
-  and 30-day PnL. The cheap Portfolio precheck independently confirms at least `$250,000` of Perp-only 7-day
-  volume. Official ROI magnitude and account size are not used. Source quality and follower profitability are
-  confirmed later from fills under a
+  and 30-day PnL. Perp-only 7-day volume is proved eagerly by Portfolio for a new/incomplete cache, or after a
+  complete-cache delta by local executable volume with a Portfolio fallback. Official ROI magnitude and
+  account size are not used. Source quality and follower profitability are confirmed later from fills under a
   standardized `$10,000` starting equity with continuous compounding.
 - Every recall survivor plus current Core/strict-Challenger/open-position owner is refreshed in the complete
   generation. The pre-strict replay queue is independently capped at 32; only the score Top16 can tune.
@@ -561,7 +566,7 @@ the local mock dashboard and inspect the rendered result.
   70% disk use, more than 1 GB normalized database growth per 24 hours, or a WAL above 512 MB; 85% disk use is
   critical. The task relies on SQLite freelist reuse and never runs `VACUUM` or forces a WAL checkpoint.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or
-  the completed run records `full=1`; explicit full bypasses the two-hour Portfolio decision cache but still
-  uses incremental fills for wallets whose complete 37-day history is already present.
+  the completed run records `full=1`; explicit full bypasses the short Portfolio cache for new/incomplete
+  wallets while complete caches still use delta-first structural/local-volume proof and official fallback.
 - Never commit `data/`, `secret/`, `hyper/launcher/data/keys/`, `hyper/launcher/data/targets.json`, or live database
   snapshots. Keep private deployment details in local ignored notes.

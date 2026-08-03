@@ -23,12 +23,23 @@ from hyper.ops import paper_reset, procman, scan_lock, storage_guard
 from hyper.util import now_iso
 
 
+def _scan_post_weight_budget(observer_busy: bool, slow_interval: float) -> float:
+    """Preserve the old heavy-request allowance while letting light state reads use their real weight."""
+    if not observer_busy:
+        return config.INFO_WEIGHT_BUDGET_PER_MIN * config.SCAN_IDLE_WEIGHT_BUDGET_FRACTION
+    # The legacy active-scan pacer allowed one weight-20 fill/Portfolio request per slow interval. Expressing
+    # the same allowance as weight/min keeps live Observer headroom unchanged while a weight-2 clearinghouse
+    # snapshot waits roughly one tenth as long.
+    return 20.0 * 60.0 / max(0.1, float(slow_interval))
+
+
 def _start_adaptive_pace(db_path, slow_interval):
-    """Scan REST pace adapts to whether copy-trading is live. Observer RUNNING → slow (`slow_interval`,
-    the --scan-interval trickle) so the scan yields the IP's HL weight budget to live fill-polling.
-    Observer STOPPED → full speed (SCAN_IDLE_INTERVAL) — nothing else is competing, so a manual rescan
-    finishes in ~15min instead of ~2h. Re-polls every 20s so it adapts if you start/stop the observer
-    mid-scan (config.MIN_POST_INTERVAL is read live by rest.post)."""
+    """Adapt the scanner's weighted REST budget to whether copy-trading has work.
+
+    Observer RUNNING preserves the old one-heavy-request-per-``slow_interval`` allowance but lets cheap
+    account-state requests consume only their real weight. Observer STOPPED receives the larger idle budget.
+    Re-poll every 20 seconds so starting/stopping Observer changes the allowance during a long scan.
+    """
     def _observer_has_work():
         if not procman.observer_running(db_path):
             return False
@@ -57,17 +68,24 @@ def _start_adaptive_pace(db_path, slow_interval):
         except Exception:  # old/in-flight DB: preserve observer priority conservatively
             return True
 
+    applied = {"mode": None, "budget": None}
+
     def _apply_pace():
         observer_busy = _observer_has_work()
         config.MIN_POST_INTERVAL = slow_interval if observer_busy else config.SCAN_IDLE_INTERVAL
+        budget = _scan_post_weight_budget(observer_busy, slow_interval)
+        mode = "observer_busy" if observer_busy else "observer_idle"
+        # Reconfiguring the token bucket refills its burst. The 20-second monitor must only switch it when
+        # Observer state actually changes, otherwise a long scan would accidentally mint a new heavy-request
+        # burst every tick.
+        if applied["mode"] == mode and applied["budget"] == budget:
+            return
         rest.configure_post_budget(
-            weight_per_min=(
-                None if observer_busy else
-                config.INFO_WEIGHT_BUDGET_PER_MIN * config.SCAN_IDLE_WEIGHT_BUDGET_FRACTION
-            ),
+            weight_per_min=budget,
             burst_weight=config.SCAN_IDLE_WEIGHT_BURST,
             min_interval=config.SCAN_IDLE_MIN_REQUEST_INTERVAL,
         )
+        applied.update(mode=mode, budget=budget)
 
     _apply_pace()
     def _tick():
