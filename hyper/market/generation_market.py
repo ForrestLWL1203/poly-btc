@@ -153,6 +153,38 @@ def validate_coins(db, generation: str, coins) -> dict:
     return summary(db, generation)
 
 
+class SealedResolver:
+    """Read-only resolver for a generation that has already been sealed.
+
+    Deferred finalization must reuse the original market surface.  Reopening a
+    normal :class:`Resolver` would either mutate the sealed manifest or fetch
+    current volatility, both of which would splice a different market regime
+    into the generation being resumed.
+    """
+
+    def __init__(self, db, generation: str):
+        self.db = db
+        self.generation = str(generation)
+        if not has_snapshot(db, self.generation):
+            raise MarketSnapshotError(
+                f"market_snapshot_missing_rescan_required:{self.generation}"
+            )
+        self.sigmas, self.market_ctx = load(db, self.generation)
+
+    def ensure(self, coins) -> tuple[dict[str, float], dict[str, dict]]:
+        required = sorted({str(coin) for coin in coins if coin})
+        missing = [coin for coin in required if coin not in self.sigmas]
+        if missing:
+            raise MarketSnapshotError(
+                "market_snapshot_incomplete:"
+                + ",".join(f"{coin}:missing" for coin in missing[:12])
+            )
+        return (
+            {coin: float(self.sigmas[coin]) for coin in required},
+            {coin: dict(self.market_ctx.get(coin) or {}) for coin in required},
+        )
+
+
 class Resolver:
     """Generation-scoped, per-coin de-duplicated market-data resolver."""
 

@@ -150,6 +150,26 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(generation_market.MarketSnapshotError, "hash_mismatch"):
                 generation_market.load(db, "g6")
 
+    def test_sealed_resolver_is_read_only_and_rejects_missing_coin(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            resolver = generation_market.Resolver(
+                db, "g7", 1_700_000_000_000, {"BTC"}, {"BTC": context()},
+            )
+            sample = {"status": "real", "sigma": .05, "fast": .05, "slow": .04, "n": 30}
+            with patch.object(generation_market.volatility, "compute_at", return_value=sample):
+                resolver.ensure({"BTC"})
+            generation_market.seal(db, "g7")
+
+            frozen = generation_market.SealedResolver(db, "g7")
+            sigmas, market_ctx = frozen.ensure({"BTC"})
+
+            self.assertEqual(sigmas, {"BTC": .05})
+            self.assertEqual(market_ctx["BTC"]["mark_px"], 50_000.0)
+            with self.assertRaisesRegex(
+                    generation_market.MarketSnapshotError, "ETH:missing"):
+                frozen.ensure({"ETH"})
+
 
 if __name__ == "__main__":
     unittest.main()

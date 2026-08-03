@@ -454,7 +454,43 @@ def _copy_bt_cached_fills(db, addr, now_ms, p):
     days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
     days += int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
     start_ms = now_ms - days * 86400_000
-    return normalize_copyable_fills(_load_cached_fills(db, addr, start_ms), addr=addr)
+    return normalize_copyable_fills(
+        [
+            fill for fill in _load_cached_fills(db, addr, start_ms)
+            if int(fill.get("time") or 0) <= int(now_ms)
+        ],
+        addr=addr,
+    )
+
+
+def _complete_cached_profile_fills(db, addr, window_start, asof_ms, *, universe=None):
+    """Return a frozen cache window only when its transport proof is complete.
+
+    A quiet wallet can legitimately have no fill near either boundary, so the
+    first/last retained fill cannot prove coverage.  ``fill_cache_state`` owns
+    that proof.  Returning ``None`` means the caller must fetch a bounded delta
+    (or fail closed in explicitly offline mode).
+    """
+    coverage = db.execute(
+        "SELECT coverage_start_ms,coverage_end_ms,backfill_cursor_ms "
+        "FROM fill_cache_state WHERE lower(addr)=lower(?)",
+        (addr,),
+    ).fetchone()
+    if (
+        not coverage
+        or int(coverage[0] or 0) > int(window_start)
+        or int(coverage[1] or 0) < int(asof_ms)
+        or int(coverage[2] or 0) > 0
+    ):
+        return None
+    return normalize_copyable_fills(
+        [
+            fill for fill in _load_cached_fills(db, addr, window_start)
+            if int(fill.get("time") or 0) <= int(asof_ms)
+        ],
+        addr=addr,
+        universe=universe,
+    )
 
 
 def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None,
@@ -1528,10 +1564,23 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
     # while only the scheduler-selected migration/repair wallets perform a complete historical refetch.
     full = bool(force_full or not config.INCREMENTAL_SCAN)
     try:
-        fetched = _fetch_profile_fills(
-            db, addr, window_start, p, full, universe=universe,
-            defer_persist=not persist,
+        cached = (
+            _complete_cached_profile_fills(
+                db, addr, window_start, now_ms, universe=universe,
+            )
+            if getattr(p, "prefer_complete_profile_cache", False) else None
         )
+        if cached is not None:
+            fetched = (cached, False, [], False, None) if not persist else (
+                cached, False, [], False,
+            )
+        elif getattr(p, "profile_cache_only", False):
+            raise RuntimeError("profile_fill_cache_incomplete")
+        else:
+            fetched = _fetch_profile_fills(
+                db, addr, window_start, p, full, universe=universe,
+                defer_persist=not persist,
+            )
         if persist:
             raw_full, hit_cap, new_fills, _fetched_full_window = fetched
             cache_cursor = None
@@ -2986,7 +3035,10 @@ def _rough_replay_source_pool(
     if not addrs:
         return {"attempted": 0, "qualified": [], "failed": []}
     follow = {**params.load_follow(db), **params.load_category(db, "scanner")}
-    valuation_marks = _current_copy_valuation_marks()
+    if hasattr(p, "copy_bt_valuation_marks"):
+        valuation_marks = dict(getattr(p, "copy_bt_valuation_marks") or {})
+    else:
+        valuation_marks = _current_copy_valuation_marks()
     incumbent_core = set(selection.published_core_membership(db) or ())
     qualified, failed = [], []
     cols = storage.PROFILE_COLS.split(",")
@@ -6791,6 +6843,184 @@ def _adopt_resumable_deferred_profiles(db, generation_id: str, scan_stamp) -> in
     return max(0, int(result.rowcount or 0))
 
 
+def _resumable_profile_params(db, generation_id: str, now_ms: int, addrs) -> SimpleNamespace:
+    """Rebuild the narrow scanner context needed to repair deferred incumbents.
+
+    The normal profile process owns a mutable generation resolver while the
+    finalizer sees an already sealed generation.  Recovery therefore uses the
+    read-only resolver and the generation's terminal marks; it never falls back
+    to Observer's mutable volatility cache.
+    """
+    p = SimpleNamespace(
+        days=14,
+        max_pages=5,
+        min_perp=0.6,
+        inactive_days=config.INACTIVE_DAYS,
+        max_daily_eps=30.0,
+        grid_max_adds=3.0,
+        max_single_adds=config.MAX_SINGLE_ADDS_PER_EP,
+        max_fills_per_ep=50,
+        max_concurrent_pos=config.MAX_CONCURRENT_POS,
+        exclude_hft=True,
+        hft_min_hold_min=3.0,
+    )
+    params.apply_scanner_params(db, p)
+    p.scan_generation = generation_id
+    p.full_scan = False
+    p.no_harvest = True
+    p.rebuild_sector_policy = True
+    p.source_only_profile = True
+    p.defer_profile_persist = False
+    p.prefer_complete_profile_cache = True
+    p.profile_cache_only = False
+    p.copy_bt_overrides = _copy_bt_overrides(db)
+    p.margin_equity_pct = p.copy_bt_overrides.get(
+        "MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT,
+    )
+    p.generation_market_resolver = generation_market.SealedResolver(
+        db, generation_id,
+    )
+    snapshot_sigmas, snapshot_ctx = generation_market.load(db, generation_id)
+    p.copy_bt_sigmas = snapshot_sigmas
+    p.copy_bt_market_ctx = snapshot_ctx
+    p.copy_bt_valuation_marks = {
+        coin: f((ctx or {}).get("mark_px"))
+        for coin, ctx in snapshot_ctx.items()
+        if f((ctx or {}).get("mark_px")) > 0.0
+    }
+    window_start = int(now_ms) - int(config.PROFILE_FETCH_DAYS) * 86_400_000
+    cached_coins = {
+        str(fill.get("coin"))
+        for addr in addrs
+        for fill in _load_cached_fills(db, addr, window_start)
+        if fill.get("coin") and int(fill.get("time") or 0) <= int(now_ms)
+    }
+    p.copyable_universe = frozenset(set(snapshot_ctx) | cached_coins)
+    p.official_perp_results = {
+        str(addr or "").lower(): perp_prefilter.Result(
+            "passed",
+            "retention_evidence_refresh",
+            {"week": {"hardGate": False, "retentionRefresh": True}},
+        )
+        for addr in addrs
+    }
+    position_table = _execution_position_table(db)
+    p.open_copy_pnl_by_addr = {
+        str(addr or "").lower(): f(unrealized)
+        for addr, unrealized in db.execute(
+            f"SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM {position_table} "
+            "WHERE status='open' GROUP BY addr"
+        ).fetchall()
+    }
+    return p
+
+
+def _repair_resumable_previous_core_profiles(
+    db, generation_id: str, previous_core, now_ms: int, stamp: str, *, offline=False,
+) -> dict:
+    """Retry only prior-Core profiles left deferred by the interrupted scan.
+
+    A complete cache is replayed without a fill-history request.  If its source
+    cursor predates the frozen generation boundary, the ordinary incremental
+    transport fetches only that wallet's missing delta.  The rest of the scan
+    workset and all completed tuning evidence remain untouched.
+    """
+    previous = sorted({str(addr or "").lower() for addr in previous_core if addr})
+    if not previous:
+        return {"attempted": 0, "repaired": 0, "cacheComplete": 0, "deltaRequired": 0}
+    marks = ",".join("?" for _ in previous)
+    rows = db.execute(
+        "SELECT lower(addr),COALESCE(data_status,'valid'),reason "
+        "FROM profile WHERE profile_generation=? "
+        f"AND lower(addr) IN ({marks})",
+        (generation_id, *previous),
+    ).fetchall()
+    deferred = [row[0] for row in rows if str(row[1]) == "deferred_data_error"]
+    if not deferred:
+        return {"attempted": 0, "repaired": 0, "cacheComplete": 0, "deltaRequired": 0}
+    if offline:
+        raise RuntimeError(f"core_profile_repair_requires_online:{len(deferred)}")
+
+    p = _resumable_profile_params(db, generation_id, now_ms, deferred)
+    cols = storage.PROFILE_COLS.split(",")
+    cache_complete = 0
+    repaired = 0
+    failures = []
+    for index, addr in enumerate(deferred, 1):
+        raw = db.execute(
+            f"SELECT {storage.PROFILE_COLS} FROM profile WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        prior = dict(zip(cols, raw)) if raw else None
+        lb = db.execute(
+            "SELECT account_value,week_roi,mon_roi,all_roi "
+            "FROM leaderboard_staging WHERE generation=? AND lower(addr)=lower(?)",
+            (generation_id, addr),
+        ).fetchone()
+        lb_fields = dict(zip(("account_value", "week_roi", "mon_roi", "all_roi"), lb or ()))
+        window_start = int(now_ms) - int(config.PROFILE_FETCH_DAYS) * 86_400_000
+        wallet_cache_complete = _complete_cached_profile_fills(
+            db, addr, window_start, now_ms, universe=p.copyable_universe,
+        ) is not None
+        if wallet_cache_complete:
+            cache_complete += 1
+        _set_scan_progress(
+            db, state="scanning", stage="repair_deferred_core_profile",
+            candidates_scanned=index - 1, candidates_total=len(deferred),
+        )
+        status, reason, row, _hit_cap = _profile_one(
+            db, addr, int(now_ms), p, prior, lb_fields, stamp,
+            p.copyable_universe, force_full=False, persist=True,
+        )
+        if str(row.get("data_status") or "") != "valid":
+            failures.append(f"{addr}:{reason}")
+            continue
+        if status == "active" and reason == "source_structure_passed":
+            p.source_only_profile = False
+            rough = _rough_replay_source_pool(
+                db, [addr], generation_id, int(now_ms), p, stamp,
+                source="finalize_repair",
+            )
+            p.source_only_profile = True
+            current = db.execute(
+                "SELECT COALESCE(data_status,'valid'),reason FROM profile "
+                "WHERE profile_generation=? AND lower(addr)=lower(?)",
+                (generation_id, addr),
+            ).fetchone()
+            if not current or current[0] != "valid":
+                failures.append(f"{addr}:{current[1] if current else 'rough_missing'}")
+                continue
+            if int(rough.get("attempted") or 0) != 1:
+                failures.append(f"{addr}:rough_not_attempted")
+                continue
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="finalize_repair", stage="profile",
+            addr=addr, status="passed", reason="deferred_core_profile_repaired",
+            payload={
+                "generation": generation_id,
+                "fillTransport": (
+                    "complete_cache" if wallet_cache_complete else "bounded_delta"
+                ),
+            },
+        )
+        repaired += 1
+        db.commit()
+    _set_scan_progress(
+        db, state="scanning", stage="repair_deferred_core_profile",
+        candidates_scanned=len(deferred), candidates_total=len(deferred),
+    )
+    if failures:
+        # Addresses stay private in operator logs; the durable per-wallet rows
+        # already carry the concrete failure reason for the next resume.
+        raise RuntimeError(f"core_profile_repair_incomplete:{len(failures)}")
+    return {
+        "attempted": len(deferred),
+        "repaired": repaired,
+        "cacheComplete": cache_complete,
+        "deltaRequired": len(deferred) - cache_complete,
+    }
+
+
 def finalize_profiled_generation(
     db, generation_id=None, stamp=None, *, retune=True, offline=False,
 ) -> dict:
@@ -6848,7 +7078,6 @@ def finalize_profiled_generation(
         "WHERE generation=? AND is_candidate=1",
         (generation_id,),
     ).fetchone()[0] or 0)
-    pre_strict_counts = _pre_strict_counts(db, generation_id)
 
     # Resuming a cached generation must replay the same immutable evidence horizon that the original scan
     # sealed. Using the recovery day's clock would silently add an empty tail and could trigger fresh market
@@ -6858,6 +7087,12 @@ def finalize_profiled_generation(
         raise RuntimeError("profile_generation_asof_missing")
     previous_core = selection.published_core_membership(db) or []
     previous_strategy_bundle = strategy_revision.load_active(db)
+    repair_summary = _repair_resumable_previous_core_profiles(
+        db, generation_id, previous_core, now_ms, stamp, offline=bool(offline),
+    )
+    if repair_summary.get("repaired"):
+        profile_coverage = _profiled_generation_coverage(db, generation_id, meta[5])
+    pre_strict_counts = _pre_strict_counts(db, generation_id)
     _set_scan_progress(
         db, state="scanning", stage="prepare_selection_candidates",
         candidates_scanned=profile_total, candidates_total=profile_total,
@@ -7002,6 +7237,7 @@ def finalize_profiled_generation(
             "selectionChallenger": challenger_count,
             "selectionSearch": marginal.search_meta or {},
             "resumedFinalize": True,
+            "deferredCoreRepair": repair_summary,
         }
         db.execute(
             "UPDATE scan_generation SET metrics_json=? WHERE generation=?",

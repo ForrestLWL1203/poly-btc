@@ -110,7 +110,10 @@ reabsorbed after the Top16 is frozen.
 
 Tuning is bounded by candidate counts, never by wall-clock time. Scanner, Challenger and deferred-finalizer
 services have no total start timeout. A resource guard checkpoints and defers before OOM; the independent
-finalizer timer resumes a ready generation without refetching wallet history. Per-request network timeouts and
+finalizer timer resumes a ready generation without refetching completed wallets. A prior Core left with a
+transient data error is retried alone: a complete frozen fill cache is reused directly, otherwise only its
+missing source delta is fetched before rebuilding current-generation Profile and Rough Copy evidence. The
+sealed generation market snapshot remains read-only throughout recovery. Per-request network timeouts and
 retry/deferred queues remain mandatory so a dead connection cannot block the generation forever.
 
 ### 1. Generation safety

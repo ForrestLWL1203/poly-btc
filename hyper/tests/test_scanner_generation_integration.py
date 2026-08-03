@@ -1540,6 +1540,105 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.close()
 
+    def test_complete_cached_profile_fills_requires_cursor_coverage_and_freezes_asof(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            fills = [
+                {
+                    "coin": "BTC", "time": 1500, "tid": 1, "side": "B",
+                    "px": "100", "sz": "1", "startPosition": "0",
+                },
+                {
+                    "coin": "BTC", "time": 2500, "tid": 2, "side": "S",
+                    "px": "110", "sz": "1", "startPosition": "1",
+                },
+            ]
+            db.executemany(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES(?,?,?,?)",
+                [("0xaaa", fill["tid"], fill["time"], json.dumps(fill)) for fill in fills],
+            )
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,"
+                "backfill_cursor_ms,updated_at) VALUES('0xaaa',1000,2200,NULL,'now')"
+            )
+            db.commit()
+
+            cached = scanner._complete_cached_profile_fills(
+                db, "0xaaa", 1000, 2200, universe={"BTC"},
+            )
+
+            self.assertEqual([row["tid"] for row in cached], [1])
+            db.execute(
+                "UPDATE fill_cache_state SET coverage_end_ms=2100 WHERE addr='0xaaa'"
+            )
+            self.assertIsNone(scanner._complete_cached_profile_fills(
+                db, "0xaaa", 1000, 2200, universe={"BTC"},
+            ))
+
+    def test_resumable_core_repair_reprofiles_only_deferred_incumbent(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status) "
+                "VALUES(?,?,?,?,?)",
+                [
+                    ("0xaaa", "active", "fills_error:InterfaceError", "g1", "deferred_data_error"),
+                    ("0xbbb", "active", "source_structure_passed", "g1", "valid"),
+                ],
+            )
+            db.execute(
+                "INSERT INTO leaderboard_staging(generation,addr,account_value) "
+                "VALUES('g1','0xaaa',10000)"
+            )
+            db.commit()
+            repair_params = SimpleNamespace(
+                copyable_universe={"BTC"}, source_only_profile=True,
+            )
+
+            def fake_profile(db_, addr, *_args, **_kwargs):
+                db_.execute(
+                    "UPDATE profile SET status='active',reason='source_structure_passed',"
+                    "data_status='valid' WHERE addr=?",
+                    (addr,),
+                )
+                db_.commit()
+                return "active", "source_structure_passed", {
+                    "addr": addr, "status": "active", "reason": "source_structure_passed",
+                    "data_status": "valid",
+                }, False
+
+            with patch.object(
+                    scanner, "_resumable_profile_params", return_value=repair_params), \
+                    patch.object(scanner, "_complete_cached_profile_fills", return_value=[]), \
+                    patch.object(scanner, "_profile_one", side_effect=fake_profile) as profile, \
+                    patch.object(
+                        scanner, "_rough_replay_source_pool",
+                        return_value={"attempted": 1, "qualified": ["0xaaa"], "failed": []},
+                    ) as rough:
+                result = scanner._repair_resumable_previous_core_profiles(
+                    db, "g1", ["0xaaa", "0xbbb"], 2000, "finish",
+                )
+
+            self.assertEqual(result, {
+                "attempted": 1, "repaired": 1, "cacheComplete": 1, "deltaRequired": 0,
+            })
+            self.assertEqual(profile.call_count, 1)
+            self.assertEqual(profile.call_args.args[1], "0xaaa")
+            rough.assert_called_once()
+
+    def test_offline_finalize_refuses_deferred_incumbent_network_repair(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status) "
+                "VALUES('0xaaa','active','fills_error:InterfaceError','g1','deferred_data_error')"
+            )
+            db.commit()
+            with self.assertRaisesRegex(RuntimeError, "core_profile_repair_requires_online:1"):
+                scanner._repair_resumable_previous_core_profiles(
+                    db, "g1", ["0xaaa"], 2000, "finish", offline=True,
+                )
+
     def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
