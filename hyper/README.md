@@ -40,9 +40,9 @@ Deep fills structure + source quality
 Fills-only rough Copy
     ↓ 3/4 active weeks; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
 Profit-aligned score (70/30 return with bounded confidence haircut)
-    ↓ frozen Top32 → current-surface strict path → score Top16 tune seed
+    ↓ frozen Top32 → current-surface strict path → score Top16 formation seed
 Final strict individual/shared Copy
-    ↓ tuned-surface Top32 certification → final Top16/prefix → exact-Core retune/closure
+    ↓ optional tuned-surface Top32 certification → final Top16/prefix → optional exact-Core retune/closure
     ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ mode-bound Observer (new targets start now; active Live sessions recover durably)
@@ -211,10 +211,11 @@ Wallet quality and funded-account membership are separate decisions.
   cost-multiple, maximum-drawdown and 75-point gates do not exist.
 - Confirmed source-account zeroing liquidations and those >=8% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
-- Wallet count and parameters are tuned together over profit-aligned score prefixes. The initial winning surface
-  requalifies every path-valid Top32 wallet. After the shared prefix chooses the proposed Core, that exact
-  membership is full-tuned and the Top32 ranking/prefix is certified again. Membership/order and parameters must
-  stabilize within two rounds before publication.
+- With automatic tuning enabled, wallet count and parameters are tuned together over profit-aligned score
+  prefixes. The initial winning surface requalifies every path-valid Top32 wallet. After the shared prefix
+  chooses the proposed Core, that exact membership is full-tuned and the Top32 ranking/prefix is certified
+  again; membership/order and parameters must stabilize within two rounds. With automatic tuning disabled, the
+  same strict qualification and prefix search run on the active fixed surface without either tuning step.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
   five days. Daily refresh first certifies with the active parameters. Low and medium financial risk remain
@@ -380,6 +381,16 @@ positive open PnL remains reference-only. Rough replay uses fills only and is ca
 wallets. Strict replay reuses the bounded Top32 K-line path cache. The current-surface Top16 is only the tune
 seed; the final tuned surface certifies the complete path-valid Top32 before forming the final Top16.
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
+
+The Dashboard's `AUTO_TUNE_MARGIN_ENABLE` switch is authoritative for automatic generation formation. When
+disabled, complete and Challenger generations never invoke a parameter grid merely because membership or order
+changed. They keep the active margin/leverage/add surface, strictly replay every bounded candidate and search
+the profit-aligned Core prefix on that fixed surface. The existing bounded adaptive count search probes the
+capacity boundary (for example `16 → 8 → 12 → 10`) rather than decrementing every count. Congestion,
+insufficient open coverage, liquidation or shared-account risk can only shrink the prefix; if no non-empty
+prefix passes, the generation fails closed with zero Core. When enabled, count-specific tuning and
+exact-membership closure remain part of publication. Explicit operator optimization/finalization commands may
+still request tuning independently of this automatic switch.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
 -8%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum

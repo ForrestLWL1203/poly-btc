@@ -153,7 +153,7 @@ PARAM_SPEC = [
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调参", "开启后，每个新代际都对本代际Top Core统一优化保证金、杠杆和加仓参数，并在最终严格回放通过后原子发布；失败则保留上一代"),
+        "自动调参", "开启后，每个新代际都对本代际Top Core统一优化保证金、杠杆和加仓参数；关闭后固定使用当前参数完成严格回放和自适应最佳Core前缀搜索，成员变化也不会触发调参"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
         "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、盈利压力与最终爆仓≤3规则"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",

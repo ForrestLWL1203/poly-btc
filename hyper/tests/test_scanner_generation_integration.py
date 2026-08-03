@@ -243,6 +243,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("automatic_retune = _automatic_formation_retune_enabled(db)", scan_source)
         self.assertIn("retune=automatic_retune, force_retune=automatic_retune", scan_source)
         self.assertIn("_assert_automatic_formation_tuned(", scan_source)
+        self.assertIn("required=bool(automatic_retune)", scan_source)
+        self.assertNotIn('stage="core_membership_retune"', scan_source)
+        self.assertIn(
+            "automatic_retune and membership_changed and desired_retained",
+            scan_source,
+        )
         self.assertNotIn("generation_id, stamp, now_ms, retune=False", scan_source)
         self.assertIn("retune_formation=True", optimize_source)
         self.assertIn(
@@ -307,7 +313,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("retune = bool(retune and (force_retune or rebalance_due))", source)
         self.assertIn("retune=bool(retune), force_retune=bool(retune)", finalize_source)
 
-    def test_core_order_change_is_a_membership_change_that_requires_retune(self):
+    def test_core_order_change_is_detected_even_when_fixed_surface_can_publish_it(self):
         formation = {"selected": ("0xbbb", "0xaaa")}
 
         self.assertTrue(scanner._formation_membership_changed(
@@ -316,6 +322,26 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertFalse(scanner._formation_membership_changed(
             formation, ("0xbbb", "0xaaa"),
         ))
+
+    def test_no_retune_finalize_is_a_hard_fixed_surface_contract(self):
+        source = inspect.getsource(scanner.finalize_profiled_generation)
+
+        self.assertNotIn("membership_retune_triggered", source)
+        self.assertNotIn("_formation_membership_changed", source)
+        self.assertIn("formation, required=bool(retune)", source)
+        self.assertIn(
+            "retune=bool(retune and membership_changed and desired_retained)",
+            source,
+        )
+
+    def test_daily_auto_tune_switch_can_publish_a_fixed_surface_promotion(self):
+        source = inspect.getsource(scanner.refresh_challengers)
+
+        self.assertIn("automatic_retune = _automatic_formation_retune_enabled(db)", source)
+        self.assertIn('elif fixed_decision["mode"] == "promote":', source)
+        self.assertIn("if automatic_retune:", source)
+        self.assertIn("fixed_surface_promotion = True", source)
+        self.assertIn("challenger_daily_promotion_fixed_surface", source)
 
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:

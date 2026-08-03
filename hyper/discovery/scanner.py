@@ -6761,17 +6761,8 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         db, generation_id, stamp, now_ms,
         retune=bool(retune), force_retune=bool(retune),
     )
-    membership_retune_triggered = (
-        not bool(retune)
-        and _formation_membership_changed(formation, previous_core)
-    )
-    if membership_retune_triggered:
-        formation = form_quality_prefix(
-            db, generation_id, stamp, now_ms,
-            retune=True, force_retune=True,
-        )
     _assert_automatic_formation_tuned(
-        formation, required=bool(retune or membership_retune_triggered),
+        formation, required=bool(retune),
     )
     recommended_core_order = tuple(formation.get("selected") or ())
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
@@ -6826,7 +6817,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                 ),
                 replacement_gate=replacement_gate,
                 decisions=retention_decisions,
-                retune=membership_changed and bool(desired_retained),
+                retune=bool(retune and membership_changed and desired_retained),
             )
             _apply_formation_params(db, formation, publication_stamp)
             rows, marginal = _build_retained_selection(
@@ -7614,6 +7605,7 @@ def refresh_challengers(db, p) -> dict:
             )
             _prefetch_selection_paths(db, preview, now_ms, generation_id)
 
+        automatic_retune = _automatic_formation_retune_enabled(db)
         fixed_formation = form_quality_prefix(
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
@@ -7674,6 +7666,7 @@ def refresh_challengers(db, p) -> dict:
         )
         membership_retune_triggered = False
         retune_attempted = False
+        fixed_surface_promotion = False
         promotion_blocked_reason = None
         formation = fixed_formation
         publish_core_order = fixed_decision["selected"]
@@ -7699,50 +7692,71 @@ def refresh_challengers(db, p) -> dict:
             )
             db.commit()
         elif fixed_decision["mode"] == "promote":
-            retune_attempted = True
-            _set_scan_progress(
-                db, stage="challenger_membership_retune",
-                candidates_scanned=len(workset), candidates_total=len(workset),
-            )
-            tuned_formation = form_quality_prefix(
-                db, generation_id, stamp, now_ms,
-                retune=True, force_retune=True,
-            )
-            tuned_core_order = tuple(
-                str(addr or "").lower()
-                for addr in (tuned_formation.get("selected") or ())
-                if addr
-            )
-            tuned_decision = _challenger_daily_membership_decision(
-                daily_floor_order, tuned_core_order,
-            )
-            if tuned_decision["mode"] == "promote":
-                formation = tuned_formation
-                publish_core_order = tuned_decision["selected"]
-                membership_retune_triggered = True
-            else:
-                promotion_blocked_reason = (
-                    "retuned_proposal_not_strict_superset"
+            if automatic_retune:
+                retune_attempted = True
+                _set_scan_progress(
+                    db, stage="challenger_membership_retune",
+                    candidates_scanned=len(workset), candidates_total=len(workset),
                 )
+                tuned_formation = form_quality_prefix(
+                    db, generation_id, stamp, now_ms,
+                    retune=True, force_retune=True,
+                )
+                tuned_core_order = tuple(
+                    str(addr or "").lower()
+                    for addr in (tuned_formation.get("selected") or ())
+                    if addr
+                )
+                tuned_decision = _challenger_daily_membership_decision(
+                    daily_floor_order, tuned_core_order,
+                )
+                if tuned_decision["mode"] == "promote":
+                    formation = tuned_formation
+                    publish_core_order = tuned_decision["selected"]
+                    membership_retune_triggered = True
+                else:
+                    promotion_blocked_reason = (
+                        "retuned_proposal_not_strict_superset"
+                    )
+                    formation = fixed_formation
+                    publish_core_order = fixed_core_order
+                pipeline_audit._insert_event(
+                    db, stamp=stamp, source="challenger_daily",
+                    stage="membership_retune",
+                    status="ok" if membership_retune_triggered else "blocked",
+                    reason=(
+                        "challenger_promotion_retuned"
+                        if membership_retune_triggered
+                        else promotion_blocked_reason
+                    ),
+                    payload={
+                        "previousCore": len(previous_core),
+                        "fixedSurfaceCore": len(fixed_core),
+                        "added": len(fixed_core - previous_core),
+                        "removed": len(previous_core - fixed_core),
+                        "tunedCore": len(tuned_core_order),
+                    },
+                )
+            else:
+                # A disabled auto-tune switch is a hard fixed-surface contract.  The current parameters have
+                # already certified this strict profit prefix, so a membership/order change must not smuggle
+                # the expensive tuner back into the generation. Congestion is resolved by the fixed-surface
+                # prefix search shrinking Core, never by changing leverage, margin or add parameters.
+                fixed_surface_promotion = True
                 formation = fixed_formation
-                publish_core_order = fixed_core_order
-            pipeline_audit._insert_event(
-                db, stamp=stamp, source="challenger_daily",
-                stage="membership_retune",
-                status="ok" if membership_retune_triggered else "blocked",
-                reason=(
-                    "challenger_promotion_retuned"
-                    if membership_retune_triggered
-                    else promotion_blocked_reason
-                ),
-                payload={
-                    "previousCore": len(previous_core),
-                    "fixedSurfaceCore": len(fixed_core),
-                    "added": len(fixed_core - previous_core),
-                    "removed": len(previous_core - fixed_core),
-                    "tunedCore": len(tuned_core_order),
-                },
-            )
+                publish_core_order = fixed_decision["selected"]
+                pipeline_audit._insert_event(
+                    db, stamp=stamp, source="challenger_daily",
+                    stage="promotion_review", status="ok",
+                    reason="challenger_daily_promotion_fixed_surface",
+                    payload={
+                        "previousCore": len(previous_core),
+                        "fixedSurfaceCore": len(fixed_core),
+                        "added": len(fixed_core - previous_core),
+                        "removed": len(previous_core - fixed_core),
+                        "autoTuneEnabled": False,
+                    },
+                )
             db.commit()
         elif fixed_decision["mode"] == "carry":
             promotion_blocked_reason = fixed_decision["reason"]
@@ -7863,9 +7877,13 @@ def refresh_challengers(db, p) -> dict:
                 "challenger_daily_promotion_retune"
                 if membership_retune_triggered
                 else (
-                    "challenger_daily_promotion_only_core_carried"
-                    if promotion_blocked_reason
-                    else "challenger_daily_evidence_refresh"
+                    "challenger_daily_promotion_fixed_surface"
+                    if fixed_surface_promotion
+                    else (
+                        "challenger_daily_promotion_only_core_carried"
+                        if promotion_blocked_reason
+                        else "challenger_daily_evidence_refresh"
+                    )
                 )
             )
         )
@@ -7920,6 +7938,7 @@ def refresh_challengers(db, p) -> dict:
                 "coreAdded": len(added_core), "coreRemoved": len(removed_core),
                 "membershipRetuneTriggered": membership_retune_triggered,
                 "retuneAttempted": retune_attempted,
+                "fixedSurfacePromotion": fixed_surface_promotion,
                 "promotionOnly": True,
                 "promotionBlockedReason": promotion_blocked_reason,
                 "verifiedSourceBlowups": len(verified_source_blowups),
@@ -8560,22 +8579,9 @@ def scan(db, p) -> None:
                     db, generation_id, stamp, now_ms,
                     retune=automatic_retune, force_retune=automatic_retune,
                 )
-                membership_retune_triggered = (
-                    not automatic_retune
-                    and _formation_membership_changed(formation, previous_core)
-                )
-                if membership_retune_triggered:
-                    _set_scan_progress(
-                        db, stage="core_membership_retune",
-                        candidates_scanned=len(workset), candidates_total=len(workset),
-                    )
-                    formation = form_quality_prefix(
-                        db, generation_id, stamp, now_ms,
-                        retune=True, force_retune=True,
-                    )
                 _assert_automatic_formation_tuned(
                     formation,
-                    required=bool(automatic_retune or membership_retune_triggered),
+                    required=bool(automatic_retune),
                 )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
@@ -8675,7 +8681,9 @@ def scan(db, p) -> None:
                         ),
                         replacement_gate=replacement_gate,
                         decisions=retention_decisions,
-                        retune=membership_changed and bool(desired_retained),
+                        retune=bool(
+                            automatic_retune and membership_changed and desired_retained
+                        ),
                     )
                     _apply_formation_params(
                         db, retained_formation, selection_stamp,

@@ -92,10 +92,17 @@ The production flow is:
 `Leaderboard staging → $250k volume/PnL-direction recall → hybrid eager-new/fill-first cached Perp-volume proof
 → executable-market fill cache → structural hard gates → generation-frozen activity + fills-only conservative
 Copy/PF/lottery gates → scored Top32 →
-current-surface strict path and profit-aligned-score Top16 tune seed → count-specific adaptive tune → tuned-surface
-individual strict across the complete path-valid Top32 → score Top16/prefix shared replay → exact-Core
-retune and bounded membership/parameter closure → atomic generation/selection/strategy revision publish →
+current-surface strict path and profit-aligned-score Top16 seed → optional count-specific adaptive tune →
+effective-surface individual strict across the complete path-valid Top32 → score Top16/prefix shared replay →
+optional exact-Core retune and bounded membership/parameter closure → atomic generation/selection/strategy revision publish →
 Observer reload → replay-summary materialization`
+
+`AUTO_TUNE_MARGIN_ENABLE=false` is a hard fixed-surface contract for automatic complete and Challenger
+generations. Membership or ordering changes may not re-enable the tuner. The active parameters still receive
+the complete individual/shared strict contract; congestion, insufficient open coverage or portfolio risk must
+shrink the profit-aligned Core prefix through the existing bounded adaptive count search (for example
+`16 → 8 → 12 → 10`), never sequential count enumeration. No feasible non-empty prefix may publish as an
+intentional zero-Core generation. When enabled, the tuned and exact-membership closure paths above remain mandatory.
 
 ### 1. Generation safety
 
@@ -178,8 +185,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   strictly. Existing `active` and `draining` Core wallets form the effective membership floor; `requalify`
   wallets have released their seats but remain in the daily strict-requalification pool. Low and medium
   financial risk never removes an incumbent or revokes entry permission. Empty seats may be filled by the
-  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. Membership changes alone
-  trigger exact-membership retuning. A current-Core data/path failure retains the previous generation and does
+  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. Membership changes trigger
+  exact-membership retuning only while `AUTO_TUNE_MARGIN_ENABLE` is enabled; otherwise a strict promotion may
+  publish on the active fixed surface. A current-Core data/path failure retains the previous generation and does
   not advance risk confirmation. Automatic removal is limited to durable high risk, recoverable zero-equity
   unavailability, structural uncopyability, or an already-resolved losing operator exit. High risk requires a
   verified source self-liquidation plus zero equity/no positions, or a Canonical/actual Copy liquidation losing
