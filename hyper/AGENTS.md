@@ -540,6 +540,8 @@ through those retries; only markets still missing after all five attempts are cl
   SQLite connection. A transport or database-lock exception is visible in Observer health and retries without
   silently changing the runtime to paused; only a successful exchange snapshot that proves ledger drift enters
   persistent `reconcile_required`. Every exposure increase still performs its own mandatory fresh reconciliation.
+  Threaded volatility refreshes likewise open short-lived independent connections; no worker thread may borrow
+  Observer's signal/control connection.
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use

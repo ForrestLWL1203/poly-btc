@@ -89,7 +89,11 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             with patch("hyper.execution.observer.volatility.refresh", return_value=0.0095) as refresh:
                 await obs._ensure_vol("xyz:SP500")
 
-            refresh.assert_called_once_with(db, "xyz:SP500")
+            refresh.assert_called_once()
+            refresh_db, coin, asset_ctx = refresh.call_args.args
+            self.assertIsNot(refresh_db, db)
+            self.assertEqual(coin, "xyz:SP500")
+            self.assertIsNone(asset_ctx)
             self.assertAlmostEqual(obs.vol["xyz:SP500"], 0.0095)
 
         asyncio.run(run())
@@ -218,6 +222,25 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             execution_db.execute("PRAGMA journal_mode").fetchone()[0].lower(),
             "wal",
         )
+
+    def test_threaded_volatility_refresh_does_not_share_observer_connection(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            seen = []
+
+            def refresh(refresh_db, coin, asset_ctx=None):
+                seen.append((refresh_db, coin, asset_ctx))
+                return 0.08
+
+            with patch("hyper.execution.observer.volatility.refresh", side_effect=refresh):
+                await obs._ensure_vol("ZEC")
+
+            self.assertEqual(obs.vol["ZEC"], 0.08)
+            self.assertEqual(seen[0][1], "ZEC")
+            self.assertIsNot(seen[0][0], db)
+
+        asyncio.run(run())
 
     def test_live_sizing_retries_transient_reconcile_without_pausing(self):
         async def run():

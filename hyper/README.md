@@ -73,7 +73,8 @@ them again before sizing. The session-start equity is only the same drawdown-smo
 prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
 Live reconciliation/order work owns a separate WAL database connection from Observer signal processing. A
 temporary transport or SQLite lock failure is reported and retried instead of leaving the engine invisibly
-paused; only a completed reconciliation that proves exchange/ledger drift requires operator recovery.
+paused; only a completed reconciliation that proves exchange/ledger drift requires operator recovery. Threaded
+volatility refreshes also use independent short-lived connections rather than sharing Observer's transaction.
 Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
 Unified account and a passing read-only preflight. A successful startup enters full Live execution immediately;
 equity sizing and the normal deployment/per-coin/add/liquidity limits remain the risk boundaries.

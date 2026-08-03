@@ -370,6 +370,17 @@ class Observer:
         db.execute(f"PRAGMA busy_timeout={int(config.OBSERVER_DB_BUSY_TIMEOUT_MS)}")
         return db
 
+    def _refresh_vol_worker(self, coin: str, asset_ctx=None):
+        """Refresh volatility without lending Observer's transaction to a worker thread."""
+        if not self.db_path or self.db_path == ":memory:":
+            return volatility.refresh(self.db, coin, asset_ctx)
+        db = sqlite3.connect(self.db_path, timeout=30)
+        db.execute("PRAGMA busy_timeout=30000")
+        try:
+            return volatility.refresh(db, coin, asset_ctx)
+        finally:
+            db.close()
+
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
         (capped_leverage_we_mirror, raw_leverage, margin_used, entry_px). ONE call serves both our
@@ -1319,7 +1330,7 @@ class Observer:
         # market-context row was staged before candle volatility was collected; refresh it immediately instead
         # of sizing the first order with a temporary fallback (currently neutral 7% / mid tier).
         if not self.vol.get(coin) or needs_market_ctx:
-            self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+            self.vol[coin] = await asyncio.to_thread(self._refresh_vol_worker, coin)
 
     async def prewarm_vol(self):
         """Warm σ for the top-N-by-24h-volume crypto + each builder dex at startup (background, gentle):
@@ -1337,7 +1348,7 @@ class Observer:
                     continue
                 self.vol_coins.add(coin)
                 try:
-                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin, ctx)
+                    self.vol[coin] = await asyncio.to_thread(self._refresh_vol_worker, coin, ctx)
                 except Exception:  # noqa: BLE001
                     pass
         _log(f"vol prewarmed: {len(self.vol)} coins (top {config.VOL_PREWARM_TOP}/pool by 24h vol)")
@@ -1350,7 +1361,9 @@ class Observer:
             ctxs = await asyncio.to_thread(rest.asset_contexts)
             for coin in list(self.vol_coins):
                 try:
-                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin, ctxs.get(coin))
+                    self.vol[coin] = await asyncio.to_thread(
+                        self._refresh_vol_worker, coin, ctxs.get(coin),
+                    )
                 except Exception:  # noqa: BLE001
                     pass
 
