@@ -1,6 +1,7 @@
 import tempfile
 import inspect
 import json
+import sqlite3
 import time
 import unittest
 from pathlib import Path
@@ -559,7 +560,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
     def test_complete_scan_retries_transient_profile_and_sigma_failures_before_seal(self):
         source = inspect.getsource(scanner.scan)
+        reader_source = inspect.getsource(scanner._profile_reader)
 
+        self.assertIn('PRAGMA query_only=ON', reader_source)
+        self.assertIn('_profile_reader(profile_db_path, db)', source)
         self.assertIn('stage="retry_deferred_profiles"', source)
         self.assertIn('stage="retry_deferred_market"', source)
         self.assertIn("rough_copy_market_data_error:sigma_request_failed:", source)
@@ -568,6 +572,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             source.index("generation_market.seal("),
         )
         self.assertIn("while market_retry_addrs:", source)
+
+    def test_profile_reader_is_independent_and_query_only_for_file_database(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db_path = db.execute("PRAGMA database_list").fetchone()[2]
+
+            with scanner._profile_reader(db_path, db) as reader:
+                self.assertIsNot(reader, db)
+                self.assertEqual(reader.execute("PRAGMA query_only").fetchone()[0], 1)
+                self.assertEqual(reader.execute("SELECT 1").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    reader.execute("CREATE TABLE forbidden_worker_write(value)")
+
+            self.assertIsNone(db.execute(
+                "SELECT name FROM sqlite_master WHERE name='forbidden_worker_write'"
+            ).fetchone())
 
     def test_successful_rough_retry_clears_stale_market_deferred_marker(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2514,7 +2534,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 now_calls += 1
                 return "2026-01-01T00:00:00Z" if now_calls <= 2 else "2026-01-01T00:01:00Z"
 
-            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(_db, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr,
                     "status": "active",
@@ -2530,15 +2550,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "times_seen": 1,
                     "times_active": 1,
                 }
-                cols = storage.PROFILE_COLS.split(",")
-                with scanner._db_lock:
-                    db_.execute(
-                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                        f"VALUES ({','.join('?' for _ in cols)})",
-                        [row.get(col) for col in cols],
-                    )
-                    db_.commit()
-                return "active", "ok", row, False
+                return "active", "ok", scanner._queue_profile_persist(row), False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
@@ -2616,22 +2628,14 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
-            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe,
+            def fake_profile(_db, addr, now_ms, p, prior, lb, stamp, universe,
                              force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": .8,
                     "profile_generation": p.scan_generation, "data_status": "valid",
                     "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
                 }
-                cols = storage.PROFILE_COLS.split(",")
-                with scanner._db_lock:
-                    db_.execute(
-                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                        f"VALUES ({','.join('?' for _ in cols)})",
-                        [row.get(col) for col in cols],
-                    )
-                    db_.commit()
-                return "active", "ok", row, False
+                return "active", "ok", scanner._queue_profile_persist(row), False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
@@ -2655,7 +2659,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
-            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(_db, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": 0.9,
                     "raw_quality_score": 0.9, "profile_generation": p.scan_generation,
@@ -2673,15 +2677,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 8),
                     "times_seen": 1, "times_active": 1,
                 }
-                cols = storage.PROFILE_COLS.split(",")
-                with scanner._db_lock:
-                    db_.execute(
-                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                        f"VALUES ({','.join('?' for _ in cols)})",
-                        [row.get(col) for col in cols],
-                    )
-                    db_.commit()
-                return "active", "ok", row, False
+                return "active", "ok", scanner._queue_profile_persist(row), False
 
             def fake_rough(db_, addrs, generation_id, now_ms, p, stamp, **kwargs):
                 db_.execute(
@@ -2923,7 +2919,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(_db, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": 0.99,
                     "raw_quality_score": 0.99, "profile_generation": p.scan_generation,
@@ -2931,15 +2927,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
                     "times_seen": 1, "times_active": 1,
                 }
-                cols = storage.PROFILE_COLS.split(",")
-                with scanner._db_lock:
-                    db_.execute(
-                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                        f"VALUES ({','.join('?' for _ in cols)})",
-                        [row.get(col) for col in cols],
-                    )
-                    db_.commit()
-                return "active", "ok", row, False
+                return "active", "ok", scanner._queue_profile_persist(row), False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \

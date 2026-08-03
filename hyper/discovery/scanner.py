@@ -5,6 +5,7 @@ Copy replay, and atomic Core/Challenger publication.
 """
 import calendar
 import concurrent.futures
+from contextlib import contextmanager
 from dataclasses import replace
 import gc
 import hashlib
@@ -75,6 +76,28 @@ from hyper.util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 _STRICT_REPLAY_PROCESS_CONTEXT = {}
 _SCANNER_HEARTBEAT_INTERVAL_S = 60.0
+
+
+@contextmanager
+def _profile_reader(db_path: str, fallback_db):
+    """Give one Profile task its own read-only SQLite handle.
+
+    File-backed production scans must not share the scanner writer connection
+    across Profile threads.  The fallback exists only for isolated ``:memory:``
+    test adapters, whose database cannot be reached from a second connection.
+    """
+    if not db_path:
+        yield fallback_db
+        return
+    read_db = sqlite3.connect(
+        f"file:{db_path}?mode=ro", uri=True, timeout=30,
+    )
+    try:
+        read_db.execute("PRAGMA query_only=ON")
+        read_db.execute("PRAGMA busy_timeout=30000")
+        yield read_db
+    finally:
+        read_db.close()
 
 
 def _execution_position_table(db) -> str:
@@ -8212,6 +8235,8 @@ def refresh_challengers(db, p) -> dict:
             ).fetchall()
         }
 
+        profile_db_path = str(db.execute("PRAGMA database_list").fetchone()[2] or "")
+
         def work(addr):
             prior = priors.get(addr)
             if addr in incomplete_cache:
@@ -8233,10 +8258,11 @@ def refresh_challengers(db, p) -> dict:
             # The frozen daily pool already owns a complete 37-day cache, so even an official business-gate
             # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
             # fails Portfolio first; skipping here would hide the liquidation fill needed by hard safety below.
-            result = _profile_one(
-                db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
-                force_full=False,
-            )
+            with _profile_reader(profile_db_path, db) as read_db:
+                result = _profile_one(
+                    read_db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
+                    force_full=False,
+                )
             # Portfolio week volume is a new-wallet download decision only. Every frozen strict
             # Core/Challenger already owns a complete cache and must be requalified from fills even when its
             # current cheap-recall telemetry falls below the new-wallet floor.
@@ -9245,13 +9271,18 @@ def scan(db, p):
     workers = max(1, getattr(p, "workers", 8))      # I/O-bound; the REST pacer still caps total rate
     p.source_only_profile = True
     p.defer_profile_persist = True
+    profile_db_path = str(db.execute("PRAGMA database_list").fetchone()[2] or "")
 
     def _work(addr):
         prior = priors.get(addr)
-        return addr, prior, _profile_one(
-            db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
-            force_full=addr in full_refetch,
-        )
+        # ``check_same_thread=False`` permits sharing a connection but does not make concurrent calls on
+        # that one connection safe.  Each task therefore owns a query-only handle; the parent remains the
+        # sole writer and commits the returned cache/profile artifacts in batches.
+        with _profile_reader(profile_db_path, db) as read_db:
+            return addr, prior, _profile_one(
+                read_db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
+                force_full=addr in full_refetch,
+            )
 
     done = 0
     priority_done_at = time.time() if not priority_addrs else None

@@ -590,8 +590,9 @@ the local mock dashboard and inspect the rendered result.
 - With no executable Observer work, Scanner switches from a fixed request interval to a 95%-budget weighted
   token bucket and backs off automatically on HTTP 429. Once Observer has a Core target or open position, Scanner
   immediately returns to its configured slow interval.
-- Profile workers return cache/profile/Episode artifacts; the scanner parent commits them in bounded SQLite
-  batches. Strict per-wallet replay and independent tune candidates use CPU-affinity-aware process workers
+- Complete-scan and daily-refresh Profile workers use independent short-lived query-only SQLite connections
+  and return cache/profile/Episode artifacts; the scanner parent alone commits them in bounded batches. Strict
+  per-wallet replay and independent tune candidates use CPU-affinity-aware process workers
   (`1 core → serial`, up to four workers), while all database writes remain in the parent process.
 - Scanner liveness is independent of stage completion: a best-effort minute writer updates the existing
   `process_status('scanner')` row through its own short-timeout SQLite connection, and Dashboard falls back to

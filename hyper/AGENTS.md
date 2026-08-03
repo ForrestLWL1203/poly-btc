@@ -123,6 +123,8 @@ published omission. Transient generation-volatility failures are not memoized; t
 retried with bounded exponential backoff before the market snapshot seals. Terminal cache-integrity outcomes
 remain explicit quarantine evidence. Legacy/interrupted single-member holes may be closed only from frozen
 workset/Perp audit evidence and never by splicing a later market surface into the generation.
+Complete-scan and daily-refresh Profile threads must never share the writer connection: each task uses an
+independent query-only handle and returns artifacts to the parent, which is the only Profile/cache writer.
 Resume checks compact formation evidence before any replay allocation or resource gate. Cgroup
 `memory.current` remains telemetry only because it includes reclaimable SQLite file pages; deferral uses the
 process RSS/Swap, available memory, decoded-surface estimate and cgroup anonymous/unreclaimable working set.
