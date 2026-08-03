@@ -716,6 +716,12 @@ repeating the coarse count grid.
 already-complete but unpublished generation after a finalization failure. `finalize-profiled --no-retune` is the
 explicit operational fallback for sealing the active parameter surface when expensive tuning exceeds host
 capacity; it does not skip strict individual, path, cost, capacity, or shared-membership gates.
+For an operator-starred current Core with deferred strict path evidence, finalization must first retry only
+that wallet's bounded public path. Preserve quick count/surface evidence and invalidate only path-dependent
+strict caches. If the path remains incomplete, leave the generation resume-ready; never publish the starred
+wallet with incomplete strict proof and never restart the full wallet harvest. Daily refresh instead keeps
+the incumbent's previous risk state on temporary deferred evidence, without admitting a new wallet through
+that incomplete evidence.
 
 `reset-paper --yes` is the supported from-zero reset. Stop Observer and Scanner first. It clears discovery,
 cache, selection, strategy, replay and Paper trading state, preserves operator `params`, and recreates the

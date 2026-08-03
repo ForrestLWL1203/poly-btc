@@ -318,6 +318,12 @@ Each complete generation persists its exact Profile workset as bounded audit det
 is retried once on the main thread after the pool closes; if it fails again, the wallet receives a durable
 deferred outcome instead of silently reducing generation coverage. Recovery of an older single-member hole
 uses only frozen workset/Perp evidence and never mixes current market inputs into the old generation.
+If an operator-starred current Core reaches the winning surface with `copy_path_incomplete`, recovery retries
+only that wallet's bounded public path, preserves count/quick-surface evidence, and invalidates only
+path-dependent finalist/individual/final-shared cache rows. An unresolved path makes the generation
+resume-ready instead of failed; it cannot publish incomplete strict evidence. Daily Challenger refreshes keep
+the incumbent's prior risk/retention state for the same temporary deferred evidence and continue evaluating
+the rest of the generation, while promotion remains subject to the complete strict contract.
 
 Before production rollout, operators can run the same pipeline against an online SQLite backup:
 

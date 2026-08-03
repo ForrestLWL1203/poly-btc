@@ -4981,7 +4981,7 @@ def _assert_daily_promotion_parity(
 
 
 def _complete_retention_decisions(
-    db, generation_id, previous_core, formation,
+    db, generation_id, previous_core, formation, *, strict_deferred_mode="error",
 ) -> dict[str, core_retention.RetentionDecision]:
     """Classify frozen current-generation evidence for every prior Core."""
     qualifications = {
@@ -5027,7 +5027,34 @@ def _complete_retention_decisions(
             or str(evidence[5] or "") == "deferred"
         )
         if deferred:
-            raise RuntimeError(f"core_retention_strict_evidence_deferred:{addr}")
+            if strict_deferred_mode == "defer":
+                # Complete scans may retain only explicit operator-starred Core.  A temporary path/data
+                # gap must not silently waive that override or publish it with incomplete strict proof;
+                # preserve the generation and let the finalizer retry after its bounded path repair.
+                raise resource_guard.ResourceDeferred({
+                    "status": "resource_deferred",
+                    "reasons": ["pinned_core_strict_evidence_deferred"],
+                    "generation": generation_id,
+                    "deferredPinned": 1,
+                })
+            if strict_deferred_mode != "retain":
+                raise RuntimeError(f"core_retention_strict_evidence_deferred:{addr}")
+            previous = wallet_retention_state(db, addr)
+            decisions[addr] = core_retention.advance(
+                previous_status=previous["status"],
+                previous_streak=previous["failureStreak"],
+                previous_reason=previous["failureReason"],
+                previous_started_generation=previous["startedGeneration"],
+                generation=generation_id,
+                scan_kind="challenger_refresh",
+                scan_successful=True,
+                reason=(
+                    qualification.get("firstFailure")
+                    or evidence[6] or "strict_evidence_deferred"
+                ),
+                deferred=True,
+            )
+            continue
         qualification_class, qualification_reason = (
             core_retention.qualification_failure(qualification)
         )
@@ -7410,6 +7437,89 @@ def _repair_resumable_previous_core_profiles(
     }
 
 
+def _repair_resumable_pinned_strict_paths(
+    db, generation_id: str, pinned_core, now_ms: int, stamp: str, *, offline=False,
+) -> dict:
+    """Retry only operator-starred Core whose winning-surface strict path was incomplete.
+
+    Count-first and quick-surface evidence is path-independent and remains reusable.  Once the bounded
+    path cache changes, only strict-finalist, individual and final-shared rows are invalidated; this avoids
+    rerunning the completed profile phase or discarding the inexpensive count search.
+    """
+    pinned = sorted({str(addr or "").lower() for addr in pinned_core if addr})
+    if not pinned:
+        return {
+            "attempted": 0, "pathRows": 0, "missingCoins": 0,
+            "strictEvidenceInvalidated": 0,
+        }
+    marks = ",".join("?" for _ in pinned)
+    deferred = [
+        str(row[0]).lower()
+        for row in db.execute(
+            "SELECT addr FROM pre_strict_evidence WHERE generation=? "
+            f"AND lower(addr) IN ({marks}) AND strict_status='deferred' "
+            "AND strict_first_failure='copy_path_incomplete'",
+            (generation_id, *pinned),
+        ).fetchall()
+    ]
+    if not deferred:
+        return {
+            "attempted": 0, "pathRows": 0, "missingCoins": 0,
+            "strictEvidenceInvalidated": 0,
+        }
+    if offline:
+        raise RuntimeError(
+            f"pinned_core_strict_path_repair_requires_online:{len(deferred)}"
+        )
+    _set_scan_progress(
+        db, state="scanning", stage="repair_deferred_pinned_strict_path",
+        candidates_scanned=0, candidates_total=len(deferred),
+    )
+    path_summary = _prefetch_selection_paths(
+        db, deferred, int(now_ms), generation_id,
+    )
+    deleted = db.execute(
+        "DELETE FROM formation_prefix_evidence WHERE generation=? "
+        "AND policy_version=? AND (params_hash LIKE 'strict-finalist:%' "
+        "OR params_hash LIKE 'individual:%' OR params_hash LIKE 'final-shared:%')",
+        (generation_id, _FORMATION_PREFIX_CACHE_POLICY),
+    ).rowcount
+    deferred_marks = ",".join("?" for _ in deferred)
+    db.execute(
+        "UPDATE pre_strict_evidence SET strict_status='frozen_top16',"
+        "strict_first_failure=NULL WHERE generation=? "
+        f"AND lower(addr) IN ({deferred_marks})",
+        (generation_id, *deferred),
+    )
+    for addr in deferred:
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="finalize_repair",
+            stage="strict_path_repair", addr=addr, status="retried",
+            reason="operator_starred_path_repair",
+            payload={
+                "generation": generation_id,
+                "pathRows": int(path_summary.get("pathRows") or 0),
+                "missingCoins": int(path_summary.get("missingCoins") or 0),
+                "pathRetryAttempts": int(
+                    path_summary.get("pathRetryAttempts") or 0
+                ),
+            },
+        )
+    db.commit()
+    _set_scan_progress(
+        db, state="scanning", stage="repair_deferred_pinned_strict_path",
+        candidates_scanned=len(deferred), candidates_total=len(deferred),
+    )
+    return {
+        "attempted": len(deferred),
+        "pathRows": int(path_summary.get("pathRows") or 0),
+        "coverage": float(path_summary.get("coverage") or 0.0),
+        "missingCoins": int(path_summary.get("missingCoins") or 0),
+        "pathRetryAttempts": int(path_summary.get("pathRetryAttempts") or 0),
+        "strictEvidenceInvalidated": max(0, int(deleted or 0)),
+    }
+
+
 def finalize_profiled_generation(
     db, generation_id=None, stamp=None, *, retune=True, offline=False,
 ) -> dict:
@@ -7485,6 +7595,10 @@ def finalize_profiled_generation(
     repair_summary = _repair_resumable_previous_core_profiles(
         db, generation_id, previous_core, now_ms, stamp, offline=bool(offline),
     )
+    repair_summary["pinnedStrictPath"] = _repair_resumable_pinned_strict_paths(
+        db, generation_id, pinned_core_order, now_ms, stamp,
+        offline=bool(offline),
+    )
     repair_summary["recoveredMissing"] = recovered_missing
     repair_summary["marketSnapshotCoins"] = int(market_snapshot.get("coins") or 0)
     if repair_summary.get("repaired"):
@@ -7509,6 +7623,7 @@ def finalize_profiled_generation(
     recommended_core_order = tuple(formation.get("selected") or ())
     retention_decisions = _complete_retention_decisions(
         db, generation_id, pinned_core_order, formation,
+        strict_deferred_mode="defer",
     )
     desired_retained = _effective_core_order_from_addrs(
         pinned_core_order, recommended_core_order, retention_decisions,
@@ -8346,6 +8461,7 @@ def refresh_challengers(db, p) -> dict:
         try:
             daily_retention_decisions = _complete_retention_decisions(
                 db, generation_id, previous_core_order, fixed_formation,
+                strict_deferred_mode="retain",
             )
         except RuntimeError as exc:
             if not str(exc).startswith("core_retention_evidence_incomplete:"):
@@ -9472,6 +9588,7 @@ def scan(db, p):
                 recommended_core_order = tuple(formation.get("selected") or ())
                 retention_decisions = _complete_retention_decisions(
                     db, generation_id, pinned_core_order, formation,
+                    strict_deferred_mode="defer",
                 )
                 desired_retained = _effective_core_order_from_addrs(
                     pinned_core_order, recommended_core_order, retention_decisions,
@@ -9765,10 +9882,15 @@ def scan(db, p):
             # Profiles/fill cache are already complete and durable.  A transient portfolio/path/tuner
             # failure must retain them for ``finalize-profiled`` instead of forcing another 825-wallet
             # network sweep merely because atomic publication did not complete.
+            retryable = isinstance(exc, resource_guard.ResourceDeferred)
             db.execute(
-                "UPDATE scan_generation SET status='leaderboard_validated',complete=0,publishable=0,"
+                "UPDATE scan_generation SET status=?,complete=0,publishable=0,"
                 "is_current=0,error=? WHERE generation=?",
-                (f"finalize_error:{str(exc)[:500]}", generation_id),
+                (
+                    "ready" if retryable else "leaderboard_validated",
+                    str(exc)[:500] if retryable else f"finalize_error:{str(exc)[:500]}",
+                    generation_id,
+                ),
             )
             pipeline_audit._insert_event(
                 db,

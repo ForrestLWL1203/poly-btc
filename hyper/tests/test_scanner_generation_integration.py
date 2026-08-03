@@ -1942,6 +1942,138 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db, "g1", ["0xaaa"], 2000, "finish", offline=True,
                 )
 
+    def test_daily_deferred_retention_preserves_incumbent_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status) "
+                "VALUES('0xaaa','active','pre_strict_qualified','g1','valid')"
+            )
+            db.execute(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,strict_status,"
+                "strict_first_failure,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "g1", "0xaaa", scanner.pre_strict.POLICY_VERSION,
+                    scanner.pre_strict.SELECTION_MODEL_VERSION, "passed", "deferred",
+                    "copy_path_incomplete", "now",
+                ),
+            )
+            db.commit()
+
+            decisions = scanner._complete_retention_decisions(
+                db, "g1", ["0xaaa"],
+                {"qualifications": {"0xaaa": {
+                    "deferred": True, "firstFailure": "copy_path_incomplete",
+                }}},
+                strict_deferred_mode="retain",
+            )
+
+            self.assertTrue(decisions["0xaaa"].retain_enabled)
+            self.assertEqual(
+                decisions["0xaaa"].action, "unchanged_incomplete_evidence",
+            )
+
+    def test_complete_deferred_starred_retention_requests_resume(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status) "
+                "VALUES('0xaaa','active','pre_strict_qualified','g1','valid')"
+            )
+            db.execute(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,strict_status,"
+                "strict_first_failure,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "g1", "0xaaa", scanner.pre_strict.POLICY_VERSION,
+                    scanner.pre_strict.SELECTION_MODEL_VERSION, "passed", "deferred",
+                    "copy_path_incomplete", "now",
+                ),
+            )
+            db.commit()
+
+            with self.assertRaises(scanner.resource_guard.ResourceDeferred) as raised:
+                scanner._complete_retention_decisions(
+                    db, "g1", ["0xaaa"],
+                    {"qualifications": {"0xaaa": {
+                        "deferred": True, "firstFailure": "copy_path_incomplete",
+                    }}},
+                    strict_deferred_mode="defer",
+                )
+
+            self.assertEqual(
+                raised.exception.detail["reasons"],
+                ["pinned_core_strict_evidence_deferred"],
+            )
+            self.assertNotIn("0xaaa", str(raised.exception))
+
+    def test_pinned_strict_path_repair_preserves_quick_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,strict_status,"
+                "strict_first_failure,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "g1", "0xaaa", scanner.pre_strict.POLICY_VERSION,
+                    scanner.pre_strict.SELECTION_MODEL_VERSION, "passed", "deferred",
+                    "copy_path_incomplete", "now",
+                ),
+            )
+            for params_hash in (
+                "quick:keep", "strict-finalist:drop", "individual:drop",
+                "final-shared:drop",
+            ):
+                db.execute(
+                    "INSERT INTO formation_prefix_evidence "
+                    "(generation,policy_version,params_hash,membership_hash,member_count,"
+                    "evaluation_json,replay_json,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        "g1", scanner._FORMATION_PREFIX_CACHE_POLICY, params_hash,
+                        params_hash, 1, "{}", "{}", "now", "now",
+                    ),
+                )
+            db.commit()
+
+            with patch.object(
+                scanner, "_prefetch_selection_paths",
+                return_value={
+                    "pathRows": 42, "coverage": 1.0, "missingCoins": 0,
+                    "pathRetryAttempts": 1,
+                },
+            ) as prefetch:
+                result = scanner._repair_resumable_pinned_strict_paths(
+                    db, "g1", ["0xaaa"], 2000, "finish",
+                )
+
+            prefetch.assert_called_once_with(db, ["0xaaa"], 2000, "g1")
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["strictEvidenceInvalidated"], 3)
+            self.assertEqual(
+                db.execute(
+                    "SELECT params_hash FROM formation_prefix_evidence "
+                    "WHERE generation='g1'"
+                ).fetchall(),
+                [("quick:keep",)],
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT strict_status,strict_first_failure "
+                    "FROM pre_strict_evidence WHERE generation='g1' AND addr='0xaaa'"
+                ).fetchone(),
+                ("frozen_top16", None),
+            )
+
+    def test_complete_scan_resource_defer_is_resume_ready(self):
+        source = inspect.getsource(scanner.scan)
+
+        self.assertIn(
+            "retryable = isinstance(exc, resource_guard.ResourceDeferred)", source,
+        )
+        self.assertIn('"ready" if retryable else "leaderboard_validated"', source)
+
     def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -2004,14 +2136,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_finalize_profiled_prefetches_only_winning_prefix_after_formation(self):
         source = inspect.getsource(scanner.finalize_profiled_generation)
 
+        repair_at = source.index("_repair_resumable_pinned_strict_paths(")
         formation_at = source.index("formation = form_quality_prefix(")
         selected_at = source.index("publication_core_order = tuple(")
         prefetch_at = source.index(
             "_prefetch_selection_paths(\n"
             "            db, publication_core_order, now_ms, generation_id,"
         )
+        self.assertLess(repair_at, formation_at)
         self.assertLess(formation_at, selected_at)
         self.assertLess(selected_at, prefetch_at)
+        self.assertIn('strict_deferred_mode="defer"', source)
         self.assertNotIn("PRE_STRICT_QUEUE_MAX_N", source)
 
     def test_final_copy_summary_reuses_publication_certification(self):
