@@ -407,6 +407,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
                     ("HARVEST_MONTH_ROI_MIN", "20", "20"),
                     ("HARVEST_ALL_ROI_MIN", "10", "10"),
                     ("HARVEST_ROI_WINDOWS_MIN_PASS", "2", "2"),
+                    ("DAILY_SCAN_TIME_BUDGET_MIN", "60", "60"),
+                    ("SCAN_FINALIZE_RESERVE_MIN", "15", "15"),
                 ],
             )
             db.commit()
@@ -423,6 +425,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "HARVEST_MONTH_ROI_MIN",
                 "HARVEST_ALL_ROI_MIN",
                 "HARVEST_ROI_WINDOWS_MIN_PASS",
+                "DAILY_SCAN_TIME_BUDGET_MIN",
+                "SCAN_FINALIZE_RESERVE_MIN",
             ):
                 self.assertIsNone(db.execute(
                     "SELECT 1 FROM params WHERE key=?", (key,)

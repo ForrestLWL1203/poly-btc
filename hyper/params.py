@@ -38,12 +38,8 @@ PARAM_SPEC = [
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "hidden",  "int",     "rescan", config.INACTIVE_DAYS,
         "旧72小时新鲜度", "仅兼容旧快照和展示；不再参与资格"),
-    ("DAILY_SCAN_TIME_BUDGET_MIN", "scanner", "hidden", "int", "rescan", config.DAILY_SCAN_TIME_BUDGET_MIN,
-        "每日扫描时间预算", ""),
     ("CORE_REFRESH_DEADLINE_MIN", "scanner", "hidden", "int", "rescan", config.CORE_REFRESH_DEADLINE_MIN,
-        "核心钱包刷新期限", ""),
-    ("SCAN_FINALIZE_RESERVE_MIN", "scanner", "hidden", "int", "rescan", config.SCAN_FINALIZE_RESERVE_MIN,
-        "扫描收尾预留时间", ""),
+        "核心钱包刷新SLO", "仅记录刷新延迟是否达标，不会中止、截断或降级采集"),
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "Core容量上限", "仅限制最多可发布多少个Core；不是目标数量，系统不会为了接近上限而补位"),
     ("PRE_STRICT_QUEUE_MAX_N", "scanner", "black", "int", "rescan",
@@ -348,6 +344,7 @@ def seed_params(db):
         "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D',"
         "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS',"
         "'CORE_RETENTION_MIN_COPY_RETURN_30D',"
+        "'DAILY_SCAN_TIME_BUDGET_MIN','SCAN_FINALIZE_RESERVE_MIN',"
         "'HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
         "'HARVEST_ROI_WINDOWS_MIN_PASS','MAX_TOTAL_MARGIN_PCT','MAX_DEPLOY_PCT','DEPLOY_FULL_PCT',"
         "'WALLET_MARGIN_CAP_PCT','WALLET_SECTOR_SIDE_CAP_PCT',"
@@ -525,9 +522,7 @@ SCANNER_ARG_MAP = {
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
     "COPY_BT_MIN_CLOSED": "copy_bt_min_closed",
     "MAX_CONCURRENT_POS": "max_concurrent_pos",
-    "DAILY_SCAN_TIME_BUDGET_MIN": "daily_scan_time_budget_min",
     "CORE_REFRESH_DEADLINE_MIN": "core_refresh_deadline_min",
-    "SCAN_FINALIZE_RESERVE_MIN": "scan_finalize_reserve_min",
 }
 
 

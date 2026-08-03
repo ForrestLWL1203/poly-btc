@@ -448,11 +448,8 @@ PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 # each scheduled refresh updates its delta and re-scores the cached rolling window. The live open-position
 # snapshot is unaffected.
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
-# Daily discovery budget. Core/held/challenger wallets are outside the discovery cap; the
-# remaining budget is split new / near-miss / fair exploration and finalized before the wall-clock limit.
-DAILY_SCAN_TIME_BUDGET_MIN = 60
+# Core refresh latency is telemetry only. It never stops, truncates or publishes an incomplete generation.
 CORE_REFRESH_DEADLINE_MIN = 15
-SCAN_FINALIZE_RESERVE_MIN = 15
 LEADERBOARD_MIN_ROW_RATIO = 0.85
 LEADERBOARD_MIN_COMPLETE_RATIO = 0.99
 
