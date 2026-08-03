@@ -7197,14 +7197,7 @@ def finalize_profiled_generation(
     refresh_watchlist(
         db, stamp, leaderboard_generation=generation_id, commit=False,
     )
-    preview = _selection_prefetch_candidates(
-        db, generation_id, now_ms,
-        limit=int(config.PRE_STRICT_QUEUE_MAX_N),
-    )
     db.rollback()
-    if preview and not offline:
-        _set_scan_progress(db, stage="prefetch_selection_paths")
-        _prefetch_selection_paths(db, preview, now_ms, generation_id)
     formation = form_quality_prefix(
         db, generation_id, stamp, now_ms,
         retune=bool(retune), force_retune=bool(retune),
@@ -7213,6 +7206,22 @@ def finalize_profiled_generation(
         formation, required=bool(retune),
     )
     recommended_core_order = tuple(formation.get("selected") or ())
+    # Recovery is deliberately cache-first.  The sealed formation evidence already owns the frozen Top16,
+    # its local parameter surface and the winning final count.  Prefetching the wider Top32 before reading
+    # that evidence needlessly decoded every candidate fill and rebuilt price trajectories (the exact
+    # multi-hundred-MiB high-water allocation this recovery path is intended to avoid).  Once formation has
+    # selected its bounded prefix, prepare paths only for the wallets that can actually reach publication.
+    # A genuine formation cache miss still prepares its own strict-finalist paths in auto_tune; this final
+    # selected-prefix pass merely keeps network work outside the atomic publication transaction.
+    if recommended_core_order and not offline:
+        _set_scan_progress(
+            db, stage="prefetch_selection_paths",
+            candidates_scanned=len(recommended_core_order),
+            candidates_total=len(recommended_core_order),
+        )
+        _prefetch_selection_paths(
+            db, recommended_core_order, now_ms, generation_id,
+        )
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:

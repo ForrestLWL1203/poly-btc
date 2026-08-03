@@ -1763,6 +1763,19 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(metrics["selectionCore"], 0)
             self.assertTrue(metrics["resumedFinalize"])
 
+    def test_finalize_profiled_prefetches_only_winning_prefix_after_formation(self):
+        source = inspect.getsource(scanner.finalize_profiled_generation)
+
+        formation_at = source.index("formation = form_quality_prefix(")
+        selected_at = source.index("recommended_core_order = tuple(")
+        prefetch_at = source.index(
+            "_prefetch_selection_paths(\n"
+            "            db, recommended_core_order, now_ms, generation_id,"
+        )
+        self.assertLess(formation_at, selected_at)
+        self.assertLess(selected_at, prefetch_at)
+        self.assertNotIn("PRE_STRICT_QUEUE_MAX_N", source)
+
     def test_final_copy_summary_reuses_publication_certification(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
