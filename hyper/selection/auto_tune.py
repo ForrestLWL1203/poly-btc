@@ -2062,8 +2062,12 @@ def tune_local_prefix_surfaces(
         surface = _local_complete_surface(follow, surface)
         key = (int(count), _local_surface_marker(surface))
         if key not in cache:
-            resource_guard.require_replay_budget()
             started = time.monotonic()
+            # ``evaluate`` owns persistent evidence lookup as well as the
+            # actual replay.  Checking the memory guard here happened before
+            # that lookup, so a resume could be deferred merely while reading
+            # an already-computed compact SQLite row.  Cache-miss replay paths
+            # perform the guard immediately before allocating their surface.
             value = dict(evaluate(int(count), surface, stage) or {})
             value.update(count=int(count), surface=surface, stage=stage)
             cache[key] = value

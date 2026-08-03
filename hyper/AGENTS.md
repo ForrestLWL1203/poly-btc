@@ -115,6 +115,10 @@ transient data error is retried alone: a complete frozen fill cache is reused di
 missing source delta is fetched before rebuilding current-generation Profile and Rough Copy evidence. The
 sealed generation market snapshot remains read-only throughout recovery. Per-request network timeouts and
 retry/deferred queues remain mandatory so a dead connection cannot block the generation forever.
+Resume checks compact formation evidence before any replay allocation or resource gate. Cgroup
+`memory.current` remains telemetry only because it includes reclaimable SQLite file pages; deferral uses the
+process RSS/Swap, available memory, decoded-surface estimate and cgroup anonymous/unreclaimable working set.
+Strict-finalist paths are loaded only for a cache miss and released before Top16 individual replay.
 
 ### 1. Generation safety
 

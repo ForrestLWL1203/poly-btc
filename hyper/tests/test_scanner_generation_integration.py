@@ -187,6 +187,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("current_surface_evaluate", source)
         self.assertNotIn("except TimeoutError", source)
         self.assertIn("strict_local_validate", source)
+        self.assertIn("def strict_validation_path", source)
+        self.assertIn("strict_path_context.clear()", source)
         self.assertIn("required_count=0", source)
         self.assertIn("exhaustive_below=0", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)

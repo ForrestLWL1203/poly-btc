@@ -103,7 +103,14 @@ def process_tree_usage_bytes(root_pid: int | None = None) -> tuple[int, int]:
 
 
 def cgroup_memory_metrics() -> dict:
-    """Read cgroup-v2 scanner memory telemetry when available."""
+    """Read cgroup-v2 scanner memory telemetry when available.
+
+    ``memory.current`` includes reclaimable file-backed cache.  Large sequential
+    SQLite reads can therefore leave it close to ``MemoryHigh`` even after the
+    Python replay objects have been released.  Keep the total for observability,
+    but expose the anonymous/unreclaimable working set separately so callers do
+    not treat an evictable database page cache as an OOM condition.
+    """
     try:
         row = next(
             line for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
@@ -116,9 +123,32 @@ def cgroup_memory_metrics() -> dict:
         for line in (root / "memory.events").read_text(encoding="utf-8").splitlines():
             key, value = line.split(None, 1)
             events[key] = int(value)
-        return {"currentBytes": current, "events": events}
+        memory_stat = {}
+        for line in (root / "memory.stat").read_text(encoding="utf-8").splitlines():
+            key, value = line.split(None, 1)
+            memory_stat[key] = int(value)
+        anonymous = int(memory_stat.get("anon") or 0)
+        file_cache = int(memory_stat.get("file") or 0)
+        unreclaimable = sum(int(memory_stat.get(key) or 0) for key in (
+            "slab_unreclaimable", "sock", "pagetables", "percpu",
+        ))
+        return {
+            "currentBytes": current,
+            "anonymousBytes": anonymous,
+            "fileCacheBytes": file_cache,
+            "unreclaimableBytes": unreclaimable,
+            "workingSetBytes": anonymous + unreclaimable,
+            "events": events,
+        }
     except (OSError, StopIteration, TypeError, ValueError):
-        return {"currentBytes": None, "events": {}}
+        return {
+            "currentBytes": None,
+            "anonymousBytes": None,
+            "fileCacheBytes": None,
+            "unreclaimableBytes": None,
+            "workingSetBytes": None,
+            "events": {},
+        }
 
 
 def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
@@ -137,8 +167,18 @@ def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
         reasons.append("available_memory")
     if rss + estimated_decode > max_rss:
         reasons.append("process_tree_rss")
-    if cgroup["currentBytes"] is not None and cgroup["currentBytes"] + estimated_decode > max_rss:
-        reasons.append("cgroup_memory")
+    # Do not gate on cgroup ``memory.current``: it includes evictable SQLite
+    # file pages and double-counts the surface estimate against that cache.  A
+    # process-tree RSS check remains the primary boundary.  The cgroup working
+    # set catches anonymous/kernel memory in the unit that is not visible in
+    # the current process tree (for example a just-detached helper).
+    cgroup_working_set = cgroup.get("workingSetBytes")
+    if (
+        cgroup_working_set is not None
+        and cgroup_working_set + estimated_decode > max_rss
+        and cgroup_working_set > rss
+    ):
+        reasons.append("cgroup_working_set")
     if swap > max_swap:
         reasons.append("process_tree_swap")
     return {
@@ -154,6 +194,10 @@ def assess_replay_budget(raw_fill_bytes: int = 0) -> dict:
         "maxProcessTreeSwapBytes": max_swap,
         "physicalMemoryBytes": physical_memory_bytes(),
         "cgroupMemoryCurrentBytes": cgroup["currentBytes"],
+        "cgroupAnonymousBytes": cgroup.get("anonymousBytes"),
+        "cgroupFileCacheBytes": cgroup.get("fileCacheBytes"),
+        "cgroupUnreclaimableBytes": cgroup.get("unreclaimableBytes"),
+        "cgroupWorkingSetBytes": cgroup_working_set,
         "cgroupMemoryEvents": cgroup["events"],
     }
 

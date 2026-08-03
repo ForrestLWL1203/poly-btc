@@ -1136,6 +1136,37 @@ class AutoTuneTests(unittest.TestCase):
         self.assertTrue(result["eligible_to_apply"])
         self.assertFalse(any(count < 8 or count > 12 for count, _stage, _marker in evaluated))
 
+    def test_local_tuner_leaves_memory_guard_to_cache_aware_evaluator(self):
+        follow = {
+            key: float(getattr(auto_tune.config, key))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+
+        def evaluate(count, _surface, _stage):
+            return {
+                "netPnl": float(count), "feasible": True,
+                "liquidations": 0, "capacityFit": 1.0, "openRate": 1.0,
+            }
+
+        with patch.object(
+            auto_tune.resource_guard, "require_replay_budget",
+            side_effect=AssertionError("orchestrator checked before persistent cache"),
+        ), patch.object(
+            auto_tune, "local_shared_margin_surfaces",
+            side_effect=lambda _follow, base, **_kwargs: [base],
+        ), patch.object(
+            auto_tune, "local_leverage_surfaces", return_value=[],
+        ), patch.object(
+            auto_tune, "local_add_surfaces", return_value=[],
+        ):
+            result = auto_tune.tune_local_prefix_surfaces(
+                candidate_count=3, center_count=2, follow=follow,
+                evaluate=evaluate,
+                validate=lambda _count, _surface: {"eligible": True},
+            )
+
+        self.assertTrue(result["eligible_to_apply"])
+
     def test_signal_heavy_profitable_underdeployed_tier_gets_one_breakout_probe(self):
         follow = {
             key: float(getattr(auto_tune.config, key))

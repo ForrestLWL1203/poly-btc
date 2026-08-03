@@ -3918,6 +3918,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             local_cache_stats["persistentHits"] += 1
             value, replay_summary = cached
         else:
+            # The longest prepared fill sequence is already resident.  Check
+            # the live working set only for a real replay miss; cached compact
+            # evidence must remain resumable even when SQLite file pages make
+            # cgroup memory.current look large.
+            resource_guard.require_replay_budget()
             _set_scan_progress(
                 db, stage=stage, candidates_scanned=count,
                 candidates_total=len(tune_ordered),
@@ -4057,16 +4062,35 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             winning_count = int(repair_center["count"])
             tune_reason = "active_surface_repair_center"
 
-        validation_fills = list(tune_window_fills.get(max(tune_window_fills)) or [])
         validation_path_start = now_ms - (
             max(tune_window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
         ) * 86_400_000
-        validation_path = prepare_price_path(price_path.load_refined(
-            db, validation_fills, validation_path_start, now_ms,
-        ))
-        validation_path_meta = price_path.coverage(
-            db, validation_fills, validation_path_start, now_ms,
-        )
+        strict_path_context = {}
+
+        def strict_validation_path():
+            """Load the shared refined path only for a strict cache miss.
+
+            Recovery commonly has every finalist in
+            ``formation_prefix_evidence``.  Eagerly rebuilding the full path
+            before checking those rows both wasted minutes and overlapped the
+            largest fill/path objects in memory.
+            """
+            if not strict_path_context:
+                resource_guard.require_replay_budget()
+                validation_fills = list(
+                    tune_window_fills.get(max(tune_window_fills)) or []
+                )
+                strict_path_context["path"] = prepare_price_path(
+                    price_path.load_refined(
+                        db, validation_fills, validation_path_start, now_ms,
+                    )
+                )
+                strict_path_context["meta"] = price_path.coverage(
+                    db, validation_fills, validation_path_start, now_ms,
+                )
+                del validation_fills
+            return strict_path_context["path"], strict_path_context["meta"]
+
         policy = load_copy_policy(base_follow)
 
         def strict_local_validate(count, surface):
@@ -4088,6 +4112,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                     local_cache_stats["hits"] += 1
                     local_cache_stats["persistentHits"] += 1
                     return dict(replay_summary.get("validation") or {})
+            validation_path, validation_path_meta = strict_validation_path()
             filtered = auto_tune._filter_window_fills_by_addr(
                 tune_window_fills, addrs,
             )
@@ -4194,6 +4219,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, chosen_run, retune=True,
         )
+        # The final Top16 individual and shared-count stages load their own
+        # bounded paths.  Do not retain the finalist path across that phase
+        # boundary; this overlap was the dominant single-process RSS peak.
+        strict_path_context.clear()
+        gc.collect()
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
