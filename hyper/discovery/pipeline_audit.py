@@ -83,6 +83,42 @@ def record_workset_summary(db: sqlite3.Connection, stamp: str, source: str, brea
     )
 
 
+def record_workset_members(
+    db: sqlite3.Connection,
+    stamp: str,
+    source: str,
+    addrs: Iterable[str],
+    *,
+    full_refetch_addrs: Iterable[str] = (),
+) -> None:
+    """Persist the exact generation workset so an interrupted profile pass is resumable.
+
+    The compact workset summary proves only the count.  Recovery also needs the immutable address set;
+    otherwise one worker exception leaves no authoritative way to distinguish the missing member from a
+    cheap-recall wallet that intentionally never entered Profile.  This reuses the bounded, 90-day
+    ``pipeline_audit`` detail surface instead of adding another business table.
+    """
+    _delete_stage(db, stamp, source, "workset_member")
+    full_refetch = {
+        str(addr or "").strip().lower() for addr in full_refetch_addrs if str(addr or "").strip()
+    }
+    ordered = list(dict.fromkeys(
+        str(addr or "").strip().lower() for addr in addrs if str(addr or "").strip()
+    ))
+    for rank, addr in enumerate(ordered, 1):
+        _insert_event(
+            db,
+            stamp=stamp,
+            source=source,
+            stage="workset_member",
+            addr=addr,
+            rank=rank,
+            status="pending",
+            reason="full_refetch" if addr in full_refetch else "delta",
+            payload=None,
+        )
+
+
 def record_prune_summary(db: sqlite3.Connection, stamp: str, source: str, counts: dict) -> None:
     """Snapshot discovery cache pruning performed at scan end."""
     _delete_stage(db, stamp, source, "prune")

@@ -1799,6 +1799,50 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.close()
 
+    def test_resume_conservatively_closes_one_legacy_worker_profile_hole(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status,evaluated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                ("0xcovered", "rejected", "economic_miss", "g1", "valid", "scan-start"),
+            )
+            for addr in ("0xcovered", "0xmissing"):
+                scanner.pipeline_audit._insert_event(
+                    db, stamp="scan-start", source="scan", stage="perp_prefilter",
+                    addr=addr, status="passed", reason="perp_week_volume",
+                    payload={"windows": {"week": {"perpVlm": 1_000_000}}},
+                )
+            scanner.pipeline_audit._insert_event(
+                db, stamp="scan-start", source="scan", stage="profile",
+                addr="0xcovered", status="rejected", reason="economic_miss",
+            )
+            db.commit()
+
+            recovered = scanner._recover_missing_profile_outcomes(
+                db, "g1", "scan-start", 2,
+            )
+
+            self.assertEqual(recovered, 1)
+            self.assertEqual(
+                db.execute(
+                    "SELECT status,reason,profile_generation,data_status,official_perp_status "
+                    "FROM profile WHERE addr='0xmissing'"
+                ).fetchone(),
+                (
+                    "quarantine", "profile_worker_unhandled_error", "g1",
+                    "deferred_data_error", "passed",
+                ),
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(DISTINCT lower(addr)) FROM pipeline_audit "
+                    "WHERE stamp='scan-start' AND source='scan' AND stage='profile'"
+                ).fetchone()[0],
+                2,
+            )
+            db.close()
+
     def test_complete_cached_profile_fills_requires_cursor_coverage_and_freezes_asof(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -2306,6 +2350,55 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertGreater(current[3], current[4])
             self.assertIsNone(selection_row)
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
+
+    def test_complete_scan_retries_one_profile_worker_failure_serially(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            calls = 0
+
+            def fake_profile(_db, addr, now_ms, p, _prior, _lb, stamp, _universe,
+                             force_full=False):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("transient worker connection failure")
+                row = scanner._queue_profile_persist({
+                    "addr": addr,
+                    "status": "rejected",
+                    "reason": "source_episode_evidence_insufficient",
+                    "score": 0.0,
+                    "profile_generation": p.scan_generation,
+                    "evaluated_at": stamp,
+                    "last_refreshed": stamp,
+                    "data_status": "valid",
+                    "evidence_status": "rejected",
+                    "last_copyable_open_ms": now_ms,
+                    "times_seen": 1,
+                    "times_active": 0,
+                })
+                return "rejected", row["reason"], row, False
+
+            with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
+                    patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
+                    patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
+                    patch.object(scanner, "_profile_one", side_effect=fake_profile), \
+                    patch.object(scanner, "_prune_discovery_cache", return_value={}):
+                scanner.scan(db, scan_args())
+
+            latest = db.execute(
+                "SELECT profile_total,profile_complete,complete,status "
+                "FROM scan_generation ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(calls, 2)
+            self.assertEqual(latest, (1, 1, 1, "published"))
+            self.assertEqual(
+                db.execute(
+                    "SELECT status,reason FROM pipeline_audit "
+                    "WHERE stage='profile_worker_retry' ORDER BY id DESC LIMIT 1"
+                ).fetchone(),
+                ("recovered", "RuntimeError"),
+            )
 
     def test_complete_profiles_remain_resumable_when_portfolio_formation_fails(self):
         with tempfile.TemporaryDirectory() as td:

@@ -118,6 +118,28 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(rejected["reason"], "copy_bt_loss")
         self.assertEqual(json.loads(rejected["payload_json"])["copyBt"]["14dNetPnl"], -120)
 
+    def test_workset_members_persist_exact_order_and_transport(self):
+        db = self._db()
+
+        pipeline_audit.record_workset_members(
+            db,
+            "scan-start",
+            "scan",
+            ["0xAAA", "0xbbb", "0xaaa"],
+            full_refetch_addrs=["0xbbb"],
+        )
+
+        self.assertEqual(
+            db.execute(
+                "SELECT addr,rank,status,reason FROM pipeline_audit "
+                "WHERE stamp='scan-start' AND stage='workset_member' ORDER BY rank"
+            ).fetchall(),
+            [
+                ("0xaaa", 1, "pending", "delta"),
+                ("0xbbb", 2, "pending", "full_refetch"),
+            ],
+        )
+
     def test_refresh_watchlist_does_not_publish_legacy_score_line_membership(self):
         db = self._db()
         params.seed_params(db)

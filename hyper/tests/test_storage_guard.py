@@ -53,6 +53,7 @@ class StorageGuardTests(unittest.TestCase):
         rows = [
             (old, "scan", "profile", "old-heavy", old),
             (old, "scan", "official_roi", "old-heavy", old),
+            (old, "scan", "workset_member", "old-heavy", old),
             (old, "scan", "selection_summary", "durable", old),
             (recent, "scan", "profile", "recent-heavy", recent),
         ]
@@ -88,7 +89,7 @@ class StorageGuardTests(unittest.TestCase):
         self.assertIn(base, kept)
         self.assertIn(building, kept)
         self.assertTrue({f"g{n:02d}" for n in range(6, 36)}.issubset(kept))
-        self.assertEqual(result["retention"]["deletedPipelineRows"], 2)
+        self.assertEqual(result["retention"]["deletedPipelineRows"], 3)
         self.assertEqual(result["retention"]["deletedStagingRows"], 3)
         self.assertEqual(result["retention"]["deletedStagingGenerations"], 3)
 

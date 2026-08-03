@@ -21,6 +21,7 @@ from hyper.discovery import collection_blacklist
 HEAVY_PIPELINE_STAGES = (
     "official_roi",
     "perp_prefilter",
+    "workset_member",
     "profile",
     "rough_copy",
 )

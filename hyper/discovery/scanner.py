@@ -7102,6 +7102,113 @@ def _profiled_generation_coverage(db, generation_id: str, scan_stamp=None) -> di
     }
 
 
+def _recover_missing_profile_outcomes(
+    db, generation_id: str, scan_stamp, workset_n: int,
+) -> int:
+    """Close legacy/interrupted Profile holes with a conservative deferred outcome.
+
+    New scans persist ``workset_member`` rows and retry a failed worker serially.  A generation produced by
+    older code can still have one caught worker exception and therefore one fewer Profile audit row than its
+    frozen workset.  Re-fetching that wallet after the generation market surface has moved would splice new
+    evidence into an old generation, so recovery fails closed for the wallet while preserving the other
+    completed work.  The next complete scan retries it normally.
+    """
+    if not scan_stamp or int(workset_n or 0) <= 0:
+        return 0
+    expected = [
+        str(row[0] or "").lower() for row in db.execute(
+            "SELECT addr FROM pipeline_audit WHERE stamp=? AND source='scan' "
+            "AND stage='workset_member' AND addr IS NOT NULL ORDER BY rank,id",
+            (scan_stamp,),
+        ).fetchall()
+        if row[0]
+    ]
+    if not expected:
+        # Compatibility for the in-flight generation created immediately before exact workset persistence
+        # was deployed.  Only passed/skipped Perp candidates can be proven members here; already-audited
+        # priority wallets remain represented by the existing Profile rows.
+        expected = [
+            str(row[0] or "").lower() for row in db.execute(
+                "SELECT addr FROM pipeline_audit WHERE stamp=? AND source='scan' "
+                "AND stage='perp_prefilter' AND status IN ('passed','skipped') "
+                "AND addr IS NOT NULL ORDER BY rank,id",
+                (scan_stamp,),
+            ).fetchall()
+            if row[0]
+        ]
+    covered = {
+        str(row[0] or "").lower() for row in db.execute(
+            "SELECT DISTINCT addr FROM pipeline_audit WHERE stamp=? AND source='scan' "
+            "AND stage='profile' AND addr IS NOT NULL",
+            (scan_stamp,),
+        ).fetchall()
+        if row[0]
+    }
+    missing = [addr for addr in dict.fromkeys(expected) if addr not in covered]
+    if not missing:
+        return 0
+    # Never paper over a broad or ambiguous interruption.  The normal checkpoint/retry path must recover
+    # those generations from exact workset evidence instead of bulk-quarantining candidates.
+    if len(missing) > max(1, min(8, int(workset_n) // 100)):
+        raise RuntimeError(f"profile_recovery_gap_too_large:{len(missing)}")
+
+    cols = storage.PROFILE_COLS.split(",")
+    recovered_rows = []
+    for addr in missing:
+        raw = db.execute(
+            f"SELECT {storage.PROFILE_COLS} FROM profile WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        prior = dict(zip(cols, raw)) if raw else None
+        audit = db.execute(
+            "SELECT status,reason,payload_json FROM pipeline_audit "
+            "WHERE stamp=? AND source='scan' AND stage='perp_prefilter' "
+            "AND lower(addr)=lower(?) ORDER BY id DESC LIMIT 1",
+            (scan_stamp, addr),
+        ).fetchone()
+        try:
+            payload = json.loads((audit[2] if audit else None) or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        official = perp_prefilter.Result(
+            str((audit[0] if audit else None) or "deferred_data_error"),
+            str((audit[1] if audit else None) or "profile_worker_unhandled_error"),
+            dict(payload.get("windows") or {}),
+        )
+        _status, reason, row, _ = _defer_profile(
+            db,
+            addr,
+            prior,
+            scan_stamp,
+            "profile_worker_unhandled_error",
+            generation_id=generation_id,
+            persist=False,
+        )
+        row.update(_official_profile_fields(official))
+        recovered_rows.append(row)
+        pipeline_audit._insert_event(
+            db,
+            stamp=scan_stamp,
+            source="scan",
+            stage="profile_recovery",
+            addr=addr,
+            status="deferred",
+            reason=reason,
+            payload={"generation": generation_id, "source": "missing_worker_outcome"},
+        )
+    _persist_profile_batch(db, recovered_rows)
+    all_profiled = sorted(covered | set(missing))
+    if len(all_profiled) != int(workset_n):
+        raise RuntimeError(
+            f"profile_recovery_workset_mismatch:{len(all_profiled)}:{int(workset_n)}"
+        )
+    pipeline_audit.record_profile_snapshot(
+        db, scan_stamp, "scan", all_profiled,
+    )
+    db.commit()
+    return len(missing)
+
+
 def _adopt_resumable_deferred_profiles(db, generation_id: str, scan_stamp) -> int:
     """Attach already-evaluated deferred rows to a generation interrupted before its profile audit.
 
@@ -7332,6 +7439,9 @@ def finalize_profiled_generation(
     ).fetchone()
     if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
         raise RuntimeError("generation_not_resumable")
+    recovered_missing = _recover_missing_profile_outcomes(
+        db, generation_id, meta[5], int(meta[2] or 0),
+    )
     adopted_deferred = _adopt_resumable_deferred_profiles(
         db, generation_id, meta[5],
     )
@@ -7367,11 +7477,16 @@ def finalize_profiled_generation(
     now_ms = int(meta[6] or 0)
     if now_ms <= 0:
         raise RuntimeError("profile_generation_asof_missing")
+    # A profile worker failure previously skipped sealing.  Only after every frozen member and immutable
+    # generation invariant above is proven may recovery seal the already-built surface for strict replay.
+    market_snapshot = generation_market.seal(db, generation_id)
     previous_core = selection.published_core_membership(db) or []
     pinned_core_order = _active_pinned_core_order(db)
     repair_summary = _repair_resumable_previous_core_profiles(
         db, generation_id, previous_core, now_ms, stamp, offline=bool(offline),
     )
+    repair_summary["recoveredMissing"] = recovered_missing
+    repair_summary["marketSnapshotCoins"] = int(market_snapshot.get("coins") or 0)
     if repair_summary.get("repaired"):
         profile_coverage = _profiled_generation_coverage(db, generation_id, meta[5])
     pre_strict_counts = _pre_strict_counts(db, generation_id)
@@ -8952,6 +9067,13 @@ def scan(db, p):
         else ("mixed" if refresh["full_refetch"] else "delta")
     )
     pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
+    pipeline_audit.record_workset_members(
+        db,
+        stamp,
+        "scan",
+        workset_info["workset"],
+        full_refetch_addrs=workset_info["refresh"]["full_refetch"],
+    )
     workset_metrics = {
         "estimatedProfileSec": estimated_profile_s,
         "warmupBackfillDue": len(warmup_backfill_addrs),
@@ -9024,6 +9146,46 @@ def scan(db, p):
                 _persist_profile_batch(db, persist_rows)
                 persist_rows.clear()
 
+        def consume_profile_result(addr, prior, result):
+            nonlocal added, retired, rejected, kept
+            nonlocal profiled_ok, deferred_profiles, valid_profiles
+            status, reason, m, _hit_cap = result
+            resolved_official = _profile_official_result(m)
+            if resolved_official is None:
+                # Compatibility for tests/offline profile adapters. Production `_profile_one` always
+                # seals one of eager/local/fallback/structural-skip into the row.
+                resolved_official = perp_results.get(addr) or perp_prefilter.Result(
+                    "passed" if status == "active" else "skipped",
+                    "profile_adapter_without_prefilter_result",
+                    {"scanResolution": {"source": "profile_adapter"}},
+                )
+            perp_results[addr] = resolved_official
+            profiled_ok += 1
+            profiled_addrs.append(addr)
+            persist_rows.append(m)
+            if len(persist_rows) >= persist_batch_size:
+                flush_persist()
+            data_status = m.get("data_status")
+            if data_status == "deferred_data_error":
+                deferred_profiles += 1
+            elif data_status == "rejected":
+                rejected += 1
+            else:
+                valid_profiles += 1
+            if data_status == "deferred_data_error":
+                pass
+            elif status == "active":
+                if (prior or {}).get("status") == "active":
+                    kept += 1
+                else:
+                    added += 1
+            elif status == "retired":
+                retired += 1
+            elif data_status != "rejected":
+                rejected += 1
+
+        worker_failures = []
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             pending = {}
             next_index = 0
@@ -9049,42 +9211,17 @@ def scan(db, p):
                     try:
                         addr, prior, (status, reason, m, hit_cap) = fut.result()
                     except Exception as exc:  # noqa: BLE001
-                        failed += 1
-                        print(f"  [{done}/{len(workset)}] FAIL: {exc}")
-                        continue
-                    resolved_official = _profile_official_result(m)
-                    if resolved_official is None:
-                        # Compatibility for tests/offline profile adapters. Production `_profile_one` always
-                        # seals one of eager/local/fallback/structural-skip into the row.
-                        resolved_official = perp_results.get(addr) or perp_prefilter.Result(
-                            "passed" if status == "active" else "skipped",
-                            "profile_adapter_without_prefilter_result",
-                            {"scanResolution": {"source": "profile_adapter"}},
+                        # A shared SQLite connection may reject one concurrent operation even though the
+                        # wallet/API evidence is sound.  Do not create a permanent hole in this generation;
+                        # retry after the pool has fully closed, when this connection is main-thread-only.
+                        worker_failures.append((expected_addr, type(exc).__name__))
+                        print(
+                            f"  [{done}/{len(workset)}] RETRY: profile worker "
+                            f"{type(exc).__name__}",
+                            flush=True,
                         )
-                    perp_results[addr] = resolved_official
-                    profiled_ok += 1
-                    profiled_addrs.append(addr)
-                    persist_rows.append(m)
-                    if len(persist_rows) >= persist_batch_size:
-                        flush_persist()
-                    data_status = m.get("data_status")
-                    if data_status == "deferred_data_error":
-                        deferred_profiles += 1
-                    elif data_status == "rejected":
-                        rejected += 1
-                    else:
-                        valid_profiles += 1
-                    if data_status == "deferred_data_error":
-                        pass
-                    elif status == "active":
-                        if (prior or {}).get("status") == "active":
-                            kept += 1
-                        else:
-                            added += 1
-                    elif status == "retired":
-                        retired += 1
-                    elif data_status != "rejected":
-                        rejected += 1
+                        continue
+                    consume_profile_result(addr, prior, (status, reason, m, hit_cap))
                     _set_scan_progress(
                         db, stage="score_filter", candidates_scanned=done,
                         candidates_total=len(workset),
@@ -9095,6 +9232,59 @@ def scan(db, p):
                             {"stage": "score_filter", "scanned": done, "total": len(workset)},
                         )
                 submit_available()
+        flush_persist()
+
+        # Retry worker-only failures after every worker has released the shared connection.  A second
+        # exception becomes an explicit deferred outcome: formation excludes it, but the complete workset
+        # remains auditable and the next generation can retry normally.
+        for addr, first_error in worker_failures:
+            prior = priors.get(addr)
+            try:
+                _addr, retry_prior, result = _work(addr)
+            except Exception as exc:  # noqa: BLE001
+                resolved = perp_results.get(addr) or perp_prefilter.Result(
+                    "deferred_data_error",
+                    "profile_worker_unhandled_error",
+                    {"scanResolution": {"source": "profile_worker_deferred"}},
+                )
+                status, reason, row, _ = _defer_profile(
+                    db,
+                    addr,
+                    prior,
+                    stamp,
+                    f"profile_worker_error:{type(exc).__name__}",
+                    generation_id=generation_id,
+                    persist=False,
+                )
+                row.update(_official_profile_fields(resolved))
+                result = (status, reason, row, False)
+                retry_prior = prior
+                pipeline_audit._insert_event(
+                    db,
+                    stamp=stamp,
+                    source="scan",
+                    stage="profile_worker_retry",
+                    addr=addr,
+                    status="deferred",
+                    reason=f"{first_error}:{type(exc).__name__}",
+                    payload={"attempts": 2},
+                )
+            else:
+                pipeline_audit._insert_event(
+                    db,
+                    stamp=stamp,
+                    source="scan",
+                    stage="profile_worker_retry",
+                    addr=addr,
+                    status="recovered",
+                    reason=first_error,
+                    payload={"attempts": 2},
+                )
+            consume_profile_result(addr, retry_prior, result)
+            _set_scan_progress(
+                db, stage="score_filter", candidates_scanned=done,
+                candidates_total=len(workset),
+            )
         flush_persist()
 
     _profile_batch(list(workset))

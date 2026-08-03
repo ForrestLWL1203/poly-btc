@@ -314,6 +314,11 @@ Previously known wallets remain history-incremental, and only complete discovery
 days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists
 params and does not start a scan.
 
+Each complete generation persists its exact Profile workset as bounded audit detail. A Profile worker failure
+is retried once on the main thread after the pool closes; if it fails again, the wallet receives a durable
+deferred outcome instead of silently reducing generation coverage. Recovery of an older single-member hole
+uses only frozen workset/Perp evidence and never mixes current market inputs into the old generation.
+
 Before production rollout, operators can run the same pipeline against an online SQLite backup:
 
 ```bash
