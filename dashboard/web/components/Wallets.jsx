@@ -237,7 +237,9 @@ export function Wallets({ confirm, onDataChanged = null }) {
                         className={"btn btn-star" + (w.starred ? " on" : "")}
                         aria-label={w.starred ? "取消星标" : "设为星标钱包"}
                         aria-pressed={!!w.starred}
-                        title={w.starred ? "已标记为关注；点击取消星标" : "仅作关注标记，不改变评分、准入或排序"}
+                        title={w.starred
+                          ? "全量严格重评时保留 Core 席位；硬性安全门禁仍可退出，点击取消星标"
+                          : "星标后可在全量严格重评中获得 Core 留任保护；硬性安全门禁仍然生效"}
                         disabled={!!starPending[w.address]}
                         onClick={(e) => { e.stopPropagation(); toggleStar(w); }}>
                         {starPending[w.address] ? "…" : w.starred ? "★" : "☆"}

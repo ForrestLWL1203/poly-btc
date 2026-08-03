@@ -251,7 +251,11 @@ class ChallengerRefreshTests(unittest.TestCase):
                     scanner, "refresh_watchlist", return_value=2,
                 ))
                 stack.enter_context(patch.object(
-                    scanner, "_selection_prefetch_candidates", return_value=[],
+                    scanner, "_prefetch_selection_paths", return_value={"status": "ok"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_promotion_parity",
+                    return_value={"checked": 1, "passed": 1},
                 ))
                 form = stack.enter_context(patch.object(
                     scanner, "form_quality_prefix", return_value=formation,
@@ -560,7 +564,7 @@ class ChallengerRefreshTests(unittest.TestCase):
                     scanner, "refresh_watchlist", return_value=1,
                 ))
                 stack.enter_context(patch.object(
-                    scanner, "_selection_prefetch_candidates", return_value=[],
+                    scanner, "_prefetch_selection_paths", return_value={"status": "ok"},
                 ))
                 form = stack.enter_context(patch.object(
                     scanner, "form_quality_prefix", return_value=formation,

@@ -338,8 +338,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("_assert_automatic_formation_tuned(", scan_source)
         self.assertIn("required=bool(automatic_retune)", scan_source)
         self.assertNotIn('stage="core_membership_retune"', scan_source)
-        self.assertIn("# Never start a second pool", scan_source)
-        self.assertIn("retune=False", scan_source)
+        self.assertNotIn("_retention_exact_formation(", scan_source)
+        self.assertIn("_retention_evidence_formation(", scan_source)
         self.assertNotIn("generation_id, stamp, now_ms, retune=False", scan_source)
         self.assertIn("retune_formation=True", optimize_source)
         self.assertIn(
@@ -423,6 +423,139 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("formation, required=bool(retune)", source)
         self.assertIn("_retention_evidence_formation(", source)
         self.assertNotIn("_retention_exact_formation(", source)
+
+    def test_complete_scan_retention_is_limited_to_active_operator_stars(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_valid,profile_complete) VALUES "
+                "('g-old','published',1,1,1,'2026-01-01','2026-01-02',1,1)"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selection_rank,selected_at) "
+                "VALUES ('g-old',?,'core',1,?,'now')",
+                [("0xstar", 1), ("0xplain", 2), ("0xdrain", 3)],
+            )
+            db.executemany(
+                "INSERT INTO target_controls "
+                "(addr,enabled,intent,pinned,pinned_at,updated_at) VALUES (?,?,?,?,?,'now')",
+                [
+                    ("0xstar", 1, "active", 1, "2026-01-01"),
+                    ("0xplain", 1, "active", 0, None),
+                    ("0xdrain", 1, "draining", 1, "2026-01-02"),
+                ],
+            )
+            db.commit()
+
+            self.assertEqual(scanner._active_pinned_core_order(db), ("0xstar",))
+
+    def test_unstarred_incumbent_cannot_bypass_full_scan_rough_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_valid,profile_complete) VALUES "
+                "('g-old','published',1,1,1,'2026-01-01','2026-01-02',1,1)"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selection_rank,selected_at) "
+                "VALUES ('g-old',?,'core',1,?,'now')",
+                [("0xstar", 1), ("0xplain", 2)],
+            )
+            cols = storage.PROFILE_COLS.split(",")
+            for addr in ("0xstar", "0xplain"):
+                profile = {key: None for key in cols}
+                profile.update(
+                    addr=addr, status="active", reason="rough_rejected",
+                    score=.5, profile_generation="g-new", data_status="valid",
+                    evidence_status="qualified", rough_copy_score=.5,
+                )
+                db.execute(
+                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    [profile.get(key) for key in cols],
+                )
+                db.execute(
+                    "INSERT INTO pre_strict_evidence "
+                    "(generation,addr,policy_version,model_version,status,first_failure,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "g-new", addr, scanner.pre_strict.POLICY_VERSION,
+                        scanner.pre_strict.SELECTION_MODEL_VERSION,
+                        "rejected", "rough_copy_30d_conservative_not_profitable", "now",
+                    ),
+                )
+            db.commit()
+
+            ranked = scanner._quality_core_profiles(
+                db, "g-new", core_only=False, retention_addrs=("0xstar",),
+            )
+
+            self.assertEqual([row["addr"] for row in ranked], ["0xstar"])
+            self.assertTrue(ranked[0]["retention_lane"])
+            self.assertEqual(
+                ranked[0]["follow_qualification"]["status"], "core_retention_lane",
+            )
+
+    def test_daily_promotion_parity_requires_full_strict_contract(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,queue_rank,"
+                "strict_status,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "g-daily", "0xnew", scanner.pre_strict.POLICY_VERSION,
+                    scanner.pre_strict.SELECTION_MODEL_VERSION,
+                    "passed", 1, "qualified", "now",
+                ),
+            )
+            db.commit()
+            formation = {"qualifications": {"0xnew": {
+                "eligible": True, "coreEligible": True,
+                "individualCoreEligible": True, "formationEligible": True,
+                "deferred": False, "role": "core_eligible",
+            }}}
+
+            audit = scanner._assert_daily_promotion_parity(
+                db, "g-daily", previous_core=("0xold",),
+                proposed_core=("0xold", "0xnew"),
+                promotion_universe={"0xnew"}, formation=formation,
+            )
+            self.assertEqual(audit["passed"], 1)
+
+            db.execute(
+                "UPDATE pre_strict_evidence SET strict_status='rejected' "
+                "WHERE generation='g-daily' AND addr='0xnew'"
+            )
+            db.commit()
+            with self.assertRaisesRegex(
+                RuntimeError, "challenger_daily_promotion_parity_failed:1",
+            ):
+                scanner._assert_daily_promotion_parity(
+                    db, "g-daily", previous_core=("0xold",),
+                    proposed_core=("0xold", "0xnew"),
+                    promotion_universe={"0xnew"}, formation=formation,
+                )
+
+    def test_automatic_complete_and_daily_paths_do_not_use_exact_retune_closure(self):
+        complete_source = inspect.getsource(scanner.scan)
+        finalizer_source = inspect.getsource(scanner.finalize_profiled_generation)
+        daily_source = inspect.getsource(scanner.refresh_challengers)
+
+        self.assertNotIn("_retention_exact_formation(", complete_source)
+        self.assertNotIn("_retention_exact_formation(", finalizer_source)
+        self.assertNotIn("_retention_exact_formation(", daily_source)
+        self.assertIn("retention_addrs=pinned_core_order", complete_source)
+        self.assertIn("retention_addrs=pinned_core_order", finalizer_source)
+        self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 2)
+        self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
     def test_retention_overlay_reuses_winning_surface_evidence(self):
         decision = SimpleNamespace(
@@ -1115,7 +1248,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.scan)
 
         self.assertEqual(source.count("_build_explicit_selection("), 1)
-        self.assertIn("_selection_prefetch_candidates(", source)
+        self.assertNotIn("_selection_prefetch_candidates(", source)
+        self.assertIn("publication_core_order = tuple(formation.get", source)
         self.assertNotIn("preview_rows", source)
 
     def test_selection_prefetch_candidates_is_bounded_ranked_and_enabled(self):
@@ -1471,8 +1605,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_scan_does_not_publish_after_selection_path_prefetch_failure(self):
         source = inspect.getsource(scanner.scan)
 
-        self.assertIn("selection_price_path_prefetch_failed:", source)
-        self.assertIn("if path_prefetch_error is not None:", source)
+        formation_at = source.index("formation = form_quality_prefix(")
+        prefetch_at = source.index("_prefetch_selection_paths(", formation_at)
+        publication_at = source.index("generation.publish_generation(", prefetch_at)
+        self.assertLess(formation_at, prefetch_at)
+        self.assertLess(prefetch_at, publication_at)
+        self.assertIn("generation finalize failed; old selection retained", source)
 
     def test_quality_prefix_uses_allowed_sector_copy_evidence(self):
         with tempfile.TemporaryDirectory() as td:

@@ -2411,7 +2411,9 @@ def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=No
     ]
 
 
-def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) -> list[dict]:
+def _quality_core_profiles(
+    db, generation_id, *, core_only=True, now_ms=None, retention_addrs=None,
+) -> list[dict]:
     """Current-generation follow-quality profiles in immutable quality order.
 
     ``core_only=False`` returns the bounded Core+Challenger workset needed for final-parameter
@@ -2479,7 +2481,12 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         ).fetchall()
     }
     rows = []
-    current_core = set(selection.published_core_membership(db) or ())
+    current_core = {
+        str(addr or "").lower() for addr in (
+            selection.published_core_membership(db)
+            if retention_addrs is None else retention_addrs
+        ) or () if addr
+    }
     follow_values = params.load_follow(db)
     policy_values = {**follow_values, **params.load_category(db, "scanner")}
     for raw in cur.fetchall():
@@ -3791,7 +3798,7 @@ def _retune_exact_membership_surface(
 
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False, force_retune=False,
-                        _follow_override=None) -> dict:
+                        retention_addrs=None, _follow_override=None) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
     resource_peak = {
@@ -3847,6 +3854,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     ))
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
+        retention_addrs=(
+            () if force_entry_requalification else retention_addrs
+        ),
     )
     # Top32 remains the rough/Challenger evidence pool.  Automatic formation freezes one bounded Top16
     # before any parameter work; ranks 17-32 are never reabsorbed after seeing a tuned surface.
@@ -4885,6 +4895,79 @@ def _apply_formation_params(db, formation, stamp) -> bool:
             "resolved": False,
         })
     return changed
+
+
+def _active_pinned_core_order(db) -> tuple[str, ...]:
+    """Return operator-starred Core seats which are still active execution targets.
+
+    A complete scan is a strict membership reset.  Historical Core membership alone never grants a
+    retention lane; only an explicit operator star does, and a disabled/draining/requalify control cannot
+    use that star to recover an active seat implicitly.
+    """
+    active = {
+        str(addr or "").lower()
+        for addr in (selection.published_core_addrs(db) or ()) if addr
+    }
+    return tuple(
+        addr for addr in (
+            str(item.get("addr") or "").lower()
+            for item in selection.pinned_core_controls(db, enabled_only=True)
+        )
+        if addr and addr in active
+    )
+
+
+def _assert_daily_promotion_parity(
+    db, generation_id, *, previous_core, proposed_core, promotion_universe, formation,
+) -> dict:
+    """Fail closed unless every daily entrant satisfies the full-scan admission contract."""
+    previous = {
+        str(addr or "").lower() for addr in (previous_core or ()) if addr
+    }
+    proposed = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (proposed_core or ()) if addr
+    ))
+    universe = {
+        str(addr or "").lower() for addr in (promotion_universe or ()) if addr
+    }
+    qualifications = {
+        str(addr or "").lower(): dict(value or {})
+        for addr, value in dict((formation or {}).get("qualifications") or {}).items()
+    }
+    added = tuple(addr for addr in proposed if addr not in previous)
+    failures = []
+    for addr in added:
+        evidence = db.execute(
+            "SELECT status,queue_rank,strict_status,policy_version,model_version "
+            "FROM pre_strict_evidence WHERE generation=? AND lower(addr)=?",
+            (generation_id, addr),
+        ).fetchone()
+        qualification = qualifications.get(addr) or {}
+        valid = bool(
+            addr in universe
+            and evidence
+            and evidence[0] == "passed"
+            and evidence[1] is not None
+            and evidence[2] == "qualified"
+            and evidence[3] == pre_strict.POLICY_VERSION
+            and evidence[4] == pre_strict.SELECTION_MODEL_VERSION
+            and qualification.get("eligible")
+            and qualification.get("coreEligible")
+            and qualification.get("individualCoreEligible")
+            and qualification.get("formationEligible")
+            and not qualification.get("deferred")
+            and qualification.get("role") != "quarantine"
+        )
+        if not valid:
+            failures.append(addr)
+    if failures:
+        raise RuntimeError(f"challenger_daily_promotion_parity_failed:{len(failures)}")
+    return {
+        "checked": len(added),
+        "passed": len(added),
+        "policyVersion": pre_strict.POLICY_VERSION,
+        "modelVersion": pre_strict.SELECTION_MODEL_VERSION,
+    }
 
 
 def _complete_retention_decisions(
@@ -7275,6 +7358,7 @@ def finalize_profiled_generation(
     if now_ms <= 0:
         raise RuntimeError("profile_generation_asof_missing")
     previous_core = selection.published_core_membership(db) or []
+    pinned_core_order = _active_pinned_core_order(db)
     repair_summary = _repair_resumable_previous_core_profiles(
         db, generation_id, previous_core, now_ms, stamp, offline=bool(offline),
     )
@@ -7292,19 +7376,20 @@ def finalize_profiled_generation(
     formation = form_quality_prefix(
         db, generation_id, stamp, now_ms,
         retune=bool(retune), force_retune=bool(retune),
+        retention_addrs=pinned_core_order,
     )
     _assert_automatic_formation_tuned(
         formation, required=bool(retune),
     )
     recommended_core_order = tuple(formation.get("selected") or ())
     retention_decisions = _complete_retention_decisions(
-        db, generation_id, previous_core, formation,
+        db, generation_id, pinned_core_order, formation,
     )
     desired_retained = _effective_core_order_from_addrs(
-        previous_core, recommended_core_order, retention_decisions,
+        pinned_core_order, recommended_core_order, retention_decisions,
     )
     retained_incumbents = {
-        addr for addr in previous_core
+        addr for addr in pinned_core_order
         if retention_decisions[addr].retain_enabled
     }
     replacement_gate = {
@@ -7314,7 +7399,7 @@ def finalize_profiled_generation(
     if tuple(desired_retained) != recommended_core_order:
         replacement_gate = {
             "eligible": False,
-            "reason": "incumbent_low_medium_risk_never_auto_replaced",
+            "reason": "operator_starred_core_retained",
         }
         formation = _retention_evidence_formation(
             formation, desired_retained,
@@ -7369,9 +7454,9 @@ def finalize_profiled_generation(
                 f"core_retention_overlay_not_materialized:{len(protected_removed)}"
             )
         retention_decisions = _apply_shared_retention_failure(
-            db, generation_id, previous_core, retention_decisions, marginal,
+            db, generation_id, pinned_core_order, retention_decisions, marginal,
         )
-        rows = _decorate_retention_rows(rows, previous_core, retention_decisions)
+        rows = _decorate_retention_rows(rows, pinned_core_order, retention_decisions)
         for addr, decision in retention_decisions.items():
             apply_wallet_retention_decision(
                 db, addr, decision, generation=generation_id,
@@ -7403,6 +7488,7 @@ def finalize_profiled_generation(
             "selectionSearch": marginal.search_meta or {},
             "resumedFinalize": True,
             "deferredCoreRepair": repair_summary,
+            "operatorStarredRetention": len(pinned_core_order),
         }
         db.execute(
             "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
@@ -7427,6 +7513,7 @@ def finalize_profiled_generation(
                 **(marginal.search_meta or {}),
                 "recommendedCore": list(recommended_core_order),
                 "effectiveCore": list(current_core),
+                "operatorStarredRetention": len(pinned_core_order),
                 "marketSnapshot": market_validation,
             }, stamp=publication_stamp,
         )
@@ -8122,22 +8209,13 @@ def refresh_challengers(db, p) -> dict:
         refresh_watchlist(
             db, stamp, leaderboard_generation=generation_id, commit=False,
         )
-        preview = _selection_prefetch_candidates(
-            db, generation_id, now_ms,
-            limit=int(config.PRE_STRICT_QUEUE_MAX_N),
-        )
         db.rollback()
-        if preview:
-            _set_scan_progress(
-                db, stage="prefetch_selection_paths",
-                candidates_scanned=len(workset), candidates_total=len(workset),
-            )
-            _prefetch_selection_paths(db, preview, now_ms, generation_id)
 
         automatic_retune = _automatic_formation_retune_enabled(db)
         fixed_formation = form_quality_prefix(
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
+            retention_addrs=previous_core_order,
         )
         daily_retention_evidence_complete = True
         try:
@@ -8230,6 +8308,7 @@ def refresh_challengers(db, p) -> dict:
                 tuned_formation = form_quality_prefix(
                     db, generation_id, stamp, now_ms,
                     retune=True, force_retune=True,
+                    retention_addrs=previous_core_order,
                 )
                 tuned_core_order = tuple(
                     str(addr or "").lower()
@@ -8305,6 +8384,25 @@ def refresh_challengers(db, p) -> dict:
         _assert_automatic_formation_tuned(
             formation, required=membership_retune_triggered,
         )
+        effective_publish_order = (
+            daily_floor_order if promotion_blocked_reason else publish_core_order
+        )
+        promotion_parity = _assert_daily_promotion_parity(
+            db, generation_id,
+            previous_core=previous_core_order,
+            proposed_core=effective_publish_order,
+            promotion_universe=base_promotion_universe,
+            formation=formation,
+        )
+        if publish_core_order:
+            _set_scan_progress(
+                db, stage="prefetch_selection_paths",
+                candidates_scanned=len(publish_core_order),
+                candidates_total=len(publish_core_order),
+            )
+            _prefetch_selection_paths(
+                db, publish_core_order, now_ms, generation_id,
+            )
         _assert_margin_equity_snapshot(db, p.margin_equity_pct)
         publication_stamp = now_iso()
         refresh_watchlist(
@@ -8427,6 +8525,7 @@ def refresh_challengers(db, p) -> dict:
                 "baseFullGeneration": base_generation,
                 "promotionOnly": True,
                 "promotionBlockedReason": promotion_blocked_reason,
+                "promotionParity": promotion_parity,
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
                 "hardSafetyCoreRemoved": len(hard_safety_core),
@@ -8470,6 +8569,7 @@ def refresh_challengers(db, p) -> dict:
                 "fixedSurfacePromotion": fixed_surface_promotion,
                 "promotionOnly": True,
                 "promotionBlockedReason": promotion_blocked_reason,
+                "promotionParity": promotion_parity,
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
                 "hardSafetyCoreRemoved": len(hard_safety_core),
@@ -8494,6 +8594,7 @@ def refresh_challengers(db, p) -> dict:
             "retuneAttempted": retune_attempted,
             "promotionOnly": True,
             "promotionBlockedReason": promotion_blocked_reason,
+            "promotionParity": promotion_parity,
             "verifiedSourceBlowups": len(verified_source_blowups),
             "severeCopyLiquidations": len(severe_copy_liquidations),
             "hardSafetyCoreRemoved": len(hard_safety_core),
@@ -9136,50 +9237,22 @@ def scan(db, p):
     published = False
     publication_stamp = None
     previous_core = selection.published_core_membership(db) or []
-    previous_strategy_bundle = strategy_revision.load_active(db)
+    pinned_core_order = _active_pinned_core_order(db)
     n_active = len(previous_core)
     if complete:
         _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
         selection_mode = str(
             params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
         ).lower()
-        path_prefetch_error = None
-        # Build only the bounded candidate universe in a rolled-back staging pass, then fetch its shared
-        # market path before the atomic publication transaction.  The old flow ran a complete fills-only
-        # selection here and repeated it during final publication merely to discover which paths to fetch.
-        # Querying the same bounded near-Core universe removes that duplicate search while keeping network I/O
-        # outside the Dashboard/Observer SQLite writer lock.
-        if selection_mode == "auto":
-            try:
-                _set_scan_progress(
-                    db, stage="prepare_selection_candidates", candidates_scanned=len(workset),
-                )
-                db.commit()
-                refresh_watchlist(
-                    db, stamp,
-                    leaderboard_generation=generation_id, commit=False,
-                )
-                preview_candidates = _selection_prefetch_candidates(
-                    db, generation_id, now_ms,
-                )
-                db.rollback()
-                if preview_candidates:
-                    _set_scan_progress(
-                        db, stage="prefetch_selection_paths",
-                        candidates_scanned=len(workset), candidates_total=len(workset),
-                    )
-                    _prefetch_selection_paths(db, preview_candidates, now_ms, generation_id)
-            except Exception as exc:  # noqa: BLE001 - publication guard below preserves the prior generation
-                db.rollback()
-                print(f"selection price-path prefetch unavailable: {exc}", flush=True)
-                path_prefetch_error = exc
         try:
-            if path_prefetch_error is not None:
-                raise RuntimeError(
-                    f"selection_price_path_prefetch_failed:{path_prefetch_error}"
-                ) from path_prefetch_error
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             formation = None
+            recommended_core_order = ()
+            retention_decisions = {}
+            retained_incumbents = set()
+            replacement_gate = {
+                "eligible": True, "reason": "not_applicable",
+            }
             if selection_mode == "auto":
                 # The visible switch owns the complete publication contract.  When enabled, a new generation
                 # must tune its own bounded Core pool and pass final strict replay on that exact surface before
@@ -9190,11 +9263,43 @@ def scan(db, p):
                 formation = form_quality_prefix(
                     db, generation_id, stamp, now_ms,
                     retune=automatic_retune, force_retune=automatic_retune,
+                    retention_addrs=pinned_core_order,
                 )
                 _assert_automatic_formation_tuned(
                     formation,
                     required=bool(automatic_retune),
                 )
+                recommended_core_order = tuple(formation.get("selected") or ())
+                retention_decisions = _complete_retention_decisions(
+                    db, generation_id, pinned_core_order, formation,
+                )
+                desired_retained = _effective_core_order_from_addrs(
+                    pinned_core_order, recommended_core_order, retention_decisions,
+                )
+                retained_incumbents = {
+                    addr for addr in pinned_core_order
+                    if retention_decisions[addr].retain_enabled
+                }
+                if tuple(desired_retained) != recommended_core_order:
+                    replacement_gate = {
+                        "eligible": False,
+                        "reason": "operator_starred_core_retained",
+                    }
+                    formation = _retention_evidence_formation(
+                        formation, desired_retained,
+                        replacement_gate=replacement_gate,
+                        decisions=retention_decisions,
+                    )
+                publication_core_order = tuple(formation.get("selected") or ())
+                if publication_core_order:
+                    _set_scan_progress(
+                        db, stage="prefetch_selection_paths",
+                        candidates_scanned=len(publication_core_order),
+                        candidates_total=len(publication_core_order),
+                    )
+                    _prefetch_selection_paths(
+                        db, publication_core_order, now_ms, generation_id,
+                    )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
                 candidates_total=len(workset),
@@ -9209,10 +9314,6 @@ def scan(db, p):
                 leaderboard_generation=generation_id,
                 commit=False,
             )
-            retention_decisions = {}
-            replacement_gate = {
-                "eligible": True, "reason": "not_applicable",
-            }
             if selection_mode == "manual":
                 held = {(addr or "").lower() for (addr,) in db.execute(
                     f"SELECT DISTINCT addr FROM {position_table} WHERE status='open'"
@@ -9245,7 +9346,6 @@ def scan(db, p):
                 marginal = None
             else:
                 _apply_formation_params(db, formation, selection_stamp)
-                recommended_core_order = tuple((formation or {}).get("selected") or ())
                 selection_rows, marginal = _build_explicit_selection(
                     db, generation_id, selection_stamp, now_ms,
                     forced_core_order=(formation or {}).get("selected") or (),
@@ -9257,88 +9357,22 @@ def scan(db, p):
                     effective_score_details=(formation or {}).get("scoreDetails") or {},
                     effective_replay_params_hash=(formation or {}).get("replayParamsHash"),
                 )
-                retention_decisions = _complete_retention_decisions(
-                    db, generation_id, previous_core, formation,
-                )
                 proposed_core = {
                     row.addr for row in selection_rows
                     if row.role == selection.CORE and row.enabled
                 }
-                desired_retained = _effective_core_order(
-                    previous_core, selection_rows, retention_decisions,
-                )
                 protected_removed = [
-                    addr for addr in previous_core
-                    if retention_decisions[addr].retain_enabled
-                    and addr not in proposed_core
+                    addr for addr in retained_incumbents if addr not in proposed_core
                 ]
-                replacement_gate = {
-                    "eligible": True, "reason": "no_protected_core_removed",
-                }
-                if protected_removed or proposed_core != set(desired_retained):
-                    replacement_gate = {
-                        "eligible": False,
-                        "reason": (
-                            "incumbent_low_medium_risk_never_auto_replaced"
-                            if protected_removed else "high_or_system_risk_effective_overlay"
-                        ),
-                    }
-                    retained_formation = _retention_exact_formation(
-                        db, generation_id, selection_stamp, now_ms,
-                        desired_retained,
-                        base_follow=(
-                            (previous_strategy_bundle or {}).get("params")
-                            or params.load_follow(db)
-                        ),
-                        replacement_gate=replacement_gate,
-                        decisions=retention_decisions,
-                        # Never start a second pool after the generation's one efficient tune.
-                        retune=False,
+                if protected_removed:
+                    raise RuntimeError(
+                        f"core_retention_overlay_not_materialized:{len(protected_removed)}"
                     )
-                    _apply_formation_params(
-                        db, retained_formation, selection_stamp,
-                    )
-                    selection_rows, marginal = _build_retained_selection(
-                        db, generation_id, selection_stamp, now_ms,
-                        retained_formation,
-                    )
-                    formation = retained_formation
-                final_validation = (
-                    ((marginal.search_meta or {}).get("finalStrictCopy"))
-                    if marginal else {}
-                ) or {}
-                if final_validation.get("status") == "operator_review_degraded":
-                    degraded_core = tuple(
-                        addr for addr in previous_core
-                        if retention_decisions[addr].retain_enabled
-                    )
-                    degraded_formation = _retention_exact_formation(
-                        db, generation_id, selection_stamp, now_ms,
-                        degraded_core,
-                        base_follow=(
-                            (previous_strategy_bundle or {}).get("params")
-                            or params.load_follow(db)
-                        ),
-                        replacement_gate={
-                            "eligible": False,
-                            "reason": "operator_review_degraded_keep_active_surface",
-                        },
-                        decisions=retention_decisions,
-                        retune=False,
-                    )
-                    _apply_formation_params(
-                        db, degraded_formation, selection_stamp,
-                    )
-                    selection_rows, marginal = _build_retained_selection(
-                        db, generation_id, selection_stamp, now_ms,
-                        degraded_formation,
-                    )
-                    formation = degraded_formation
                 retention_decisions = _apply_shared_retention_failure(
-                    db, generation_id, previous_core, retention_decisions, marginal,
+                    db, generation_id, pinned_core_order, retention_decisions, marginal,
                 )
                 selection_rows = _decorate_retention_rows(
-                    selection_rows, previous_core, retention_decisions,
+                    selection_rows, pinned_core_order, retention_decisions,
                 )
                 for addr, decision in retention_decisions.items():
                     apply_wallet_retention_decision(
@@ -9446,6 +9480,7 @@ def scan(db, p):
                         locals().get("recommended_core_order", ())
                     ),
                     "effectiveCore": list(current_core),
+                    "operatorStarredRetention": len(pinned_core_order),
                     "marketSnapshot": market_validation,
                 },
                 stamp=publication_stamp,
@@ -9516,6 +9551,7 @@ def scan(db, p):
                 ).hexdigest(),
                 "marketSnapshot": market_validation,
                 "marketSnapshotProfiled": market_snapshot_audit,
+                "operatorStarredRetention": len(pinned_core_order),
                 **rest.request_stats(),
             }
             db.execute(

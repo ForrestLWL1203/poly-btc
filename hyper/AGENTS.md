@@ -43,8 +43,10 @@ Repository boundaries:
   builder namespaces are out of scope.
 - Settings saves must not start a scan. A scan starts from the explicit Dashboard action or the configured
   automatic cadence.
-- Every complete discovery scan may publish its currently proven score-prefix membership subject to the
-  explicit incumbent-retention contract below. There is no promotion confirmation or forced minimum tenure.
+- Every complete discovery scan is a strict membership reset: every unstarred incumbent competes as an
+  ordinary current-generation candidate and drops when it is not selected. Only a currently active,
+  operator-starred Core may enter the bounded incumbent-retention lane; hard safety, structural and incomplete
+  evidence gates still revoke that protection. There is no promotion confirmation or forced minimum tenure.
   Challenger
   daily refresh is the deliberate exception: it may publish only the same Core set or a strict superset, never
   a removal or replacement. Expensive optimization runs only for a proven daily promotion or when explicitly
@@ -122,9 +124,11 @@ Strict-finalist paths are loaded only for a cache miss and released before Top16
 Individual formation evidence persists effective metrics, qualification and score only; full 30/14/7
 positions, equity paths and event trajectories must never enter `formation_prefix_evidence`. Legacy rows are
 trimmed with SQLite JSON projection before Python decodes them.
-Incumbent-retention overlays must reuse those same winning-surface Top16 individual results before the one
-final shared certification. They may not start a second individual strict pass or certify a provisional
-membership before retention and then replay a second effective membership.
+Complete-scan retention overlays are limited to active operator-starred Core and must reuse those same
+winning-surface Top16 individual results before the one final shared certification. Unstarred incumbents never
+receive a retention overlay. Daily refresh may retain all current Core on the same cached evidence. Neither
+path may start a second individual strict pass or certify a provisional membership before retention and then
+replay a second effective membership.
 Final same-surface count search must apply the same actionable-open and capacity gates as atomic publication;
 those metrics cannot be treated as telemetry during count choice and then become blockers only at publish.
 Both tune-pool and final-membership fill sequences are lazy: persistent evidence lookup happens first, and a
@@ -404,7 +408,8 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
 
 1. Freeze cross-week activity and fills-only economics for every structural survivor. Fill Top32 by the unified
    rough profit-aligned score; primary/reserve remains visible evidence, not a conflicting sort order.
-2. Freeze at most Top16 before parameter work. Stars remain operator attention metadata only.
+2. Freeze at most Top16 before parameter work. Active operator-starred Core consume ordinary Top16 seats and
+   receive only soft/medium retention protection; unstarred incumbent status has no admission priority.
 3. Locate a count center on the active surface, cross shared tier candidates over n±1 and validate n±2 guards.
    Each node uses the same normalized cached fills with continuous floating equity. The search may shorten only
    the lowest-profit suffix and may never insert a lower-ranked wallet.
@@ -423,8 +428,9 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
    context abort publication. A data-complete economic-only failure publishes `operator_review_degraded` with
    the existing effective membership and parameters; it does not promote or retune.
 
-An operator may star a wallet through the Dashboard for attention and manual review. The durable
-`target_controls.pinned` flag is never a selection permission. A conditional exit with no positions moves
+An operator may star a current Core through the Dashboard to grant bounded retention during complete strict
+re-evaluation. The durable `target_controls.pinned` flag does not bypass hard safety, structural, data/path or
+final strict gates, cannot revive an inactive target, and consumes a normal Top16/Core seat. A conditional exit with no positions moves
 immediately to `requalify`. Position detection and cohort resolution use only the currently selected Paper or
 Live execution ledger; a position in the other ledger must never block the request. With current-ledger
 positions it captures the complete current position-ID cohort and enters
