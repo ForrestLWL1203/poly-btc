@@ -271,7 +271,10 @@ def _assert_scoped_fill_cache(db, addrs, universe) -> dict:
         batch = owners[offset:offset + 100]
         marks = ",".join("?" for _ in batch)
         rows = db.execute(
-            f"SELECT fill_json FROM candidate_fills WHERE lower(addr) IN ({marks})",
+            # Cache owners are normalized to lowercase at collection/persistence boundaries.  Wrapping the
+            # indexed column in ``lower()`` forced one full five-million-row table scan per 100-wallet batch;
+            # an ordinary equality predicate uses the existing ``(addr,time)`` index instead.
+            f"SELECT fill_json FROM candidate_fills WHERE addr IN ({marks})",
             batch,
         )
         for (payload,) in rows:

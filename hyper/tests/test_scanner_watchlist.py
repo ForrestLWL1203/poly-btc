@@ -279,15 +279,19 @@ class ScannerWatchlistTests(unittest.TestCase):
                 raise AssertionError("scope audit must not materialize a fill shard")
 
         class StreamingDb:
-            def execute(self, _sql, _args):
+            def execute(self, sql, _args):
+                self.sql = sql
                 return StreamingCursor()
 
+        streaming_db = StreamingDb()
         self.assertEqual(
             scanner._assert_scoped_fill_cache(
-                StreamingDb(), ["0xaaa"], {"BTC", "xyz:AAPL"},
+                streaming_db, ["0xaaa"], {"BTC", "xyz:AAPL"},
             ),
             {"audited": 2, "invalid": 0, "scope": ["crypto", "stock"]},
         )
+        self.assertIn("WHERE addr IN", streaming_db.sql)
+        self.assertNotIn("lower(addr)", streaming_db.sql)
 
     def test_source_cursor_advances_when_every_new_fill_is_out_of_scope(self):
         with tempfile.TemporaryDirectory() as td:
