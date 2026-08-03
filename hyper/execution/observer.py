@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import time
 
 import websockets
@@ -103,6 +104,9 @@ class Observer:
 
     def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, add_frac: float = None):
         self.db = db
+        db_info = list(self.db.execute("PRAGMA database_list"))
+        self.db_path = next((str(row[2]) for row in db_info if row[1] == "main" and row[2]), None)
+        self._live_executor_db = None
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.strategy_revision_id = None
@@ -207,6 +211,8 @@ class Observer:
             self.execution_state = "paper"
             self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
         self.live_executor = None
+        self.live_reconcile_error = None
+        self.live_reconcile_error_at = None
         self.selection_generation = None
         self.ws = None
         self.stop = False
@@ -328,13 +334,41 @@ class Observer:
         """Refresh authoritative Mainnet equity before calculating any exposure increase."""
         if self.execution_mode != "live" or self.live_executor is None:
             return
-        result = await asyncio.to_thread(self.live_executor.reconcile)
+        result = None
+        for attempt in range(4):
+            try:
+                result = await asyncio.to_thread(self.live_executor.reconcile)
+                break
+            except Exception as exc:
+                self.live_executor.rollback_after_error()
+                self.live_reconcile_error = str(exc)[:120]
+                self.live_reconcile_error_at = now_iso()
+                if attempt == 3:
+                    raise
+                await asyncio.sleep(0.25 * (2 ** attempt))
+        self.live_reconcile_error = None
+        self.live_reconcile_error_at = None
         self._sync_live_account()
         if not result.get("ok"):
             self.paused = True
             self.execution_state = "reconcile_required"
             self._write_proc_status("paused")
             raise RuntimeError("live_reconcile_required")
+
+    def _open_live_executor_db(self):
+        """Open a connection never shared with Observer signal/command coroutines.
+
+        Live reconciliation runs in worker threads. Sharing ``self.db`` lets a worker commit or roll back the
+        Observer's transaction, which caused false lease loss and a hidden permanent pause in production.
+        File-backed databases therefore receive an independent WAL connection. In-memory unit-test databases
+        retain the supplied connection because they cannot be reopened as the same database.
+        """
+        if not self.db_path or self.db_path == ":memory:":
+            return self.db
+        db = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(f"PRAGMA busy_timeout={int(config.OBSERVER_DB_BUSY_TIMEOUT_MS)}")
+        return db
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -1459,28 +1493,43 @@ class Observer:
             _log(f"heartbeat: {o} open / {c} closed | 本轮看到 {seen} → 跟 {sum(acts.values())} ({act_s}), "
                  f"跳 {sum(skips.values())} ({skip_s})")
             try:
-                if self.execution_mode == "live" and self.live_executor is not None:
-                    self.live_executor.reconcile()
-                    self._sync_live_account()
-                else:
+                if self.execution_mode != "live" or self.live_executor is None:
                     self._write_stats()             # append the Paper dashboard snapshot every 5 min
             except Exception as exc:  # noqa: BLE001
                 _log(f"stats snapshot failed: {exc}")
 
+    async def _reconcile_live_once(self):
+        """Refresh exchange truth without turning a transient error into a hidden permanent pause.
+
+        Every exposure increase performs its own mandatory reconciliation, so a failed background refresh is
+        already fail-closed for the next order. Only a successful exchange response proving drift enters
+        persistent ``reconcile_required``; transport/SQLite errors remain visible and retry automatically.
+        """
+        try:
+            result = await asyncio.to_thread(self.live_executor.reconcile)
+            self._sync_live_account()
+        except Exception as exc:  # noqa: BLE001
+            self.live_executor.rollback_after_error()
+            self.live_reconcile_error = str(exc)[:120]
+            self.live_reconcile_error_at = now_iso()
+            try:
+                self._write_proc_status(self._proc_state)
+            except Exception:  # noqa: BLE001 - telemetry must not mask reconciliation recovery
+                self._rollback_db()
+            _log(f"live reconcile transient error: {self.live_reconcile_error}")
+            return None
+        self.live_reconcile_error = None
+        self.live_reconcile_error_at = None
+        if not result.get("ok"):
+            self.paused = True
+            self.execution_state = "reconcile_required"
+            self._write_proc_status("paused")
+        return result
+
     async def live_reconcile_loop(self):
         """Continuously refresh exchange truth and freeze increases on drift."""
         while not self.stop and self.execution_mode == "live":
-            try:
-                result = await asyncio.to_thread(self.live_executor.reconcile)
-                self._sync_live_account()
-                if not result.get("ok"):
-                    self.paused = True
-                    self.execution_state = "reconcile_required"
-                    self._write_proc_status("paused")
-            except Exception as exc:  # noqa: BLE001
-                self.paused = True
-                self._rollback_db()
-                _log(f"live reconcile failed closed: {str(exc)[:120]}")
+            await self._reconcile_live_once()
             await asyncio.sleep(15)
 
     async def prune_live_fills(self):
@@ -1518,7 +1567,10 @@ class Observer:
              json.dumps({"paused": self.paused, "targets": len(self.addrs),
                          "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id,
                          "executionMode": self.execution_mode,
-                         "executionState": self.execution_state})))
+                         "executionState": self.execution_state,
+                         "reconcileHealthy": self.live_reconcile_error is None,
+                         "reconcileError": self.live_reconcile_error,
+                         "reconcileErrorAt": self.live_reconcile_error_at})))
         self.db.commit()
 
     def _interrupt_ws_for_stop(self):
@@ -2106,7 +2158,8 @@ class Observer:
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
         if self.execution_mode == "live":
-            self.live_executor = LiveExecutor.from_db(self.db)
+            self._live_executor_db = self._open_live_executor_db()
+            self.live_executor = LiveExecutor.from_db(self._live_executor_db)
             result = await asyncio.to_thread(self.live_executor.reconcile)
             self._sync_live_account()
             if not result.get("ok"):
@@ -2187,6 +2240,11 @@ class Observer:
             try:
                 self.live_executor.release_lease()
             except Exception:  # noqa: BLE001 - process exit must not mask the completed drain
+                pass
+        if self._live_executor_db is not None and self._live_executor_db is not self.db:
+            try:
+                self._live_executor_db.close()
+            except Exception:  # noqa: BLE001 - shutdown must not mask the completed drain
                 pass
 
     # -- WS message router (bbo only) ----------------------------------------
@@ -2459,7 +2517,15 @@ class Observer:
         async with book.acct_lock:                   # serialize margin allocation across opens
             # Paper reads its latest local balance here. Live first refreshes exchange-authoritative equity
             # and available collateral so the sizing formula never starts from the 15-second projection cache.
-            await self._refresh_live_sizing_state()
+            try:
+                await self._refresh_live_sizing_state()
+            except Exception as exc:  # no order was submitted, so the placeholder is safe to remove
+                self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
+                book.open_ep.pop((addr, coin), None)
+                self.db.commit()
+                self._tally("skip_live_reconcile", book)
+                _log(f"live open {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                return
             # MARGIN_EQUITY_PCT owns both the per-order base and aggregate fresh-entry budget. Once the
             # budget is full, adds may still use remaining real cash because they preserve copy fidelity.
             risk_equity = self._risk_equity(book)
@@ -2761,7 +2827,12 @@ class Observer:
                 # ③ 比例镜像，但单个目标加仓订单最多消耗一个我方首仓额度；不足整笔时填满单币余量。
                 ratio = target_add_notl / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with book.acct_lock:
-                    await self._refresh_live_sizing_state()
+                    try:
+                        await self._refresh_live_sizing_state()
+                    except Exception as exc:
+                        self._tally("skip_live_reconcile_add", book)
+                        _log(f"live add {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                        return _observe_only()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
@@ -2802,7 +2873,12 @@ class Observer:
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
                     return _observe_only(final=True)
                 async with book.acct_lock:
-                    await self._refresh_live_sizing_state()
+                    try:
+                        await self._refresh_live_sizing_state()
+                    except Exception as exc:
+                        self._tally("skip_live_reconcile_add", book)
+                        _log(f"live add {coin} deferred: reconciliation unavailable ({str(exc)[:120]})")
+                        return _observe_only()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(

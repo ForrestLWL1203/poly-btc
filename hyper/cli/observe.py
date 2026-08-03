@@ -44,8 +44,16 @@ def main() -> int:
         seed = {a: seed.get(a, set()) for a in addrs}
         if not addrs:
             published = selection.latest_published_generation(db)
+            selected_mode = db.execute(
+                "SELECT selected_mode FROM execution_control WHERE id=1"
+            ).fetchone()
+            position_table = (
+                "live_copy_position"
+                if selected_mode and selected_mode[0] == "live"
+                else "copy_position"
+            )
             held_n = db.execute(
-                "SELECT COUNT(DISTINCT addr) FROM copy_position WHERE status='open'"
+                f"SELECT COUNT(DISTINCT addr) FROM {position_table} WHERE status='open'"
             ).fetchone()[0]
             if published is None:
                 print("no published Core yet; observer is running idle and waiting for the first scan.")

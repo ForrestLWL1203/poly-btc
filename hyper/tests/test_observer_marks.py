@@ -1,9 +1,10 @@
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from hyper import config, storage
 from hyper.execution.live_executor import LiveExecutionResult
@@ -199,6 +200,111 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 "SELECT initial_balance,balance,available FROM live_copy_account WHERE id=1"
             ).fetchone()
             self.assertEqual(tuple(account), (8000.0, 204.0, 187.0))
+
+        asyncio.run(run())
+
+    def test_live_executor_database_connection_is_not_shared_with_observer(self):
+        db = self._db()
+        obs = Observer(db, [], {})
+
+        execution_db = obs._open_live_executor_db()
+        self.addCleanup(execution_db.close)
+
+        self.assertIsNot(execution_db, db)
+        observer_path = db.execute("PRAGMA database_list").fetchone()[2]
+        execution_path = execution_db.execute("PRAGMA database_list").fetchone()[2]
+        self.assertEqual(execution_path, observer_path)
+        self.assertEqual(
+            execution_db.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+            "wal",
+        )
+
+    def test_live_sizing_retries_transient_reconcile_without_pausing(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.execution_state = "live_running"
+
+            executor = Mock()
+            executor.equity = 205.0
+            executor.available = 190.0
+            executor.reconcile.side_effect = [
+                sqlite3.OperationalError("database is locked"),
+                sqlite3.OperationalError("database is locked"),
+                {"ok": True},
+            ]
+            obs.live_executor = executor
+
+            with patch("hyper.execution.observer.asyncio.sleep", new=AsyncMock()) as sleep:
+                await obs._refresh_live_sizing_state()
+
+            self.assertEqual(executor.reconcile.call_count, 3)
+            self.assertEqual(executor.rollback_after_error.call_count, 2)
+            self.assertEqual(sleep.await_count, 2)
+            self.assertFalse(obs.paused)
+            self.assertIsNone(obs.live_reconcile_error)
+
+        asyncio.run(run())
+
+    def test_background_reconcile_transient_error_is_visible_and_auto_recovers(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.execution_state = "live_running"
+            obs._proc_state = "running"
+
+            executor = Mock()
+            executor.equity = 205.0
+            executor.available = 190.0
+            executor.reconcile.side_effect = sqlite3.OperationalError("database is locked")
+            obs.live_executor = executor
+
+            result = await obs._reconcile_live_once()
+
+            self.assertIsNone(result)
+            self.assertFalse(obs.paused)
+            self.assertEqual(obs.execution_state, "live_running")
+            self.assertIn("database is locked", obs.live_reconcile_error)
+            detail = json.loads(db.execute(
+                "SELECT detail_json FROM process_status WHERE name='observer'"
+            ).fetchone()[0])
+            self.assertFalse(detail["reconcileHealthy"])
+
+            executor.reconcile.side_effect = None
+            executor.reconcile.return_value = {"ok": True}
+            result = await obs._reconcile_live_once()
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(obs.paused)
+            self.assertIsNone(obs.live_reconcile_error)
+
+        asyncio.run(run())
+
+    def test_background_reconcile_confirmed_drift_still_pauses_live(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.execution_state = "live_running"
+            obs._proc_state = "running"
+
+            executor = Mock()
+            executor.equity = 205.0
+            executor.available = 190.0
+            executor.reconcile.return_value = {"ok": False}
+            obs.live_executor = executor
+
+            result = await obs._reconcile_live_once()
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(obs.paused)
+            self.assertEqual(obs.execution_state, "reconcile_required")
+            self.assertEqual(
+                db.execute("SELECT state FROM process_status WHERE name='observer'").fetchone()[0],
+                "paused",
+            )
 
         asyncio.run(run())
 

@@ -207,6 +207,14 @@ class LiveExecutor:
         self.db.execute("DELETE FROM execution_lease WHERE id=1 AND owner=?", (self.owner,))
         self.db.commit()
 
+    def rollback_after_error(self) -> None:
+        """Restore the dedicated execution connection after an interrupted operation."""
+        with self._lock:
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: BLE001 - recovery must not hide the original execution error
+                pass
+
     def _freeze_reconcile(self, error_code: str) -> None:
         """Atomically block all exposure increases until exchange truth is clean."""
         control.set_control_state(self.db, "reconcile_required", error_code=error_code)

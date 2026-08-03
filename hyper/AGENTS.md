@@ -536,6 +536,10 @@ through those retries; only markets still missing after all five attempts are cl
 - A passing Mainnet preflight starts a full Live session immediately. The retired 1%-of-equity Canary cap may
   appear only on a legacy active session and must be removed through the execution control worker after a clean,
   flat reconciliation; new sessions never create it.
+- Live reconciliation and order execution use a dedicated WAL connection, never Observer's coroutine-owned
+  SQLite connection. A transport or database-lock exception is visible in Observer health and retries without
+  silently changing the runtime to paused; only a successful exchange snapshot that proves ledger drift enters
+  persistent `reconcile_required`. Every exposure increase still performs its own mandatory fresh reconciliation.
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use
