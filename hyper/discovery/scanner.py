@@ -2682,12 +2682,22 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         stage=qualification_stage,
         policy_values=follow,
     )
+    sector_policy_json = effective.get("sector_policy_json")
+    # The final formation needs normalized scalar economics, not another copy of the complete sector replay.
+    # ``sector_copy_json`` contains every 30/14/7 position and can be tens of MiB for one high-activity wallet.
+    # Keeping it in each of the sixteen winning-surface metric rows made RSS grow monotonically throughout
+    # individual strict replay and eventually pushed the 2-GiB VPS into Swap.  The sector-scoped fields above
+    # have already been materialized, and the policy travels through its dedicated return field.
+    for heavy_key in (
+        "sector_copy_json", "pre_strict_activity_json", "official_perp_evidence_json",
+    ):
+        scoring_metrics.pop(heavy_key, None)
     return {
         "metrics": scoring_metrics,
         "qualification": qualification,
         "score": score,
         "scoreDetail": _detail,
-        "sectorPolicyJson": effective.get("sector_policy_json"),
+        "sectorPolicyJson": sector_policy_json,
         "results": results,
     }
 

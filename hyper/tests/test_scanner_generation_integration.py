@@ -1045,6 +1045,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         )
         self.assertNotIn('"sector_copy_json": None', source)
         self.assertIn("**scoring_metrics", source)
+        self.assertIn('"sector_copy_json", "pre_strict_activity_json"', source)
+        self.assertIn("scoring_metrics.pop(heavy_key, None)", source)
 
     def test_finalist_surface_optimizes_the_individually_qualified_portfolio(self):
         with tempfile.TemporaryDirectory() as td:
