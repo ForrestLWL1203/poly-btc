@@ -211,7 +211,8 @@ def _serve_rescan(db, db_path=config.DEFAULT_DB):
                 print(f"-> running scan [{why}]", flush=True)
                 try:
                     with scan_lock.acquire(db_path):
-                        scanner.scan(db, ns)         # consumes pending rescan(s) + writes progress/status
+                        with scanner._ScannerHeartbeat(db):
+                            scanner.scan(db, ns)     # consumes pending rescan(s) + writes progress/status
                 except scan_lock.ScanBusyError:
                     print("scan daemon: another scanner run is active; retrying later", flush=True)
         except Exception as exc:  # noqa: BLE001
@@ -476,7 +477,8 @@ def main() -> int:
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
         try:
             with scan_lock.acquire(args.db):
-                scanner.scan(db, args)                  # the observer (when up) keeps its own fast pace
+                with scanner._ScannerHeartbeat(db):
+                    scanner.scan(db, args)              # the observer (when up) keeps its own fast pace
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
         except Exception as exc:  # noqa: BLE001
@@ -495,7 +497,8 @@ def main() -> int:
         params.apply_scanner_params(db, ns)
         try:
             with scan_lock.acquire(args.db):
-                result = scanner.refresh_challengers(db, ns)
+                with scanner._ScannerHeartbeat(db):
+                    result = scanner.refresh_challengers(db, ns)
         except scan_lock.ScanBusyError:
             scanner.record_challenger_refresh_skip(db, "skipped_scan_busy")
             result = {"status": "skipped", "reason": "skipped_scan_busy"}

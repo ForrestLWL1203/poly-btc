@@ -566,6 +566,9 @@ the local mock dashboard and inspect the rendered result.
 - Profile workers return cache/profile/Episode artifacts; the scanner parent commits them in bounded SQLite
   batches. Strict per-wallet replay and independent tune candidates use CPU-affinity-aware process workers
   (`1 core → serial`, up to four workers), while all database writes remain in the parent process.
+- Scanner liveness is independent of stage completion: a best-effort minute writer updates the existing
+  `process_status('scanner')` row through its own short-timeout SQLite connection, and Dashboard falls back to
+  a newer active `scan_progress.updated_at`. The heartbeat does not append history or block replay.
 - Do not restart `hl-scan.service` to deploy code: it starts a real scan when activated. Restart only the
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
 - Every scheduled full or Challenger scan runs `storage-maintenance` as `ExecStopPost`. It shares the scanner

@@ -6,16 +6,35 @@ import time
 from .common import iso_epoch, q1, qall, score100
 
 
-# The scanner refreshes process_status after each batch of 10 completed profiles.
-# Observer-safe REST pacing can make a healthy batch take roughly five minutes, so
-# the Observer's 90-second liveness window is not appropriate for scanner health.
+# Scanner has an independent minute heartbeat.  ``scan_progress.updated_at`` is
+# also an authoritative fallback for a scan that started before that writer was
+# deployed, or for a best-effort heartbeat skipped during a short SQLite lock.
 SCANNER_STALE_SEC = 15 * 60
 
 
 def scanner_status(db):
     """Live status of the continuous rolling scanner."""
     r = q1(db, "SELECT state,heartbeat_at,detail_json FROM process_status WHERE name='scanner'")
+    try:
+        progress = q1(
+            db,
+            "SELECT state,stage,candidates_scanned,candidates_total,updated_at "
+            "FROM scan_progress WHERE id=1",
+        )
+    except Exception:  # noqa: BLE001 - compatibility with compact/old status databases
+        progress = None
+    progress_active = bool(progress and progress["state"] == "scanning")
     if not r:
+        if progress_active:
+            return {
+                "mode": "scanning", "stale": False,
+                "heartbeatAt": progress["updated_at"],
+                "detail": {
+                    "stage": progress["stage"],
+                    "scanned": progress["candidates_scanned"],
+                    "total": progress["candidates_total"],
+                },
+            }
         ran = q1(db, "SELECT COUNT(*) c FROM scan_runs")
         return {"mode": "idle" if (ran and ran["c"]) else "unknown", "stale": False,
                 "heartbeatAt": None, "detail": {}}
@@ -23,15 +42,27 @@ def scanner_status(db):
         detail = json.loads(r["detail_json"]) if r["detail_json"] else {}
     except (ValueError, TypeError):
         detail = {}
-    hb = iso_epoch(r["heartbeat_at"])
+    heartbeat_at = r["heartbeat_at"]
+    if progress_active:
+        progress_hb = iso_epoch(progress["updated_at"])
+        process_hb = iso_epoch(heartbeat_at)
+        if progress_hb and (not process_hb or progress_hb > process_hb):
+            heartbeat_at = progress["updated_at"]
+        detail.update({
+            "stage": progress["stage"],
+            "scanned": progress["candidates_scanned"],
+            "total": progress["candidates_total"],
+        })
+    hb = iso_epoch(heartbeat_at)
+    mode = "scanning" if progress_active else (r["state"] or "unknown")
     stale = bool(
-        (r["state"] or "unknown") != "idle"
+        mode != "idle"
         and hb
         and (time.time() - hb) > SCANNER_STALE_SEC
     )
-    return {"mode": r["state"] or "unknown",
+    return {"mode": mode,
             "stale": stale,
-            "heartbeatAt": r["heartbeat_at"], "detail": detail}
+            "heartbeatAt": heartbeat_at, "detail": detail}
 
 
 def followed_count(db):

@@ -701,6 +701,9 @@ temporary databases out of commits.
   it merely to pick up code. Use `systemctl reset-failed hl-scan.service` only to clear failed state.
 - Scanner and Observer share Hyperliquid REST weight. Observer signal polling has priority; scanner pace adapts
   to whether Observer has active work.
+- Long Scanner path/tuning phases use a separate best-effort SQLite connection to refresh the single
+  `process_status('scanner')` row once per minute. Dashboard liveness uses the newer of that heartbeat and an
+  active `scan_progress.updated_at`; neither mechanism appends heartbeat history or may delay scan work.
 - Before remote work, read the current connection from `secret/vps.txt`; never reuse a host, user, password,
   key, or SSH target from memory. The local agent should attempt the canonical configuration before declaring
   the VPS inaccessible.

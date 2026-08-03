@@ -73,6 +73,7 @@ from hyper.util import f, now_iso
 
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 _STRICT_REPLAY_PROCESS_CONTEXT = {}
+_SCANNER_HEARTBEAT_INTERVAL_S = 60.0
 
 
 def _execution_position_table(db) -> str:
@@ -529,6 +530,82 @@ def _set_scanner_proc(db, state, detail=None):
             db.commit()
     except Exception:  # noqa: BLE001
         pass
+
+
+def _scanner_db_path(db):
+    """Return the on-disk database path used by a separate heartbeat writer."""
+    try:
+        row = db.execute("PRAGMA database_list").fetchone()
+        path = row[2] if row else None
+    except sqlite3.Error:
+        return None
+    return str(path) if path and str(path) != ":memory:" else None
+
+
+def _write_scanner_heartbeat(db_path) -> bool:
+    """Refresh scanner liveness without sharing the long-running scan connection.
+
+    This deliberately updates one existing row and never appends history.  A busy
+    writer is skipped quickly; the next minute retries without delaying replay.
+    """
+    if not db_path:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=0.25)
+        conn.execute("PRAGMA busy_timeout=250")
+        progress = conn.execute(
+            "SELECT state,stage,candidates_scanned,candidates_total "
+            "FROM scan_progress WHERE id=1"
+        ).fetchone()
+        if not progress or str(progress[0] or "") != "scanning":
+            return False
+        detail = {
+            "stage": progress[1],
+            "scanned": int(progress[2] or 0),
+            "total": int(progress[3] or 0),
+        }
+        changed = conn.execute(
+            "UPDATE process_status SET pid=?,heartbeat_at=?,detail_json=? "
+            "WHERE name='scanner' AND state='scanning'",
+            (os.getpid(), now_iso(), json.dumps(detail, sort_keys=True)),
+        ).rowcount
+        conn.commit()
+        return bool(changed)
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+class _ScannerHeartbeat:
+    """Best-effort minute heartbeat for CPU-heavy path/tuning phases."""
+
+    def __init__(self, db, interval_s=_SCANNER_HEARTBEAT_INTERVAL_S):
+        self.db_path = _scanner_db_path(db)
+        self.interval_s = max(0.01, float(interval_s))
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def __enter__(self):
+        if not self.db_path:
+            return self
+
+        def run():
+            while not self.stop_event.wait(self.interval_s):
+                _write_scanner_heartbeat(self.db_path)
+
+        self.thread = threading.Thread(
+            target=run, name="scanner-heartbeat", daemon=True,
+        )
+        self.thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=min(1.0, self.interval_s))
 
 
 def _set_scan_progress(db, **kw):

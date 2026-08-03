@@ -14,15 +14,16 @@ export function ScanStatusCard({ discovery, scanning }) {
   const fn = discovery.funnel;
   const sc = discovery.scanner || { mode: "unknown" };
   const scMode = sc.mode, scColor = scannerColor(scMode, sc.stale);
+  const activeScan = scMode === "scanning" || scanning;
   const lastScanH = discovery.lastScanAt ? (Date.now() - new Date(discovery.lastScanAt).getTime()) / 3.6e6 : 1e9;
-  const overdue = lastScanH > 26;
+  const overdue = !activeScan && lastScanH > 26;
   return (
     <div className="card">
       <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
         <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: scColor }}>
           <span className="dot" style={{ background: scColor, animation: (scMode === "rolling" || scMode === "scanning" || scanning) ? "pulse 1.4s infinite" : "none" }} />
           {SCANNER_LABEL[scMode] || scMode}{sc.stale && scMode !== "idle" ? " · 心跳超时 ⚠" : ""}</span>
-        <div><div className="muted">上次扫描</div><div className="mono" style={{ fontSize: 15, color: overdue ? "var(--red-l)" : undefined }}>{agoText(discovery.lastScanAt)}{overdue ? " ⚠超期" : ""}</div></div>
+        <div><div className="muted">{activeScan ? "上次完成" : "上次扫描"}</div><div className="mono" style={{ fontSize: 15, color: overdue ? "var(--red-l)" : undefined }}>{agoText(discovery.lastScanAt)}{overdue ? " ⚠超期" : ""}</div></div>
         <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>周一/周四完整重评 · 历史增量</div></div>
         <div><div className="muted">被跟名单</div><div className="mono" style={{ fontSize: 15 }}>{fn.watchlist} 钱包</div></div>
         <div><div className="muted">心跳</div><div className="mono" style={{ fontSize: 15, color: (sc.stale && scMode !== "idle") ? "var(--red-l)" : "var(--green-l)" }}>{agoText(sc.heartbeatAt)}</div></div>

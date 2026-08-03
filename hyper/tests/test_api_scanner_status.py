@@ -81,6 +81,49 @@ class ApiScannerStatusTests(unittest.TestCase):
 
         self.assertTrue(st["stale"])
 
+    def test_fresh_scan_progress_prevents_false_stale_process_heartbeat(self):
+        now = 2_000_000_000.0
+        db = self._db_with_status("scanning")
+        db.execute(
+            "CREATE TABLE scan_progress (id INTEGER PRIMARY KEY,state TEXT,stage TEXT,"
+            "candidates_scanned INTEGER,candidates_total INTEGER,updated_at TEXT)"
+        )
+        progress_heartbeat = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 30),
+        )
+        db.execute(
+            "INSERT INTO scan_progress VALUES (1,'scanning','portfolio_tune_coarse',8,16,?)",
+            (progress_heartbeat,),
+        )
+
+        with patch.object(api_discovery.time, "time", return_value=now):
+            st = api_discovery.scanner_status(db)
+
+        self.assertFalse(st["stale"])
+        self.assertEqual(st["heartbeatAt"], progress_heartbeat)
+        self.assertEqual(st["detail"]["stage"], "portfolio_tune_coarse")
+
+    def test_old_scan_progress_does_not_hide_a_dead_scanner(self):
+        now = 2_000_000_000.0
+        db = self._db_with_status("scanning")
+        db.execute(
+            "CREATE TABLE scan_progress (id INTEGER PRIMARY KEY,state TEXT,stage TEXT,"
+            "candidates_scanned INTEGER,candidates_total INTEGER,updated_at TEXT)"
+        )
+        old = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(now - api_discovery.SCANNER_STALE_SEC - 1),
+        )
+        db.execute(
+            "INSERT INTO scan_progress VALUES (1,'scanning','portfolio_tune_full',8,16,?)",
+            (old,),
+        )
+
+        with patch.object(api_discovery.time, "time", return_value=now):
+            st = api_discovery.scanner_status(db)
+
+        self.assertTrue(st["stale"])
+
     def test_discovery_endpoints_are_split_from_api_module(self):
         self.assertIsNotNone(util.find_spec("dashboard.api.discovery"))
         api_discovery = import_module("dashboard.api.discovery")
