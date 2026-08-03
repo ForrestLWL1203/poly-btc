@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from hyper import storage
-from hyper.copy.copy_backtest import run_backtest
+from hyper.copy.copy_backtest import PreparedPricePath, prepare_price_path, run_backtest
 from hyper.market import price_path
 
 
@@ -116,6 +116,24 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual(3, len(merged))
         gapped = price_path.merge_finer_path(coarse, complete[:2])
         self.assertEqual(coarse, gapped)
+
+    def test_refined_load_is_already_prepared_for_replay(self):
+        now = 4_000_000_000_000
+        start = now - 900_000
+        self.db.execute(
+            "INSERT INTO coin_price_candle VALUES (?,?,?,?,?,?,?,?,?)",
+            ("BTC", "15m", start, now - 1, 100, 102, 98, 101, now),
+        )
+        fills = [{
+            "coin": "BTC", "time": now - 60_000, "side": "B", "sz": "1",
+            "startPosition": "0", "px": "100",
+        }]
+
+        refined = price_path.load_refined(self.db, fills, start, now)
+
+        self.assertIsInstance(refined, PreparedPricePath)
+        self.assertIs(prepare_price_path(refined), refined)
+        self.assertEqual(1, len(refined))
 
 
 if __name__ == "__main__":

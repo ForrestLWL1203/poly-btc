@@ -250,11 +250,24 @@ def merge_finer_path(path_rows: list[dict], fine_rows: list[dict]) -> list[dict]
     ))
 
 
-def load_refined(db, fills, start_ms: int, end_ms: int) -> list[dict]:
+def load_refined(db, fills, start_ms: int, end_ms: int):
+    """Load one canonical refined path without normalizing every candle twice.
+
+    ``load`` and ``merge_finer_path`` already emit the exact normalized fields consumed by
+    ``copy_backtest``.  Returning a plain list made every caller immediately pass roughly the same
+    400k-row surface through ``prepare_price_path``, which allocated a second dictionary per candle.
+    A diversified Top16 wallet can cover more than one hundred markets, so that redundant conversion
+    alone was enough to push the 2-GiB scanner into Swap during individual strict replay.
+
+    The prepared type remains a ``list`` subclass, preserving existing callers while allowing
+    ``prepare_price_path`` to recognize the surface and reuse it by identity.
+    """
     rows = load(db, fills, start_ms, end_ms, interval=BASE_INTERVAL)
     for interval in REFINEMENT_INTERVALS:
         rows = merge_finer_path(rows, load(db, fills, start_ms, end_ms, interval=interval))
-    return rows
+    # Local import keeps the market cache independent from the backtest module at import time.
+    from hyper.copy.copy_backtest import PreparedPricePath
+    return PreparedPricePath(rows)
 
 
 def coverage(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL) -> dict:
