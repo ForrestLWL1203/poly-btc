@@ -230,7 +230,11 @@ class WebStaticAssetsTests(unittest.TestCase):
     def test_positions_exposes_close_all_command(self):
         positions = (ROOT / "dashboard" / "web" / "components" / "Positions.jsx").read_text(encoding="utf-8")
 
-        self.assertIn('api.cmd("close_all"', positions)
+        self.assertIn('api.cmdAndWait("close_all", {}, 180000)', positions)
+        self.assertIn('api.cmdAndWait("close_position"', positions)
+        self.assertIn("waitUntilPositionsClose(ids)", positions)
+        self.assertNotIn("setTimeout(r, 2500)", positions)
+        self.assertNotIn("setTimeout(r, 1800)", positions)
         self.assertIn("一键平仓", positions)
         self.assertIn("positions-close-all-btn", positions)
         self.assertIn("btn btn-stop btn-sm positions-close-all-btn", positions)

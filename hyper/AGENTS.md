@@ -602,6 +602,9 @@ button is the only start/stop entry: in Live mode it automatically runs and cons
 preflight before starting Observer. Do not restore an Account-page start button, separate manual preflight card,
 or confirmation-phrase input. Changing Paper/Live mode requires Observer to be stopped so the displayed mode
 cannot diverge from the already-running engine.
+Manual close controls track the command terminal state instead of clearing from a fixed client-side delay. A
+batch close remains visibly busy until its command finishes and every position captured at submission has
+disappeared from the live positions API; a failed or timed-out remainder must be reported explicitly.
 
 The wallet list is intentionally light. Detail and position-detail requests are lazy. The UI labels the current
 roles as “跟单中”, “候选”, and “降级”; do not reintroduce internal role/model/data columns into the operator

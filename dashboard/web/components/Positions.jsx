@@ -13,9 +13,24 @@ import { OpenPositionsTable } from "./positions/OpenPositionsTable.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
+const positionId = (position) => Number(String(position.id).replace("pos_", ""));
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function waitUntilPositionsClose(ids, timeoutMs = 20000) {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const latest = await api.get("/api/positions?status=open");
+    const openIds = new Set((latest.positions || []).map(positionId));
+    if (ids.every(id => !openIds.has(id))) return;
+    await sleep(700);
+  }
+  throw new Error("positions_still_open");
+}
+
 export function Positions({ confirm, streamOpen }) {
   const [closing, setClosing] = useState({});
   const [closingAll, setClosingAll] = useState(false);
+  const [closeError, setCloseError] = useState(null);
   const [blacklist, setBlacklist] = useState([]);
   const [blacklisting, setBlacklisting] = useState({});
   const [filter, setFilter] = useState("all");
@@ -47,12 +62,17 @@ export function Positions({ confirm, streamOpen }) {
     body: `平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(当前名义额 ${fUsd(p.notional)})。选择平仓比例(默认100%),不可撤销。`,
     pctPicker: { notional: p.notional },
     onConfirm: async (frac = 1) => {
-      const pid = Number(p.id.replace("pos_", ""));
+      const pid = positionId(p);
+      setCloseError(null);
       setClosing(c => ({ ...c, [pid]: true }));
-      try { await api.cmd("close_position", { positionId: pid, fraction: frac }); } catch (_e) {}
-      await new Promise(r => setTimeout(r, 1800));
-      load();
-      setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
+      try {
+        await api.cmdAndWait("close_position", { positionId: pid, fraction: frac }, 120000);
+      } catch (_e) {
+        setCloseError("平仓未完成，请核对持仓后重试。");
+      } finally {
+        await load();
+        setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
+      }
     },
   });
   const doCloseAll = () => {
@@ -66,16 +86,20 @@ export function Positions({ confirm, streamOpen }) {
       ok: "全部平仓",
       body: `以 taker 方式平掉当前全部 ${count} 笔持仓。当前浮动盈亏 ${fSign(summary.floatingPnl, 1)}，提交后不可撤销。`,
       onConfirm: async () => {
-        const ids = positions.map(p => Number(String(p.id).replace("pos_", ""))).filter(Number.isFinite);
+        const ids = positions.map(positionId).filter(Number.isFinite);
+        setCloseError(null);
         setClosingAll(true);
         setClosing(Object.fromEntries(ids.map(pid => [pid, true])));
         try {
-          await api.cmd("close_all", {});
-        } catch (_e) {}
-        await new Promise(r => setTimeout(r, 2500));
-        load();
-        setClosing({});
-        setClosingAll(false);
+          await api.cmdAndWait("close_all", {}, 180000);
+          await waitUntilPositionsClose(ids);
+        } catch (_e) {
+          setCloseError("批量平仓未全部完成，请核对剩余持仓后重试。");
+        } finally {
+          await load();
+          setClosing({});
+          setClosingAll(false);
+        }
       },
     });
   };
@@ -129,6 +153,7 @@ export function Positions({ confirm, streamOpen }) {
             <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}
         </div>
       </div>
+      {closeError && <div className="account-error-banner" role="alert">{closeError}</div>}
       <OpenPositionsTable
         open={open}
         openRows={openRows}
