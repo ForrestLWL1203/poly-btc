@@ -788,6 +788,35 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(first["liquidations"], second["liquidations"])
         self.assertNotIn("has_fill_events", subset[0])
 
+    def test_path_equity_compacts_unchanged_unrelated_market_candles(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 60),
+            fill(300_000, "BTC", "A", 100, 100, 101.0, 61),
+        ]
+        path = [
+            {
+                "coin": "ETH", "time": stamp, "open_time": stamp - 999,
+                "close_time": stamp, "low": 90.0, "high": 110.0, "close": 100.0,
+            }
+            for stamp in range(2_000, 299_000, 1_000)
+        ]
+        path.append({
+            "coin": "BTC", "time": 150_000, "open_time": 149_001,
+            "close_time": 150_000, "low": 98.0, "high": 102.0, "close": 101.0,
+        })
+
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04},
+            overrides={"AMBIGUOUS_PATH_MODE": "liquidate"},
+            price_path=prepare_price_path(path),
+        )
+
+        # Nearly 900 low/high/close probes have identical account equity because ETH is not held. Keep the
+        # interval boundaries and the real BTC equity changes, not one dictionary per irrelevant probe.
+        self.assertLess(len(result["path_equity_samples"]), 20)
+        self.assertEqual(0, result["liquidations"])
+        self.assertEqual(1, result["closed_n"])
+
     def test_refinement_probe_keeps_ambiguity_without_equity_curve_allocation(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 60),

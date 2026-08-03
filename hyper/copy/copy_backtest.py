@@ -719,7 +719,25 @@ class Backtest:
         stamp = int(f(stamp))
         if stamp <= 0:
             return
-        self.path_equity_samples.append({"time": stamp, "equity": self.marked_equity()})
+        sample = {"time": stamp, "equity": self.marked_equity()}
+        samples = self.path_equity_samples
+        # A diversified source can touch more than one hundred markets, while the copied account normally
+        # holds only a few of them at once.  The strict path still visits every cached candle.  Recording the
+        # same marked equity for every unrelated candle used to create more than a million dictionaries for
+        # one wallet and exhausted Swap during Top16 replay.
+        #
+        # Keep both ends of each constant-equity interval: the first sample owns the interval start and the
+        # last sample owns the exact boundary before the next change.  Replacing only the middle/tail of an
+        # equal run therefore preserves elapsed-time drawdown math, intra-candle adverse extrema and window
+        # slicing while making storage proportional to actual equity changes rather than total market rows.
+        if (
+            len(samples) >= 2
+            and f(samples[-1].get("equity")) == f(sample["equity"])
+            and f(samples[-2].get("equity")) == f(sample["equity"])
+        ):
+            samples[-1] = sample
+        else:
+            samples.append(sample)
 
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
