@@ -14,6 +14,8 @@ import sqlite3
 import re
 from pathlib import Path
 
+from hyper import config
+
 DISCOVERY_SCHEMA = """
 PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS leaderboard (
@@ -1116,6 +1118,21 @@ CREATE TABLE IF NOT EXISTS fill_cache_state (
     updated_at        TEXT
 );
 
+-- High-confidence collection blacklist. Only durable automated/un-copyable behaviour belongs here;
+-- temporary economics, data failures, Heavy-DCA and portfolio-shape decisions remain recoverable.
+-- Keeping this separate from ``profile`` lets every future scan subtract the address before Portfolio or
+-- fill-history API calls while retaining one compact, auditable decision row.
+CREATE TABLE IF NOT EXISTS wallet_scan_blacklist (
+    addr          TEXT PRIMARY KEY,
+    reason        TEXT NOT NULL,
+    evidence_json TEXT,
+    generation    TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_scan_blacklist_reason_updated
+    ON wallet_scan_blacklist(reason, updated_at DESC);
+
 -- UI-tunable strategy parameters. Seeded from code defaults (hyper/params.py); the operator edits via
 -- the dashboard; Observer/Scanner read their category at run time (replacing config constants / CLI
 -- args). value is stored as TEXT and parsed by `type`. category: scanner(rescan) | follow(immediate).
@@ -1660,6 +1677,7 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     db = sqlite3.connect(path, check_same_thread=False, timeout=30)  # used across the scanner's
     db.execute("PRAGMA journal_mode=WAL")                            # worker threads (writes are
     db.execute("PRAGMA busy_timeout=30000")                          # serialized by a lock)
+    db.execute(f"PRAGMA journal_size_limit={int(config.SQLITE_JOURNAL_SIZE_LIMIT_BYTES)}")
     for s in schemas:
         db.executescript(s)
     # Dashboard, Observer and a maintenance CLI can start at the same moment after deploy.  Serialize

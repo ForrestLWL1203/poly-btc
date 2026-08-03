@@ -19,6 +19,7 @@ from hyper.copy.copy_backtest import (
     prepare_price_path,
     prepare_replay_fills,
     run_backtest,
+    slice_prepared_replay_fills,
     slice_backtest_result,
     subset_price_path,
 )
@@ -32,6 +33,7 @@ from hyper.copy.economics import (
 from hyper.copy.sector import parse_json_obj
 from hyper.market import generation_market, price_path
 from hyper.execution.mode import selected_book
+from hyper.ops import resource_guard
 from hyper.util import f, now_iso
 from . import state as selection, strategy_revision
 
@@ -617,14 +619,18 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int, *, include_watch=
     warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
     start_ms = now_ms - (max_days + warmup_days) * 86400_000
     max_bytes = int(getattr(config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024) or 0)
-    if max_bytes > 0 and _portfolio_fill_json_bytes(db, addrs, start_ms) > max_bytes:
+    raw_fill_bytes = _portfolio_fill_json_bytes(db, addrs, start_ms)
+    if max_bytes > 0 and raw_fill_bytes > max_bytes:
         return None
-    fills = _load_portfolio_fills(db, addrs, start_ms, include_watch=include_watch)
+    resource_guard.require_replay_budget(raw_fill_bytes)
+    fills = prepare_replay_fills(
+        _load_portfolio_fills(db, addrs, start_ms, include_watch=include_watch)
+    )
     windows = {}
     for day in days:
         start_ms = now_ms - (day + warmup_days) * 86400_000
-        windows[day] = prepare_replay_fills(
-            x for x in fills if int(x.get("time") or 0) >= start_ms
+        windows[day] = slice_prepared_replay_fills(
+            fills, start_ms=start_ms,
         )
     return windows
 
@@ -632,8 +638,8 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int, *, include_watch=
 def _filter_window_fills_by_addr(window_fills: dict[int, list[dict]], addrs: Iterable[str]) -> dict[int, list[dict]]:
     allowed = {(a or "").lower() for a in addrs if a}
     return {
-        int(days): prepare_replay_fills(
-            x for x in fills if (x.get("user") or "").lower() in allowed
+        int(days): slice_prepared_replay_fills(
+            prepare_replay_fills(fills), allowed_addrs=allowed,
         )
         for days, fills in (window_fills or {}).items()
     }
@@ -1396,10 +1402,9 @@ def _prepare_walk_forward_context(window_fills, now_ms, path_rows, *,
     fold_count = max(1, int(fold_count))
     total_days = fold_days * fold_count
     start_ms = int(now_ms) - total_days * 86_400_000
-    continuous_fills = prepare_replay_fills([
-        row for row in fills
-        if int(row.get("time") or 0) >= start_ms - warmup_ms
-    ])
+    continuous_fills = slice_prepared_replay_fills(
+        fills, start_ms=start_ms - warmup_ms,
+    )
     continuous_path = subset_price_path(
         path_rows, continuous_fills,
         start_ms=start_ms - warmup_ms, end_ms=int(now_ms),
@@ -1970,7 +1975,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        addrs_override: list[str] | tuple[str, ...] | None = None,
                        record_run: bool = True, formation_admission: bool = False,
                        market_generation: str | None = None, search_profile: str = "full",
-                       time_budget_s: float | None = None) -> dict:
+                       time_budget_s: float | None = None,
+                       window_fills_override: dict[int, list[dict]] | None = None) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     ephemeral = addrs_override is not None
     if ephemeral and expected_generation:
@@ -2100,9 +2106,19 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     market_generation = market_generation or expected_generation
     sigmas = _load_sigmas(db, market_generation)
     now_ms = int(time.time() * 1000)
-    window_fills = _portfolio_window_fills(
-        db, addrs, now_ms, include_watch=bool(formation_admission),
-    )
+    if window_fills_override is None:
+        raw_fill_bytes = _portfolio_fill_json_bytes(
+            db,
+            addrs,
+            now_ms - (max(_tune_days()) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000,
+        )
+        resource_guard.require_replay_budget(raw_fill_bytes)
+        window_fills = _portfolio_window_fills(
+            db, addrs, now_ms, include_watch=bool(formation_admission),
+        )
+    else:
+        window_fills = window_fills_override
+    resource_guard.require_replay_budget()
     if window_fills is None:
         result = {
             "status": "skipped",

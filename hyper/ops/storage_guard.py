@@ -1,8 +1,9 @@
-"""Bound discovery history and persist daily disk/database growth health.
+"""Bound discovery history and persist daily disk/database/WAL health.
 
 The maintenance command always runs under the scanner process lock. It keeps compact decision history while
 expiring only the high-volume, per-wallet pipeline stages and redundant Leaderboard snapshots. SQLite's normal
-freelist reuse is intentional: this task does not VACUUM or checkpoint a live database.
+freelist reuse is intentional: this task never VACUUMs. It checkpoints only after its own transactions are
+closed and truncates a WAL only when PASSIVE proves every frame checkpointed and no reader blocks the reset.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import sqlite3
 import time
 
 from hyper import config
+from hyper.discovery import collection_blacklist
 
 
 HEAVY_PIPELINE_STAGES = (
@@ -92,6 +94,81 @@ def _prune_staged_generations(db: sqlite3.Connection, keep_recent: int) -> tuple
     return rows, generations
 
 
+def _prune_expired_fill_cache(
+    db: sqlite3.Connection,
+    cutoff_ms: int,
+    *,
+    commit_every: int = 25,
+) -> tuple[int, int]:
+    """Expire the rolling source window with indexed address+time deletes and small commits."""
+    addrs = [row[0] for row in db.execute("SELECT addr FROM fill_cache_state ORDER BY addr")]
+    deleted = 0
+    touched = 0
+    for index, addr in enumerate(addrs, 1):
+        before = db.total_changes
+        db.execute(
+            "DELETE FROM candidate_fills WHERE addr=? AND time<?",
+            (addr, int(cutoff_ms)),
+        )
+        removed = db.total_changes - before
+        if removed:
+            deleted += removed
+            touched += 1
+        db.execute(
+            "UPDATE fill_cache_state SET coverage_start_ms=MAX(COALESCE(coverage_start_ms,?),?) "
+            "WHERE addr=?",
+            (int(cutoff_ms), int(cutoff_ms), addr),
+        )
+        if index % max(1, int(commit_every)) == 0:
+            db.commit()
+    db.commit()
+    return deleted, touched
+
+
+def _safe_wal_checkpoint(db: sqlite3.Connection) -> dict:
+    """Checkpoint committed frames, truncating only when doing so is immediately safe."""
+    result = {
+        "status": "not_run",
+        "busy": None,
+        "logFrames": None,
+        "checkpointedFrames": None,
+        "uncheckpointedFrames": None,
+        "truncated": False,
+    }
+    if db.in_transaction:
+        result.update(status="deferred", reason="transaction_open")
+        return result
+    try:
+        busy, log_frames, checkpointed = (
+            int(value or 0) for value in db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        )
+        result.update(
+            status="checkpointed" if not busy else "deferred",
+            busy=busy,
+            logFrames=log_frames,
+            checkpointedFrames=checkpointed,
+            uncheckpointedFrames=max(0, log_frames - checkpointed),
+        )
+        if busy == 0 and log_frames == checkpointed:
+            old_timeout = int(db.execute("PRAGMA busy_timeout").fetchone()[0] or 0)
+            try:
+                db.execute("PRAGMA busy_timeout=250")
+                truncate_busy, truncate_log, truncate_checkpointed = (
+                    int(value or 0)
+                    for value in db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                )
+                result["truncated"] = (
+                    truncate_busy == 0 and truncate_log == 0 and truncate_checkpointed == 0
+                )
+                if not result["truncated"]:
+                    result.update(status="deferred", reason="truncate_busy")
+            finally:
+                db.execute(f"PRAGMA busy_timeout={old_timeout}")
+    except sqlite3.OperationalError as exc:
+        result.update(status="deferred", reason=f"{type(exc).__name__}:{exc}"[:160])
+    return result
+
+
 def _previous_growth_baseline(
     db: sqlite3.Connection,
     now_epoch: float,
@@ -127,11 +204,27 @@ def run(
         now_epoch - float(config.PIPELINE_DETAIL_RETENTION_DAYS) * 86400,
     )
 
+    # This backfill uses only compact completed profile decisions. It never promotes raw fill-count into a
+    # blacklist reason. Purging is committed in small batches so a large legacy cleanup cannot recreate the
+    # multi-gigabyte WAL peak that prompted this maintenance path.
+    with db:
+        bootstrapped_blacklist = collection_blacklist.bootstrap_from_profiles(
+            db, stamp=checked_at,
+        )
+    blacklisted_cleanup = collection_blacklist.purge_all(db, commit_every=25)
+    expired_fills, expired_wallets = _prune_expired_fill_cache(
+        db,
+        int((now_epoch - float(config.PROFILE_FETCH_DAYS) * 86400) * 1000),
+        commit_every=25,
+    )
+
     with db:
         deleted_pipeline_rows = _prune_pipeline_detail(db, pipeline_cutoff)
         deleted_staging_rows, deleted_staging_generations = _prune_staged_generations(
             db, config.LEADERBOARD_STAGING_KEEP_GENERATIONS,
         )
+
+    checkpoint = _safe_wal_checkpoint(db)
 
     if disk_usage is None:
         usage = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)) or ".")
@@ -192,6 +285,12 @@ def run(
         "database": {
             "mainBytes": main_bytes,
             "walBytes": wal_bytes,
+            "walPhysicalBytes": wal_bytes,
+            "walLogFrames": checkpoint.get("logFrames"),
+            "walCheckpointedFrames": checkpoint.get("checkpointedFrames"),
+            "walUncheckpointedFrames": checkpoint.get("uncheckpointedFrames"),
+            "walCheckpoint": checkpoint,
+            "journalSizeLimitBytes": int(config.SQLITE_JOURNAL_SIZE_LIMIT_BYTES),
             "growthBytes": growth_bytes,
             "growth24hBytes": growth_24h_bytes,
             "pageBytes": page_bytes,
@@ -205,6 +304,10 @@ def run(
             "deletedPipelineRows": deleted_pipeline_rows,
             "deletedStagingRows": deleted_staging_rows,
             "deletedStagingGenerations": deleted_staging_generations,
+            "expiredCandidateFills": expired_fills,
+            "expiredFillWallets": expired_wallets,
+            "bootstrappedBlacklistWallets": bootstrapped_blacklist,
+            "blacklistCleanup": blacklisted_cleanup,
         },
     }
     reasons_json = json.dumps(reasons, separators=(",", ":"), sort_keys=True)

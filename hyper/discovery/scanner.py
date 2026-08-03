@@ -53,7 +53,7 @@ from hyper.selection import (
     strategy_revision,
     wallet_risk,
 )
-from . import generation, metrics, perp_prefilter, pipeline_audit
+from . import collection_blacklist, generation, metrics, perp_prefilter, pipeline_audit
 from .scanner_copy_bt import (
     apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
     copy_bt_market_ctx as _copy_bt_market_ctx,
@@ -363,8 +363,17 @@ def _persist_profile_batch(db, rows) -> int:
         with _db_lock:
             for row in pending:
                 artifact = dict(row.get("_profile_persist") or {})
+                permanently_blocked = collection_blacklist.should_block(row)
+                if permanently_blocked:
+                    collection_blacklist.record(
+                        db, row, stamp=row.get("evaluated_at") or row.get("last_refreshed"),
+                    )
+                    # Never write the freshly fetched raw history for a permanent automation reject. Remove
+                    # any legacy discovery cache in the same bounded transaction; Paper/Live state lives in
+                    # separate tables and is intentionally untouched.
+                    collection_blacklist.purge_address(db, row["addr"])
                 cache = artifact.get("cache")
-                if cache:
+                if cache and not permanently_blocked:
                     _store_cached_fills(
                         db,
                         row["addr"],
@@ -392,7 +401,7 @@ def _persist_profile_batch(db, rows) -> int:
                                 now_iso(),
                             ),
                         )
-                if "episodes" in artifact:
+                if "episodes" in artifact and not permanently_blocked:
                     _replace_episode_rows(db, row["addr"], artifact.get("episodes") or [])
                 db.execute(
                     f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
@@ -823,6 +832,7 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
         "weekPerpVolumeMin": float(week_perp_volume_min),
     }
     addr_set = {str(addr).lower() for addr in addrs}
+    blocked = collection_blacklist.active_map(db)
     cached_results = {}
     # A deployment/restart starts a new generation but does not make Portfolio evidence fetched minutes ago
     # stale. Reuse only exact-policy business decisions inside a short TTL; deferred transport failures are
@@ -857,7 +867,16 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
         pending_audit.clear()
 
     for rank, addr in enumerate(addrs, 1):
-        result = cached_results.get(str(addr).lower())
+        normalized_addr = str(addr).lower()
+        blocked_reason = blocked.get(normalized_addr)
+        result = (
+            perp_prefilter.Result(
+                "rejected",
+                blocked_reason,
+                {"scanResolution": {"source": "collection_blacklist"}},
+            )
+            if blocked_reason else cached_results.get(normalized_addr)
+        )
         cache_hit = result is not None
         if result is None:
             try:
@@ -1486,6 +1505,17 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
         not bool(getattr(p, "defer_profile_persist", False))
         if persist is None else bool(persist)
     )
+    blocked_reason = collection_blacklist.reason_for(db, addr)
+    if blocked_reason:
+        return _reject_prefilter_profile(
+            db,
+            str(addr).lower(),
+            prior,
+            stamp,
+            getattr(p, "scan_generation", None),
+            blocked_reason,
+            persist=persist,
+        )
     if not universe:
         return _defer_profile(
             db, addr, prior, stamp, "universe_unavailable",
@@ -3867,57 +3897,68 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     finalist_admission_audit = []
     retention = _core_prefix_retention()
     if retune:
-        # Wallet count and sizing are coupled. Search 16 -> 8 -> 12 (plus the bounded neighbours) with a
-        # sparse count-specific tuner, then pay for the full grid only on the winning count.  The later
-        # quality/membership pass may still publish fewer than eight wallets; eight is only the lower bound
-        # of this congestion-search bracket, never a Core quota.
-        timed_out_counts = []
-
-        def coarse_tune_evaluate(count):
+        # Count discovery is replay-only on the active surface. The old implementation launched a separate
+        # process pool for every 16/8/12/... count and then launched another exact-membership pool; that is
+        # the OOM path. Use the same bounded binary count search, then pay for exactly one efficient tune on
+        # the winning neighbourhood.
+        def current_surface_evaluate(count):
             count = int(count)
             _set_scan_progress(
-                db, stage="portfolio_tune_coarse", candidates_scanned=count,
+                db, stage="portfolio_count_search", candidates_scanned=count,
                 candidates_total=len(tune_ordered),
             )
-            try:
-                result = auto_tune.maybe_tune_margins(
-                    db, source="core_formation_coarse",
-                    stamp=f"{stamp}:coarse:k{count}",
-                    dry_run=True, mode="apply", follow_values=base_follow,
-                    data_complete=True, addrs_override=list(tune_ordered[:count]),
-                    record_run=False, formation_admission=True,
-                    market_generation=generation_id, search_profile="coarse",
-                    time_budget_s=float(config.AUTO_TUNE_COARSE_TIME_BUDGET_SEC),
-                )
-            except TimeoutError:
-                db.rollback()
-                timed_out_counts.append(count)
-                return core_formation.PrefixEvaluation(
-                    count=count, net_pnl=-1e12, stress_net_pnl=-1e12,
-                    max_drawdown=1.0, actionable_open_rate=0.0, capacity_fit=0.0,
-                    liquidations=1, params={},
-                    payload={"initialBalance": f(
-                        base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE
-                    ), "requireCongestionFit": True, "coarseTuneTimeout": True},
-                )
-            if result.get("status") != "ok":
-                raise RuntimeError(
-                    "core_coarse_tune_failed:"
-                    + str(result.get("reason") or result.get("status"))
-                )
-            tune_runs[count] = result
-            db.commit()
-            return _prefix_eval_from_tune(
-                count, result,
-                initial_balance=f(
-                    base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE
-                ),
+            filtered = auto_tune._filter_window_fills_by_addr(
+                tune_window_fills, tune_ordered[:count],
+            )
+            windows = auto_tune._candidate_windows(
+                db, list(tune_ordered[:count]), sigmas,
+                {**base_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
+                window_fills=filtered, market_ctx=market_ctx,
+                path_rows=None, path_meta=None, compact=True,
+            )
+            metrics_ = _portfolio_selection_metrics(windows, selected_n=count)
+            primary = windows.get(30) or windows.get(max(windows)) or {}
+            recent = windows.get(7) or {}
+            initial = f(
+                primary.get("window_start_equity")
+                or primary.get("initial_margin_equity")
+                or base_follow.get("INITIAL_BALANCE")
+                or config.INITIAL_BALANCE
+            )
+            recent_initial = f(
+                recent.get("window_start_equity")
+                or recent.get("initial_margin_equity")
+            )
+            primary_economics = replay_result_profitability(primary)
+            recent_economics = replay_result_profitability(recent)
+            return core_formation.PrefixEvaluation(
+                count=count,
+                net_pnl=f(metrics_.net_pnl),
+                stress_net_pnl=f(metrics_.net_pnl),
+                max_drawdown=f(metrics_.max_drawdown),
+                actionable_open_rate=f(metrics_.actionable_open_rate),
+                capacity_fit=f(metrics_.capacity_fit),
+                liquidations=int(metrics_.liquidations),
+                params={},
+                payload={
+                    "initialBalance": initial,
+                    "recentStartEquity": recent_initial,
+                    "return30d": (
+                        f(primary_economics.get("qualificationPnl")) / initial
+                        if initial > 0 else float("-inf")
+                    ),
+                    "return7d": (
+                        f(recent_economics.get("qualificationPnl")) / recent_initial
+                        if recent_initial > 0 else float("-inf")
+                    ),
+                    "requireCongestionFit": True,
+                },
             )
 
         tune_search_floor = 1 if len(tune_ordered) <= 8 else 8
         try:
             tune_search = core_formation.search_quality_prefix(
-                len(tune_ordered), coarse_tune_evaluate,
+                len(tune_ordered), current_surface_evaluate,
                 retention_kwargs=retention,
                 tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
                 exhaustive_below=int(
@@ -3929,17 +3970,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         except RuntimeError as exc:
             if str(exc) != "no_feasible_quality_prefix":
                 raise
-            # Even if the 8-wallet bracket is congested, do not manufacture zero Core. Full-tune the
-            # smallest bracket once; fixed-surface membership remains free to reduce below eight.
+            # The one tune may repair active-surface congestion at the smallest bounded bracket.
             winning_count = max(1, tune_search_floor)
-            tune_reason = (
-                "coarse_prefix_timeout_fallback"
-                if timed_out_counts else "coarse_prefix_congestion_fallback"
-            )
+            tune_reason = "active_surface_congestion_fallback"
 
-        coarse_winner = tune_runs.get(winning_count) or {}
         _set_scan_progress(
-            db, stage="portfolio_tune_full", candidates_scanned=winning_count,
+            db, stage="portfolio_tune_once", candidates_scanned=winning_count,
             candidates_total=len(tune_ordered),
         )
         try:
@@ -3950,6 +3986,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 formation_admission=True, market_generation=generation_id,
                 search_profile="efficient",
                 time_budget_s=float(config.AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC),
+                window_fills_override=auto_tune._filter_window_fills_by_addr(
+                    tune_window_fills, tune_ordered[:winning_count],
+                ),
             )
             if full_run.get("status") != "ok":
                 raise RuntimeError(
@@ -3972,22 +4011,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             )
         except TimeoutError as exc:
             db.rollback()
-            chosen_run = coarse_winner
-            if chosen_run:
-                tuned_params, tune_eligible, coarse_reason = _formation_param_surface(
-                    base_follow, chosen_run, retune=True,
-                )
-                tune_reason = f"full_tune_timeout_using_coarse:{exc}:{coarse_reason}"
-            else:
-                tuned_params, tune_eligible, _unused = _formation_param_surface(
-                    base_follow, None, retune=False,
-                )
-                tune_eligible = False
-                tune_reason = f"full_tune_timeout_using_active:{exc}"
+            tuned_params, tune_eligible, _unused = _formation_param_surface(
+                base_follow, None, retune=False,
+            )
+            tune_eligible = False
+            tune_reason = f"single_tune_timeout:{exc}"
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
         )
+    del tune_window_fills
+    gc.collect()
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
     # ``winning_count`` says which score prefix fitted this parameter surface; it must not permanently
     # delete the rest of the bounded Top16 before strict replay.  Every Top16 wallet receives the winning
@@ -4479,85 +4513,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "closureStable": True,
         },
     }
-    initial_tuned_members = tuple(tune_ordered[:winning_count])
-    needs_exact_closure = bool(
-        retune
-        and chosen_addrs
-        and tuple(chosen_addrs) != initial_tuned_members
-    )
-    if not needs_exact_closure:
-        return result
-
-    # Count search and individual strict may shrink or reorder the pool which produced the winning surface.
-    # Re-optimize that exact Core, then replay the complete path-valid Top32 on the new surface so excluded
-    # wallets can compete fairly. Membership and parameters must reach a bounded fixed point before publish.
-    closure_expected = tuple(chosen_addrs)
-    closure_follow = dict(fixed_follow)
-    closure_audit = []
-    max_rounds = max(
-        1, int(getattr(config, "CORE_FORMATION_CLOSURE_MAX_ROUNDS", 2) or 2),
-    )
-    last_result = result
-    for round_index in range(1, max_rounds + 1):
-        exact = _retune_exact_membership_surface(
-            db, closure_expected, tuned_candidate_rows,
-            generation_id=generation_id, stamp=stamp, round_index=round_index,
-            now_ms=now_ms, base_follow=closure_follow,
-            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-        )
-        last_result = form_quality_prefix(
-            db, generation_id, stamp, now_ms,
-            retune=False,
-            force_entry_requalification=force_entry_requalification,
-            force_retune=False,
-            _follow_override=exact["follow"],
-        )
-        actual = tuple(last_result.get("selected") or ())
-        stable = actual == closure_expected
-        closure_audit.append({
-            "round": round_index,
-            "tunedInputCount": len(closure_expected),
-            "selectedCount": len(actual),
-            "membershipStable": stable,
-            "params": dict(exact.get("params") or {}),
-            "reason": exact.get("reason"),
-            "finalistAdmission": list(exact.get("finalistAudit") or ()),
-        })
-        if stable:
-            search = dict(last_result.get("search") or {})
-            exact_run = dict(exact.get("run") or {})
-            search.update({
-                "algorithm": "adaptive_count_continuous_equity_v8",
-                "retuneApplied": True,
-                "tunePoolCount": len(tune_ordered),
-                "tunedInputCount": len(closure_expected),
-                "coarseTuneRuns": len(tune_runs),
-                "fullTuneRuns": (
-                    (1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0)
-                    + round_index
-                ),
-                "formationTuneEligible": exact.get("eligible"),
-                "formationTuneReason": exact.get("reason"),
-                "formationTuneFinalists": list(exact_run.get("finalists") or ()),
-                "formationMarginRounds": list(exact_run.get("margin_rounds") or ()),
-                "formationFinalistAdmission": list(
-                    exact.get("finalistAudit") or ()
-                ),
-                "initialTunedInputCount": winning_count,
-                "closureRounds": closure_audit,
-                "closureStable": True,
-            })
-            last_result["search"] = search
-            return last_result
-        if not actual:
-            break
-        closure_expected = actual
-        closure_follow = dict(exact["follow"])
-
-    raise RuntimeError(
-        "core_formation_membership_parameter_not_converged:"
-        f"{len(closure_expected)}:{len(tuple(last_result.get('selected') or ()))}"
-    )
+    # Membership changes after the one tuned surface are confirmed by the strict shared-account replay
+    # already contained in ``result``. They never recursively start another parameter pool.
+    result["search"]["initialTunedInputCount"] = winning_count
+    result["search"]["closureRounds"] = []
+    result["search"]["closureStable"] = True
+    result["search"]["membershipConfirmedWithoutRetune"] = True
+    return result
 
 
 def _apply_formation_params(db, formation, stamp) -> bool:
@@ -6807,7 +6769,6 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                     if protected_removed else "high_or_system_risk_effective_overlay"
                 ),
             }
-            membership_changed = set(desired_retained) != set(previous_core)
             formation = _retention_exact_formation(
                 db, generation_id, publication_stamp, now_ms,
                 desired_retained,
@@ -6817,7 +6778,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                 ),
                 replacement_gate=replacement_gate,
                 decisions=retention_decisions,
-                retune=bool(retune and membership_changed and desired_retained),
+                # One generation already spent its single tune in ``form_quality_prefix``. Incumbent
+                # retention may alter membership, but it receives strict replay on that surface only.
+                retune=False,
             )
             _apply_formation_params(db, formation, publication_stamp)
             rows, marginal = _build_retained_selection(
@@ -6951,6 +6914,17 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         db, generation_id, marginal,
     )
     auto_tune.bind_active_tune_rollback_core(db, current_core)
+    try:
+        pruned = _prune_discovery_cache(db)
+        pipeline_audit.record_prune_summary(db, stamp, "resume_finalize", pruned)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - publication is already durable; maintenance retries later
+        db.rollback()
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="resume_finalize", stage="prune",
+            status="deferred", reason=str(exc)[:300], payload={"generation": generation_id},
+        )
+        db.commit()
     _set_scan_progress(
         db, state="idle", stage="persist", candidates_scanned=profile_total,
         candidates_total=profile_total,
@@ -8062,7 +8036,7 @@ def refresh_challengers(db, p) -> dict:
 
 
 # ----------------------------------------------------------------------------- scan
-def scan(db, p) -> None:
+def scan(db, p):
     now_ms = int(time.time() * 1000)
     started, t0 = now_iso(), time.time()
     stamp = now_iso()
@@ -8166,12 +8140,17 @@ def scan(db, p) -> None:
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(
         getattr(p, "order", "mon_roi"), "mon_roi"
     )
-    recall_cand = [r[0] for r in db.execute(
+    recall_cand_raw = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard_staging WHERE generation=? AND is_candidate=1 "
         f"ORDER BY {order} DESC",
         (generation_id,),
     ).fetchall()]
     _leaderboard_recall_audit(db, generation_id, stamp, p)
+    # Upgrade legacy high-confidence decisions once, then enforce the permanent boundary before any
+    # per-wallet Portfolio/history request. Leaderboard staging remains intact as coarse-recall audit.
+    collection_blacklist.bootstrap_from_profiles(db, stamp=stamp)
+    recall_cand, blacklisted_recall = collection_blacklist.filter_addresses(db, recall_cand_raw)
+    db.commit()
     current_selection_generation = selection.latest_published_generation(db)
     core_addrs = selection.published_core_membership(db) or []
     challenger_addrs = []
@@ -8199,10 +8178,31 @@ def scan(db, p) -> None:
     # Portfolio mix temporarily misses the discovery surface. Recently removed Core wallets also remain on
     # this evidence lane: an empty publication must stop execution without erasing recovery proof.
     former_core_addrs = _recent_former_core_addrs(db, as_of=stamp)
-    retention_addrs = (
+    retention_addrs_raw = (
         set(core_addrs) | set(challenger_addrs)
         | set(position_addrs) | set(former_core_addrs)
     )
+    retention_addrs, blacklisted_retention = collection_blacklist.filter_addresses(
+        db, retention_addrs_raw,
+    )
+    retention_addrs = set(retention_addrs)
+    blacklisted_generation = {**blacklisted_recall, **blacklisted_retention}
+    if blacklisted_retention:
+        profile_columns = storage.PROFILE_COLS.split(",")
+        for addr, blocked_reason in blacklisted_retention.items():
+            prior_values = db.execute(
+                f"SELECT {storage.PROFILE_COLS} FROM profile WHERE addr=?", (addr,),
+            ).fetchone()
+            prior = dict(zip(profile_columns, prior_values)) if prior_values else None
+            _reject_prefilter_profile(
+                db, addr, prior, stamp, generation_id, blocked_reason,
+            )
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="scan", stage="collection_blacklist",
+                addr=addr, status="rejected", reason=blocked_reason,
+                payload={"generation": generation_id, "apiCalls": 0},
+            )
+        db.commit()
 
     # Hybrid fill-first transport:
     #   * new/incomplete caches keep the eager official volume precheck, avoiding multi-page history for an
@@ -8245,7 +8245,8 @@ def scan(db, p) -> None:
         if addr not in eager_set or (perp_results.get(addr) and perp_results[addr].passed)
     ]
     print(
-        f"  coarse recall {len(recall_cand)} · eager Portfolio {len(eager_prefilter_addrs)} "
+        f"  coarse recall {len(recall_cand_raw)} · permanent automation blacklist "
+        f"{len(blacklisted_generation)} · eager Portfolio {len(eager_prefilter_addrs)} "
         f"({sum(bool(perp_results.get(addr) and perp_results[addr].passed) for addr in eager_prefilter_addrs)} passed) "
         f"· cached fill-first {len(recall_cand) - len(eager_prefilter_addrs)}",
         flush=True,
@@ -8292,6 +8293,7 @@ def scan(db, p) -> None:
         "formerCoreRecheck": len(former_core_addrs),
         "eagerPortfolioPrefilter": len(eager_prefilter_addrs),
         "cachedFillFirst": len(recall_cand) - len(eager_prefilter_addrs),
+        "collectionBlacklisted": len(blacklisted_generation),
         "marginEquityPct": float(p.margin_equity_pct),
         "initialMarginEquity": float(config.INITIAL_BALANCE),
     }
@@ -8521,6 +8523,61 @@ def scan(db, p) -> None:
             complete = False
             failed += 1
             print(f"generation market-scope audit failed: {exc}", flush=True)
+    if complete and bool(getattr(p, "defer_finalize", False)):
+        # The profile process has held millions of decoded fill objects over many hours. Persist the complete
+        # handoff and replace this process before final formation so Python's high-water allocator, worker
+        # threads and transient API surfaces cannot be inherited by the memory-heavy replay stage.
+        handoff_stamp = now_iso()
+        try:
+            prior_metrics = json.loads(db.execute(
+                "SELECT metrics_json FROM scan_generation WHERE generation=?",
+                (generation_id,),
+            ).fetchone()[0] or "{}")
+        except (TypeError, ValueError):
+            prior_metrics = {}
+        handoff_metrics = {
+            **prior_metrics,
+            "profileStageComplete": True,
+            "profileDurationSec": round(profile_done_at - prefilter_done_at, 3),
+            "coarseRecallPassed": len(recall_cand),
+            "collectionBlacklisted": len(blacklisted_generation),
+            "profileValid": valid_profiles,
+            "profileDeferred": deferred_profiles,
+            "profileRejected": rejected,
+            "marketScopeAudit": scope_audit,
+            "marketSnapshotProfiled": market_snapshot_audit,
+            "marginEquityPct": float(p.margin_equity_pct),
+            "initialMarginEquity": float(config.INITIAL_BALANCE),
+        }
+        generation.mark_generation_ready(
+            db,
+            generation_id,
+            profile_total=profiled_ok,
+            profile_valid=valid_profiles,
+            profile_deferred=deferred_profiles,
+            profile_rejected=rejected,
+            profile_complete=True,
+            ready_at=handoff_stamp,
+        )
+        db.execute(
+            "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
+            (json.dumps(handoff_metrics, sort_keys=True), generation_id),
+        )
+        _set_scan_progress(
+            db, state="scanning", stage="finalize_handoff",
+            candidates_scanned=len(workset), candidates_total=len(workset),
+        )
+        _set_scanner_proc(db, "scanning", {
+            "stage": "finalize_handoff", "generation": generation_id,
+            "profiled": profiled_ok,
+        })
+        db.commit()
+        return {
+            "status": "profiled",
+            "generation": generation_id,
+            "retune": bool(_automatic_formation_retune_enabled(db)),
+            "profiled": profiled_ok,
+        }
     published = False
     publication_stamp = None
     previous_core = selection.published_core_membership(db) or []
@@ -8671,7 +8728,6 @@ def scan(db, p) -> None:
                             if protected_removed else "high_or_system_risk_effective_overlay"
                         ),
                     }
-                    membership_changed = set(desired_retained) != set(previous_core)
                     retained_formation = _retention_exact_formation(
                         db, generation_id, selection_stamp, now_ms,
                         desired_retained,
@@ -8681,9 +8737,8 @@ def scan(db, p) -> None:
                         ),
                         replacement_gate=replacement_gate,
                         decisions=retention_decisions,
-                        retune=bool(
-                            automatic_retune and membership_changed and desired_retained
-                        ),
+                        # Never start a second pool after the generation's one efficient tune.
+                        retune=False,
                     )
                     _apply_formation_params(
                         db, retained_formation, selection_stamp,

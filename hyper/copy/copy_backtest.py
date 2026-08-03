@@ -397,6 +397,35 @@ def prepare_replay_fills(fills, *, addr=None) -> PreparedReplayFills:
     )
 
 
+def slice_prepared_replay_fills(
+    fills: PreparedReplayFills,
+    *,
+    start_ms: int | None = None,
+    allowed_addrs=None,
+) -> PreparedReplayFills:
+    """Create a lightweight view list reusing the canonical row dictionaries.
+
+    The old window/subset paths normalized every row again, multiplying millions of Python dictionaries
+    across 30/14/7 windows and membership probes. A slice owns only references to the one longest surface.
+    """
+    prepared = prepare_replay_fills(fills)
+    allowed = (
+        {str(addr or "").lower() for addr in allowed_addrs if addr}
+        if allowed_addrs is not None else None
+    )
+    return PreparedReplayFills(
+        (
+            row for row in prepared
+            if (start_ms is None or int(row.get("time") or 0) >= int(start_ms))
+            and (
+                allowed is None
+                or str(row.get("user") or "").lower() in allowed
+            )
+        ),
+        owner=prepared.owner,
+    )
+
+
 class PreparedPricePath(list):
     """Normalized, sorted candle events that are safe to reuse across replay candidates.
 

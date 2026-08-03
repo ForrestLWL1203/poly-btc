@@ -640,9 +640,12 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM episode WHERE addr='0xgone'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xgone'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM fill_cache_state WHERE addr='0xgone'").fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xcand'").fetchone()[0], 1)
+            # Rolling expiry is intentionally no longer part of scan publication. The always-run storage
+            # maintenance command removes these rows through indexed per-wallet batches, including after a
+            # failed/OOM scan, without creating one giant WAL transaction.
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xcand'").fetchone()[0], 2)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM fill_cache_state WHERE addr='0xcand'").fetchone()[0], 1)
-            self.assertGreaterEqual(counts["expired_fills"], 1)
+            self.assertEqual(counts["expired_fills"], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xcand'").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xactive'").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xgone'").fetchone()[0], 0)

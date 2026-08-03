@@ -89,12 +89,13 @@ Repository boundaries:
 
 The production flow is:
 
-`Leaderboard staging → $250k volume/PnL-direction recall → hybrid eager-new/fill-first cached Perp-volume proof
+`Leaderboard staging → $250k volume/PnL-direction recall → permanent automation-address subtraction → hybrid eager-new/fill-first cached Perp-volume proof
 → executable-market fill cache → structural hard gates → generation-frozen activity + fills-only conservative
 Copy/PF/lottery gates → scored Top32 →
-current-surface strict path and profit-aligned-score Top16 seed → optional count-specific adaptive tune →
+profile-stage handoff to a fresh process → current-surface strict path and profit-aligned-score Top16 seed →
+current-surface bounded count search → optional one-time efficient tune on the winning count →
 effective-surface individual strict across the complete path-valid Top32 → score Top16/prefix shared replay →
-optional exact-Core retune and bounded membership/parameter closure → atomic generation/selection/strategy revision publish →
+strict confirmation of the final membership without recursive retuning → atomic generation/selection/strategy revision publish →
 Observer reload → replay-summary materialization`
 
 `AUTO_TUNE_MARGIN_ENABLE=false` is a hard fixed-surface contract for automatic complete and Challenger
@@ -102,7 +103,8 @@ generations. Membership or ordering changes may not re-enable the tuner. The act
 the complete individual/shared strict contract; congestion, insufficient open coverage or portfolio risk must
 shrink the profit-aligned Core prefix through the existing bounded adaptive count search (for example
 `16 → 8 → 12 → 10`), never sequential count enumeration. No feasible non-empty prefix may publish as an
-intentional zero-Core generation. When enabled, the tuned and exact-membership closure paths above remain mandatory.
+intentional zero-Core generation. When enabled, each generation may run at most one efficient parameter tune;
+membership changes after that tune are strictly replayed on the chosen surface and may not start another pool.
 
 ### 1. Generation safety
 
@@ -163,10 +165,13 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
   missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
   continuation cursor; it must not restart from the 37-day boundary on the next run.
-- Prior HFT, grid, bot, Heavy-DCA and concurrency decisions are not permanent blacklists. Their complete cache
-  receives the same delta and rolling-window structural recomputation, but a repeated structural failure does
-  not pay Portfolio, clearinghouse-state or Copy replay calls. New fills or expired evidence can therefore
-  restore eligibility without repeatedly executing the whole expensive profile.
+- A complete high-confidence whole-wallet `bot_frequency`, `hft_uncopyable`, or `grid_dca` decision enters
+  `wallet_scan_blacklist`. Future generations subtract those addresses immediately after coarse Leaderboard
+  recall, before Portfolio or fill-history calls, and storage maintenance removes their raw discovery cache.
+  One-sector contamination does not qualify when another executable sector survives. Heavy-DCA, concurrency,
+  compulsive behavior, economic misses and all data failures remain recoverable and are never permanent.
+  Operator reversal is explicit and scanner-lock protected through `unblacklist-wallet --addr`; there is no
+  automatic expiry or Dashboard toggle.
 - Complete discovery runs Monday and Thursday at 04:00 `Asia/Shanghai`. They refresh the complete Leaderboard,
   discover the candidate universe, repair missing 37-day caches, and evaluate every cheap-recall +
   Perp-volume survivor. Core, strict Challenger and open-position owners are also evaluated for safe
@@ -382,9 +387,8 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
 4. Recompute every path-valid Top32 wallet's complete strict qualification on the tuned surface, rerank the
    qualified universe, and form a fresh score Top16. A wallet outside the initial seed may therefore
    enter when the tuned surface proves it stronger.
-5. Search the shared strict score prefix, then full-tune the exact proposed Core. Replay the complete path-valid
-   Top32 and shared prefix again on that surface. Membership/order and parameters must converge within two exact-
-   Core rounds; a non-convergent generation fails closed and does not publish.
+5. Search the shared strict score prefix on the single winning surface. Any final membership/order change is
+   replayed and confirmed on that same surface; complete formation never starts a second exact-Core tune.
 6. Run the final path-complete 30-day shared-account replay only after parameters and membership have converged.
    Require conservative dynamic 30-day return at least 10%, conservative rolling-7-day return at least 3%,
    a 30-day open-loss ratio at or below 50%, at least 70% open follow, positive closed and conservative PnL in
@@ -438,12 +442,13 @@ rows into the next generation and leaves membership operator-owned; it does not 
 ### 6. Atomic publication and tuning
 
 The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
-Complete formation uses the current-surface Top16 only as its bounded initial tune seed. It then strictly
-replays the complete path-valid Top32 on the winning execution surface, reranks the final Top16, chooses a shared
-profit prefix, and full-tunes that exact proposed Core. This membership/parameter closure is bounded to two
-rounds and must stabilize before eligibility, explicit selection, generation, follow history and the immutable
-strategy revision are sealed atomically. A failed or non-convergent optimizer aborts a promotion or complete-
-scan publication; it may not publish a partial promoted list.
+The history/Profile phase marks its generation ready, releases the scanner lock and is replaced with a fresh
+`finalize-profiled` process before formation. Complete formation first locates the capacity boundary on the
+active surface with the bounded count search, then runs at most one efficient tune on that winning count. It
+strictly replays the complete path-valid Top32 on the chosen surface, reranks the final Top16 and chooses the
+shared profit prefix. A final membership change is strict-confirmed on the same surface; it never starts an
+exact-Core closure tune. Eligibility, explicit selection, generation, follow history and the immutable strategy
+revision are still sealed atomically.
 An evidence-only Challenger generation may explicitly carry the prior Core snapshot, but cannot claim a new
 portfolio certification or apply tuned parameters.
 
@@ -476,12 +481,12 @@ safety repair without pretending to clear the ordinary relative-profit-gain hurd
 
 Core membership remains a strict profit-ranked prefix: production formation never searches arbitrary wallet
 subsets, never runs leave-one-out membership elimination, and never exhaustively replays every `1..N` prefix.
-It uses bounded boundary search plus neighbouring counts, then exact-membership efficient retune and at most two
-closure rounds when the final surface changes ranking. Generation-scoped prefix evidence stores only compact
+It uses bounded boundary search plus neighbouring counts, a single efficient tune, and strict same-surface
+confirmation if final ranking changes membership. Generation-scoped prefix evidence stores only compact
 metrics keyed by the membership hash and parameter surface, so a retry resumes completed strict prefix work
 without retaining full trajectories or raw membership addresses.
 
-Within one exact-membership tune, identical parameter surfaces are replayed once even if several search stages
+Within the one generation tune, identical parameter surfaces are replayed once even if several search stages
 rediscover them. Final path validation prepares one immutable fills/candle context, replays the active baseline
 once, and evaluates all distinct Pareto finalists as one CPU-bounded batch. Baseline and finalist paths still use
 the complete continuous account, liquidation, capacity and fold contract; batching changes scheduling and reuse,
@@ -733,9 +738,9 @@ selection history, and compact selection/risk/tuner audit are durable decision h
 unfinished generation, and the latest 30 generations overall. Live fill dedup data, account snapshots, and
 storage-health samples have explicit TTLs.
 
-Both scheduled scanner services run `storage-maintenance` through `ExecStopPost`, so the guard still records a
-sample after a failed scan. It uses the shared scanner lock, records filesystem/SQLite/WAL growth in
-`storage_guard_run` and `process_status('storage_guard')`, and never runs `VACUUM` or forces a checkpoint on the
-live database. Warning thresholds are 70% disk use, over 1 GB normalized database growth per 24 hours, or a WAL
-over 512 MB; disk use at 85% is critical. Do not prune old generation/audit rows outside this guard while a scan
-or tuner is active.
+Both scheduled scanner services run `storage-maintenance` through `ExecStopPost`, so 37-day fill expiry,
+blacklist cleanup and health recording still run after a failed scan. Deletes use indexed address batches and
+small commits. The guard never runs `VACUUM`; after its own transactions close it performs PASSIVE checkpoint,
+records busy/log/checkpointed frames, and truncates only when every frame is checkpointed and no reader blocks
+the reset. Connections cap the reusable WAL file at 64 MiB. Warning thresholds are 70% disk use, over 1 GB
+normalized database growth per 24 hours, or a WAL over 512 MB; disk use at 85% is critical.

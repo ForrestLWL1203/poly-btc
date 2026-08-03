@@ -23,6 +23,11 @@ SCAN_IDLE_WEIGHT_BUDGET_FRACTION = 0.95  # leave a small cushion for dashboard/o
 SCAN_IDLE_WEIGHT_BURST = 20.0            # at most one heavy wallet-history request may burst immediately
 SCAN_IDLE_MIN_REQUEST_INTERVAL = 0.02    # low-weight metadata calls need not inherit the weight-20 cadence
 REPLAY_PROCESS_MAX_WORKERS = 4           # auto-scales 1→1, 2→2, 4+→4; replay stays bounded on small VPSes
+REPLAY_LOW_MEMORY_SERIAL_BYTES = 2 * 1024 * 1024 * 1024
+SCANNER_MIN_AVAILABLE_MEMORY_BYTES = 192 * 1024 * 1024
+SCANNER_MAX_PROCESS_TREE_RSS_BYTES = 1100 * 1024 * 1024
+SCANNER_MAX_PROCESS_TREE_SWAP_BYTES = 256 * 1024 * 1024
+SCANNER_REPLAY_DECODE_MULTIPLIER = 6.0
 
 # Copy engine: SIGNAL via REST poll (per-wallet userFills — REST has no 10-user cap, so we can
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
@@ -106,6 +111,7 @@ STORAGE_GUARD_DISK_WARN_PCT = 70.0
 STORAGE_GUARD_DISK_CRITICAL_PCT = 85.0
 STORAGE_GUARD_DB_GROWTH_WARN_BYTES_24H = 1_000_000_000
 STORAGE_GUARD_WAL_WARN_BYTES = 512 * 1024 * 1024
+SQLITE_JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
 
 # Copy account & sizing (UI-tunable). ``INITIAL_BALANCE`` belongs only to the Paper ledger and the
 # standardized comparable replay. Mainnet Live freezes its own real account equity as each execution

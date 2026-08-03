@@ -26,7 +26,23 @@ def available_cpu_count() -> int:
     return max(1, int(detected or 1))
 
 
+def physical_memory_bytes() -> int | None:
+    """Return host physical memory without importing a heavyweight process library."""
+    try:
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    total = pages * page_size
+    return total if total > 0 else None
+
+
 def effective_worker_count(task_count: int, max_workers: int | None = None) -> int:
+    physical = physical_memory_bytes()
+    if physical is not None and physical <= int(
+        getattr(config, "REPLAY_LOW_MEMORY_SERIAL_BYTES", 2 * 1024**3)
+    ):
+        return 1
     ceiling = int(
         getattr(config, "REPLAY_PROCESS_MAX_WORKERS", 4)
         if max_workers is None else max_workers
@@ -59,6 +75,10 @@ class ReusableOrderedPool:
         rows = list(items)
         if not rows:
             return []
+        # Recheck between dependent axes; a prior batch may have raised the parent/child high-water mark.
+        # Local import avoids coupling the pure worker module to scanner lifecycle at import time.
+        from hyper.ops import resource_guard
+        resource_guard.require_replay_budget()
         if self.workers <= 1:
             self._initialize_serial()
             return [fn(item) for item in rows]
@@ -78,6 +98,11 @@ class ReusableOrderedPool:
             self.workers = 1
             self._initialize_serial()
             return [fn(item) for item in rows]
+        except BaseException:
+            # A replay assertion/cancellation must not leave spawned children or semaphores alive while the
+            # resumable generation unwinds. SystemExit/KeyboardInterrupt are included deliberately.
+            self.close()
+            raise
 
     def close(self) -> None:
         executor, self._executor = self._executor, None
@@ -110,6 +135,8 @@ def map_ordered(
     rows = list(items)
     if not rows:
         return []
+    from hyper.ops import resource_guard
+    resource_guard.require_replay_budget()
     workers = effective_worker_count(len(rows), max_workers=max_workers)
     if workers <= 1:
         if initializer is not None:

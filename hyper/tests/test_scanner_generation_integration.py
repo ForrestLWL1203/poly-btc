@@ -178,17 +178,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
-    def test_core_formation_searches_count_coarsely_then_efficient_tunes_the_winner(self):
+    def test_core_formation_searches_count_on_active_surface_then_tunes_once(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
-        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 2)
-        self.assertIn('search_profile="coarse"', source)
+        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
+        self.assertNotIn('search_profile="coarse"', source)
         self.assertIn('search_profile="efficient"', source)
         self.assertIn("addrs_override=list(tune_ordered[:winning_count])", source)
         self.assertIn("search_quality_prefix(", source)
+        self.assertIn("current_surface_evaluate", source)
         self.assertIn("except TimeoutError as exc", source)
-        self.assertIn("full_tune_timeout_using_coarse", source)
-        self.assertIn("full_tune_timeout_using_active", source)
+        self.assertIn("single_tune_timeout", source)
         self.assertIn(
             "_select_formation_finalist_surface(\n                    db, full_run, tune_ranked,",
             source,
@@ -196,8 +196,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
         self.assertNotIn("tuned_candidate_rows = list(ranked_candidates)", source)
         self.assertNotIn("tuned_candidate_addrs", source)
-        self.assertIn("_retune_exact_membership_surface(", source)
-        self.assertIn("core_formation_membership_parameter_not_converged", source)
+        self.assertNotIn("_retune_exact_membership_surface(", source)
+        self.assertNotIn("core_formation_membership_parameter_not_converged", source)
+        self.assertIn('"membershipConfirmedWithoutRetune"', source)
         self.assertEqual(scanner.config.CORE_PREFIX_EXHAUSTIVE_MAX_N, 0)
         self.assertFalse(scanner.config.CORE_FORMATION_ENABLE_LOO)
         self.assertIn(
@@ -245,10 +246,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("_assert_automatic_formation_tuned(", scan_source)
         self.assertIn("required=bool(automatic_retune)", scan_source)
         self.assertNotIn('stage="core_membership_retune"', scan_source)
-        self.assertIn(
-            "automatic_retune and membership_changed and desired_retained",
-            scan_source,
-        )
+        self.assertIn("# Never start a second pool", scan_source)
+        self.assertIn("retune=False", scan_source)
         self.assertNotIn("generation_id, stamp, now_ms, retune=False", scan_source)
         self.assertIn("retune_formation=True", optimize_source)
         self.assertIn(
@@ -329,10 +328,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("membership_retune_triggered", source)
         self.assertNotIn("_formation_membership_changed", source)
         self.assertIn("formation, required=bool(retune)", source)
-        self.assertIn(
-            "retune=bool(retune and membership_changed and desired_retained)",
-            source,
-        )
+        self.assertIn("One generation already spent its single tune", source)
+        self.assertIn("retune=False", source)
 
     def test_daily_auto_tune_switch_can_publish_a_fixed_surface_promotion(self):
         source = inspect.getsource(scanner.refresh_challengers)
@@ -702,18 +699,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertLess(score_order, tier_order)
         self.assertLess(tier_order, profit_order)
 
-    def test_final_membership_parameter_closure_is_bounded_and_fail_closed(self):
+    def test_final_membership_is_strictly_confirmed_without_recursive_retune(self):
         source = inspect.getsource(scanner.form_quality_prefix)
         helper = inspect.getsource(scanner._retune_exact_membership_surface)
 
         self.assertEqual(scanner.config.AUTO_TUNE_LEVERAGE_SHORTLIST, 3)
         self.assertGreaterEqual(scanner.config.AUTO_TUNE_SIZING_FINALISTS, 12)
-        self.assertIn("CORE_FORMATION_CLOSURE_MAX_ROUNDS", source)
-        self.assertIn("for round_index in range(1, max_rounds + 1)", source)
-        self.assertIn("actual == closure_expected", source)
-        self.assertIn(
-            "core_formation_membership_parameter_not_converged", source,
-        )
+        self.assertNotIn("CORE_FORMATION_CLOSURE_MAX_ROUNDS", source)
+        self.assertNotIn("for round_index in range(1, max_rounds + 1)", source)
+        self.assertIn('"membershipConfirmedWithoutRetune"', source)
+        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
+        # The helper remains available only for explicit operator repair/optimization paths.
         self.assertIn('addrs_override=list(ordered_addrs)', helper)
         self.assertIn('search_profile="efficient"', helper)
         self.assertIn("_select_formation_finalist_surface(", helper)

@@ -24,6 +24,12 @@ class StorageGuardTests(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
+    def test_connection_caps_reusable_wal_file(self):
+        self.assertEqual(
+            int(self.db.execute("PRAGMA journal_size_limit").fetchone()[0]),
+            int(config.SQLITE_JOURNAL_SIZE_LIMIT_BYTES),
+        )
+
     def _generation(self, n, *, source="challenger_daily", status="published", current=0):
         generation = f"g{n:02d}"
         self.db.execute(
@@ -128,6 +134,52 @@ class StorageGuardTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "critical")
         self.assertEqual(result["reasons"], ["disk_used_critical"])
+
+    def test_expires_fill_window_and_purges_bootstrapped_automation_cache(self):
+        old_ms = int((self.now - (config.PROFILE_FETCH_DAYS + 2) * 86400) * 1000)
+        fresh_ms = int((self.now - 86400) * 1000)
+        stale_addr = "0x" + "1" * 40
+        bot_addr = "0x" + "2" * 40
+        self.db.executemany(
+            "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+            [
+                (stale_addr, 1, old_ms, "{}"),
+                (stale_addr, 2, fresh_ms, "{}"),
+                (bot_addr, 3, fresh_ms, "{}"),
+            ],
+        )
+        self.db.executemany(
+            "INSERT INTO fill_cache_state(addr,coverage_start_ms) VALUES (?,?)",
+            [(stale_addr, old_ms), (bot_addr, old_ms)],
+        )
+        self.db.execute(
+            "INSERT INTO profile(addr,status,reason,n_trades,data_status) VALUES (?,?,?,?,?)",
+            (bot_addr, "rejected", "bot_frequency", 25, "valid"),
+        )
+        self.db.commit()
+
+        result = storage_guard.run(
+            self.db,
+            self.db_path,
+            now_epoch=self.now,
+            disk_usage=(10_000, 2_000, 8_000),
+            db_main_bytes=100,
+            db_wal_bytes=10,
+        )
+
+        remaining = self.db.execute(
+            "SELECT addr,tid FROM candidate_fills ORDER BY addr,tid"
+        ).fetchall()
+        self.assertEqual(remaining, [(stale_addr, 2)])
+        self.assertEqual(
+            self.db.execute(
+                "SELECT reason FROM wallet_scan_blacklist WHERE addr=?", (bot_addr,)
+            ).fetchone()[0],
+            "bot_frequency",
+        )
+        self.assertEqual(result["retention"]["expiredCandidateFills"], 1)
+        self.assertEqual(result["retention"]["blacklistCleanup"]["candidate_fills"], 1)
+        self.assertIn("walCheckpoint", result["database"])
 
 
 if __name__ == "__main__":

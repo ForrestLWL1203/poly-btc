@@ -8,19 +8,22 @@
 import argparse
 import calendar
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
 import threading
 
 from hyper import config, params, storage
-from hyper.discovery import frozen_audit, profit_analysis, profit_distribution, scanner
+from hyper.discovery import collection_blacklist, frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
 from hyper.execution.mode import selected_book
 from hyper.market import rest
 from hyper.ops import paper_reset, procman, scan_lock, storage_guard
+from hyper.ops import resource_guard
 from hyper.util import now_iso
 
 
@@ -301,6 +304,11 @@ def main() -> int:
         "storage-maintenance",
         help="prune bounded discovery detail and record filesystem/database growth health",
     )
+    unblock = sub.add_parser(
+        "unblacklist-wallet",
+        help="explicitly remove one address from the permanent collection blacklist",
+    )
+    unblock.add_argument("--addr", required=True)
     sub.add_parser("serve-rescan", help="daemon: run a full scan on demand when a dashboard rescan command is queued")
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
@@ -475,10 +483,12 @@ def main() -> int:
         _configure_scan_cadence(db, args, manual=bool(pending_manual))
         _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
+        args.defer_finalize = True
+        scan_result = None
         try:
             with scan_lock.acquire(args.db):
                 with scanner._ScannerHeartbeat(db):
-                    scanner.scan(db, args)              # the observer (when up) keeps its own fast pace
+                    scan_result = scanner.scan(db, args)  # observer (when up) keeps its own fast pace
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
         except Exception as exc:  # noqa: BLE001
@@ -486,6 +496,26 @@ def main() -> int:
             scanner._set_scan_progress(db, state="idle", stage="error")
             scanner._set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": n})
             raise
+        if isinstance(scan_result, dict) and scan_result.get("status") == "profiled":
+            # Release the scanner lock/heartbeat connection, then replace the entire process. ``execv`` is
+            # intentional: systemd still owns one lifecycle and ExecStopPost maintenance runs only after the
+            # fresh finalizer exits, while every profile-stage Python allocation is returned to the OS.
+            generation_id = str(scan_result["generation"])
+            retune = bool(scan_result.get("retune"))
+            db.close()
+            argv = [
+                sys.executable,
+                "-m",
+                "hyper.cli.discover",
+                "--db",
+                args.db,
+                "finalize-profiled",
+                "--generation",
+                generation_id,
+            ]
+            if not retune:
+                argv.append("--no-retune")
+            os.execv(sys.executable, argv)
     elif args.cmd == "challenger-refresh":
         ns = _scan_ns()
         ns.days = args.days
@@ -525,6 +555,17 @@ def main() -> int:
         except scan_lock.ScanBusyError:
             result = {"status": "skipped", "reason": "scanner_run_already_active"}
         print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "unblacklist-wallet":
+        try:
+            with scan_lock.acquire(args.db):
+                removed = collection_blacklist.remove(db, args.addr)
+                db.commit()
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
+        print(json.dumps({
+            "status": "removed" if removed else "not_found",
+            "addr": collection_blacklist.normalize(args.addr),
+        }, sort_keys=True))
     elif args.cmd == "tune":
         # Keep the legacy hidden verb as a compatibility alias. Formation ranks one bounded pre-Core pool,
         # searches count-specific parameter surfaces, and seals only the winning strict membership.
@@ -559,10 +600,33 @@ def main() -> int:
     elif args.cmd == "finalize-profiled":
         try:
             with scan_lock.acquire(args.db):
-                result = scanner.finalize_profiled_generation(
-                    db, generation_id=args.generation, stamp=args.stamp,
-                    retune=not bool(args.no_retune),
-                )
+                with scanner._ScannerHeartbeat(db):
+                    try:
+                        result = scanner.finalize_profiled_generation(
+                            db, generation_id=args.generation, stamp=args.stamp,
+                            retune=not bool(args.no_retune),
+                        )
+                    except resource_guard.ResourceDeferred as exc:
+                        generation_id = args.generation or db.execute(
+                            "SELECT generation FROM scan_generation WHERE status='ready' "
+                            "ORDER BY id DESC LIMIT 1"
+                        ).fetchone()[0]
+                        db.execute(
+                            "UPDATE scan_generation SET status='ready',complete=0,is_current=0,error=? "
+                            "WHERE generation=?",
+                            (str(exc), generation_id),
+                        )
+                        scanner._set_scan_progress(db, state="idle", stage="resource_deferred")
+                        scanner._set_scanner_proc(db, "idle", {
+                            "last_error": str(exc), "generation": generation_id,
+                            "resource": exc.detail,
+                        })
+                        db.commit()
+                        result = {
+                            "status": "resource_deferred",
+                            "generation": generation_id,
+                            "resource": exc.detail,
+                        }
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))

@@ -303,10 +303,10 @@ def _prune_discovery_cache_once(db):
     before_episode = db.total_changes
     db.execute("DELETE FROM episode WHERE addr IN (SELECT addr FROM prune_discovery_addrs)")
     n_episode = db.total_changes - before_episode
-    cutoff_ms = int((time.time() - config.PROFILE_FETCH_DAYS * 86_400) * 1000)
-    before_fills = db.total_changes
-    db.execute("DELETE FROM candidate_fills WHERE time<?", (cutoff_ms,))
-    n_expired_fills = db.total_changes - before_fills
+    # Rolling-window expiry now belongs to the always-run storage-maintenance command. It deletes by the
+    # indexed (addr,time) path with small commits even after a failed/OOM scan; a single global DELETE here
+    # both skipped failures and could create another very large WAL transaction.
+    n_expired_fills = 0
     before_fills = db.total_changes
     db.execute(
         "DELETE FROM candidate_fills WHERE addr NOT IN "

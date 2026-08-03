@@ -42,7 +42,8 @@ Fills-only rough Copy
 Profit-aligned score (70/30 return with bounded confidence haircut)
     ↓ frozen Top32 → current-surface strict path → score Top16 formation seed
 Final strict individual/shared Copy
-    ↓ optional tuned-surface Top32 certification → final Top16/prefix → optional exact-Core retune/closure
+    ↓ fresh finalizer process → active-surface count search → optional one efficient tune
+    ↓ tuned-surface Top32 certification → final Top16/prefix strict-confirmed without recursive retune
     ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ mode-bound Observer (new targets start now; active Live sessions recover durably)
@@ -211,11 +212,11 @@ Wallet quality and funded-account membership are separate decisions.
   cost-multiple, maximum-drawdown and 75-point gates do not exist.
 - Confirmed source-account zeroing liquidations and those >=8% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
-- With automatic tuning enabled, wallet count and parameters are tuned together over profit-aligned score
-  prefixes. The initial winning surface requalifies every path-valid Top32 wallet. After the shared prefix
-  chooses the proposed Core, that exact membership is full-tuned and the Top32 ranking/prefix is certified
-  again; membership/order and parameters must stabilize within two rounds. With automatic tuning disabled, the
-  same strict qualification and prefix search run on the active fixed surface without either tuning step.
+- With automatic tuning enabled, the active surface first locates a feasible wallet-count prefix using the
+  bounded count search, then exactly one `efficient` parameter search tunes that neighbourhood. The winning
+  surface requalifies every path-valid Top32 wallet and the final shared prefix is strict-confirmed on that same
+  surface; a membership change cannot recursively launch a second tuning pool. With automatic tuning disabled,
+  the same strict qualification and prefix search run entirely on the active fixed surface.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
   five days. Daily refresh first certifies with the active parameters. Low and medium financial risk remain
@@ -255,9 +256,13 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - New candidates get a full configured profile window.
 - Existing candidates use `candidate_fills` cursors and fetch only new fills, merging them into the 37-day
   cache.
-- A repeated cached HFT/grid/bot/Heavy-DCA/concurrency failure stops after the current delta and local rolling
-  structural recomputation; it does not pay Portfolio, clearinghouse-state or Copy replay requests. These are
-  not permanent blacklists, so new behavior or expired evidence can still restore eligibility.
+- A complete high-confidence whole-wallet HFT/bot/grid decision is stored in `wallet_scan_blacklist`. Later
+  coarse recall subtracts it before Portfolio or history collection and maintenance removes its raw cache.
+  One bad specialty cannot blacklist a wallet whose other executable sector remains structurally copyable.
+  Heavy-DCA, concurrency, compulsive behavior, economic misses and data failures remain recoverable.
+  An operator can explicitly reverse a false positive with
+  `python3 -m hyper.cli.discover --db data/hl.db unblacklist-wallet --addr 0x…`; there is no automatic expiry
+  or Dashboard toggle, and the next complete scan refetches normal history.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$250,000` leveraged 7-day notional volume and non-negative 7-day
@@ -388,8 +393,9 @@ changed. They keep the active margin/leverage/add surface, strictly replay every
 the profit-aligned Core prefix on that fixed surface. The existing bounded adaptive count search probes the
 capacity boundary (for example `16 → 8 → 12 → 10`) rather than decrementing every count. Congestion,
 insufficient open coverage, liquidation or shared-account risk can only shrink the prefix; if no non-empty
-prefix passes, the generation fails closed with zero Core. When enabled, count-specific tuning and
-exact-membership closure remain part of publication. Explicit operator optimization/finalization commands may
+prefix passes, the generation fails closed with zero Core. When enabled, the active surface locates the count
+boundary and exactly one efficient tune runs on the winning count; later membership changes receive strict
+same-surface confirmation without recursive retuning. Explicit operator optimization commands may
 still request tuning independently of this automatic switch.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
@@ -429,8 +435,8 @@ folds, holdout, and stress scenarios from fills. Production formation does not e
 subsets, leave-one-out variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a
 bounded strict-prefix boundary search; each tested count gets a sparse 30-day probe, and the winning exact
 membership gets an efficient tune with at most four path finalists representing profit, liquidation risk,
-capacity/open capture, and the active baseline. Each count node is still tuned independently so an 8-wallet
-portfolio never inherits parameters fitted to a congested 16-wallet account. Completed strict-prefix summaries
+capacity/open capture, and the active baseline. Count nodes are replayed on the current surface to locate the
+capacity boundary; only the winning count is tuned. Completed strict-prefix summaries
 are cached by generation, parameter surface and membership hash, so a retry resumes without keeping full
 trajectories in memory. It never changes Core membership using stale profiles and never runs a candle replay for
 every parameter or membership proposal. After the winning parameters and membership are fixed, the one final
@@ -438,8 +444,8 @@ strict 30-day portfolio certification supplies the estimated shared-account resu
 list. Publication also persists the exact final-surface individual 30/14/7 replay fields used for score and
 admission, so Dashboard score and wallet economics never fall back to a different parameter surface.
 
-An exact-membership tune memoizes duplicate parameter surfaces across its axis, combination, margin-polish and
-finalist stages. Final walk-forward certification replays the active baseline once and all unique finalists in
+The generation's single efficient tune memoizes duplicate parameter surfaces across its axis, combination,
+margin-polish and finalist stages. Final walk-forward certification replays the active baseline once and all unique finalists in
 one CPU-aware batch over the same prepared fills/candle path; it does not rerun the identical baseline for every
 candidate. One-core hosts execute the same batch serially, while larger hosts scale to their configured worker
 ceiling without changing ordering or results.
@@ -583,10 +589,11 @@ the local mock dashboard and inspect the rendered result.
 - Do not restart `hl-scan.service` to deploy code: it starts a real scan when activated. Restart only the
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
 - Every scheduled full or Challenger scan runs `storage-maintenance` as `ExecStopPost`. It shares the scanner
-  lock, expires only per-wallet audit detail older than 90 days, preserves the current/full/in-progress and
-  latest 30 generation snapshots, and records disk/DB/WAL growth in `storage_guard_run`. Dashboard warns at
-  70% disk use, more than 1 GB normalized database growth per 24 hours, or a WAL above 512 MB; 85% disk use is
-  critical. The task relies on SQLite freelist reuse and never runs `VACUUM` or forces a WAL checkpoint.
+  lock, expires 37-day fill history in indexed small batches, purges permanently blacklisted automation cache,
+  expires per-wallet audit detail older than 90 days, preserves the current/full/in-progress and latest 30
+  generation snapshots, and records physical WAL plus active/checkpointed frames. It never runs `VACUUM`;
+  after committing it uses PASSIVE checkpoint and truncates only a fully checkpointed, unblocked WAL. SQLite
+  connections set a 64 MiB `journal_size_limit`.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or
   the completed run records `full=1`; explicit full bypasses the short Portfolio cache for new/incomplete
   wallets while complete caches still use delta-first structural/local-volume proof and official fallback.
