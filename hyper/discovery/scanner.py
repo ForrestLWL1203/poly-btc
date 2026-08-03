@@ -5094,8 +5094,92 @@ def _retention_exact_formation(
     }
 
 
-def _effective_core_order(previous_core, proposed_rows, decisions):
-    """Retain every non-blocked incumbent and only fill genuinely empty seats."""
+def _retention_evidence_formation(
+    formation, desired_order, *, replacement_gate, decisions,
+) -> dict:
+    """Overlay incumbent retention using the winning Top16 evidence without another replay.
+
+    Automatic formation has already strictly replayed every frozen Top16 wallet on the winning surface.
+    Retaining an incumbent from that same pool must consume those immutable results; replaying the effective
+    membership wallet-by-wallet here would create an accidental second strict pass after tuning completed.
+    """
+    desired = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (desired_order or ()) if addr
+    ))
+    qualifications = {
+        str(addr or "").lower(): dict(value or {})
+        for addr, value in dict((formation or {}).get("qualifications") or {}).items()
+    }
+    scores = {
+        str(addr or "").lower(): value
+        for addr, value in dict((formation or {}).get("scores") or {}).items()
+    }
+    policies = {
+        str(addr or "").lower(): value
+        for addr, value in dict((formation or {}).get("policies") or {}).items()
+    }
+    metrics = {
+        str(addr or "").lower(): dict(value or {})
+        for addr, value in dict((formation or {}).get("walletMetrics") or {}).items()
+    }
+    score_details = {
+        str(addr or "").lower(): dict(value or {})
+        for addr, value in dict((formation or {}).get("scoreDetails") or {}).items()
+    }
+    incomplete = [
+        addr for addr in desired
+        if addr not in qualifications or addr not in metrics or addr not in policies
+    ]
+    if incomplete:
+        raise RuntimeError(f"core_retention_cached_evidence_missing:{len(incomplete)}")
+    invalid = []
+    for addr in desired:
+        classification, _reason = core_retention.qualification_failure(
+            qualifications[addr]
+        )
+        if classification in {"deferred", "hard"}:
+            invalid.append(addr)
+    if invalid:
+        raise RuntimeError(f"core_retention_cached_evidence_invalid:{len(invalid)}")
+    ranked = tuple(dict.fromkeys((
+        *desired,
+        *(
+            str(addr or "").lower()
+            for addr in ((formation or {}).get("ranked") or ())
+            if addr
+        ),
+    )))
+    search = {
+        **dict((formation or {}).get("search") or {}),
+        "selectedCount": len(desired),
+        "retentionHysteresis": True,
+        "retentionEvidenceReused": True,
+        "replacementGate": dict(replacement_gate or {}),
+        "retentionDecisions": {
+            addr: {
+                "status": decision.status,
+                "streak": decision.failure_streak,
+                "reason": decision.failure_reason,
+                "action": decision.action,
+            }
+            for addr, decision in decisions.items()
+        },
+    }
+    return {
+        **dict(formation or {}),
+        "selected": desired,
+        "ranked": ranked,
+        "qualifications": qualifications,
+        "scores": scores,
+        "policies": policies,
+        "walletMetrics": metrics,
+        "scoreDetails": score_details,
+        "search": search,
+    }
+
+
+def _effective_core_order_from_addrs(previous_core, proposed_addrs, decisions):
+    """Retain every non-blocked incumbent, then fill remaining seats from a proven order."""
     previous = tuple(dict.fromkeys(
         str(addr or "").lower() for addr in (previous_core or ()) if addr
     ))
@@ -5107,12 +5191,9 @@ def _effective_core_order(previous_core, proposed_rows, decisions):
         addr for addr in previous
         if decisions.get(addr) is not None and not decisions[addr].retain_enabled
     }
-    proposed = [
-        row.addr.lower() for row in sorted(
-            (row for row in proposed_rows if row.role == selection.CORE and row.enabled),
-            key=lambda row: (row.selection_rank or 999999, row.addr),
-        )
-    ]
+    proposed = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (proposed_addrs or ()) if addr
+    ))
     cap = max(1, min(
         int(config.MAX_TARGETS),
         int(getattr(config, "CORE_TARGET_MAX_N", 16)),
@@ -5123,6 +5204,17 @@ def _effective_core_order(previous_core, proposed_rows, decisions):
         if addr not in desired and addr not in blocked_incumbents and len(desired) < cap:
             desired.append(addr)
     return tuple(desired)
+
+
+def _effective_core_order(previous_core, proposed_rows, decisions):
+    """Retain every non-blocked incumbent and only fill genuinely empty seats."""
+    proposed = [
+        row.addr.lower() for row in sorted(
+            (row for row in proposed_rows if row.role == selection.CORE and row.enabled),
+            key=lambda row: (row.selection_rank or 999999, row.addr),
+        )
+    ]
+    return _effective_core_order_from_addrs(previous_core, proposed, decisions)
 
 
 def _decorate_retention_rows(rows, previous_core, decisions):
@@ -7183,7 +7275,6 @@ def finalize_profiled_generation(
     if now_ms <= 0:
         raise RuntimeError("profile_generation_asof_missing")
     previous_core = selection.published_core_membership(db) or []
-    previous_strategy_bundle = strategy_revision.load_active(db)
     repair_summary = _repair_resumable_previous_core_profiles(
         db, generation_id, previous_core, now_ms, stamp, offline=bool(offline),
     )
@@ -7206,6 +7297,31 @@ def finalize_profiled_generation(
         formation, required=bool(retune),
     )
     recommended_core_order = tuple(formation.get("selected") or ())
+    retention_decisions = _complete_retention_decisions(
+        db, generation_id, previous_core, formation,
+    )
+    desired_retained = _effective_core_order_from_addrs(
+        previous_core, recommended_core_order, retention_decisions,
+    )
+    retained_incumbents = {
+        addr for addr in previous_core
+        if retention_decisions[addr].retain_enabled
+    }
+    replacement_gate = {
+        "eligible": True,
+        "reason": "winning_prefix_includes_effective_incumbents",
+    }
+    if tuple(desired_retained) != recommended_core_order:
+        replacement_gate = {
+            "eligible": False,
+            "reason": "incumbent_low_medium_risk_never_auto_replaced",
+        }
+        formation = _retention_evidence_formation(
+            formation, desired_retained,
+            replacement_gate=replacement_gate,
+            decisions=retention_decisions,
+        )
+    publication_core_order = tuple(formation.get("selected") or ())
     # Recovery is deliberately cache-first.  The sealed formation evidence already owns the frozen Top16,
     # its local parameter surface and the winning final count.  Prefetching the wider Top32 before reading
     # that evidence needlessly decoded every candidate fill and rebuilt price trajectories (the exact
@@ -7213,14 +7329,14 @@ def finalize_profiled_generation(
     # selected its bounded prefix, prepare paths only for the wallets that can actually reach publication.
     # A genuine formation cache miss still prepares its own strict-finalist paths in auto_tune; this final
     # selected-prefix pass merely keeps network work outside the atomic publication transaction.
-    if recommended_core_order and not offline:
+    if publication_core_order and not offline:
         _set_scan_progress(
             db, stage="prefetch_selection_paths",
-            candidates_scanned=len(recommended_core_order),
-            candidates_total=len(recommended_core_order),
+            candidates_scanned=len(publication_core_order),
+            candidates_total=len(publication_core_order),
         )
         _prefetch_selection_paths(
-            db, recommended_core_order, now_ms, generation_id,
+            db, publication_core_order, now_ms, generation_id,
         )
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
@@ -7241,73 +7357,16 @@ def finalize_profiled_generation(
             effective_score_details=formation.get("scoreDetails") or {},
             effective_replay_params_hash=formation.get("replayParamsHash"),
         )
-        retention_decisions = _complete_retention_decisions(
-            db, generation_id, previous_core, formation,
-        )
         proposed_core = {
             item.addr for item in rows
             if item.role == selection.CORE and item.enabled
         }
-        desired_retained = _effective_core_order(
-            previous_core, rows, retention_decisions,
-        )
         protected_removed = [
-            addr for addr in previous_core
-            if retention_decisions[addr].retain_enabled
-            and addr not in proposed_core
+            addr for addr in retained_incumbents if addr not in proposed_core
         ]
-        if protected_removed or proposed_core != set(desired_retained):
-            replacement_gate = {
-                "eligible": False,
-                "reason": (
-                    "incumbent_low_medium_risk_never_auto_replaced"
-                    if protected_removed else "high_or_system_risk_effective_overlay"
-                ),
-            }
-            formation = _retention_exact_formation(
-                db, generation_id, publication_stamp, now_ms,
-                desired_retained,
-                base_follow=(
-                    (previous_strategy_bundle or {}).get("params")
-                    or params.load_follow(db)
-                ),
-                replacement_gate=replacement_gate,
-                decisions=retention_decisions,
-                # One generation already spent its single tune in ``form_quality_prefix``. Incumbent
-                # retention may alter membership, but it receives strict replay on that surface only.
-                retune=False,
-            )
-            _apply_formation_params(db, formation, publication_stamp)
-            rows, marginal = _build_retained_selection(
-                db, generation_id, publication_stamp, now_ms, formation,
-            )
-        final_validation = (
-            ((marginal.search_meta or {}).get("finalStrictCopy"))
-            if marginal else {}
-        ) or {}
-        if final_validation.get("status") == "operator_review_degraded":
-            degraded_core = tuple(
-                addr for addr in previous_core
-                if retention_decisions[addr].retain_enabled
-            )
-            degraded_gate = {
-                "eligible": False,
-                "reason": "operator_review_degraded_keep_active_surface",
-            }
-            formation = _retention_exact_formation(
-                db, generation_id, publication_stamp, now_ms,
-                degraded_core,
-                base_follow=(
-                    (previous_strategy_bundle or {}).get("params")
-                    or params.load_follow(db)
-                ),
-                replacement_gate=degraded_gate,
-                decisions=retention_decisions,
-                retune=False,
-            )
-            _apply_formation_params(db, formation, publication_stamp)
-            rows, marginal = _build_retained_selection(
-                db, generation_id, publication_stamp, now_ms, formation,
+        if protected_removed:
+            raise RuntimeError(
+                f"core_retention_overlay_not_materialized:{len(protected_removed)}"
             )
         retention_decisions = _apply_shared_retention_failure(
             db, generation_id, previous_core, retention_decisions, marginal,
@@ -7471,7 +7530,7 @@ def finalize_profiled_generation(
                     for decision in retention_decisions.values()
                 ),
                 "replacementBlocked": not bool(
-                    locals().get("replacement_gate", {}).get("eligible", True)
+                    replacement_gate.get("eligible", True)
                 ),
             },
             commit=False,

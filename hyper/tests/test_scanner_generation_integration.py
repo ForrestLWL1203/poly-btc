@@ -421,8 +421,62 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("membership_retune_triggered", source)
         self.assertNotIn("_formation_membership_changed", source)
         self.assertIn("formation, required=bool(retune)", source)
-        self.assertIn("One generation already spent its single tune", source)
-        self.assertIn("retune=False", source)
+        self.assertIn("_retention_evidence_formation(", source)
+        self.assertNotIn("_retention_exact_formation(", source)
+
+    def test_retention_overlay_reuses_winning_surface_evidence(self):
+        decision = SimpleNamespace(
+            status="healthy", failure_streak=0, failure_reason=None,
+            action="healthy", retain_enabled=True,
+        )
+        formation = {
+            "selected": ("0xnew",),
+            "ranked": ("0xnew", "0xold"),
+            "params": {"MID_MARGIN_PCT": 0.02},
+            "qualifications": {
+                "0xnew": {"eligible": True},
+                "0xold": {"eligible": True},
+            },
+            "scores": {"0xnew": 0.9, "0xold": 0.8},
+            "policies": {"0xnew": "new-policy", "0xold": "old-policy"},
+            "walletMetrics": {"0xnew": {"net": 9}, "0xold": {"net": 8}},
+            "scoreDetails": {"0xnew": {"rank": 1}, "0xold": {"rank": 2}},
+            "replayParamsHash": "winning-surface",
+            "search": {"algorithm": "count_first_local_surface_v1"},
+        }
+
+        overlay = scanner._retention_evidence_formation(
+            formation, ("0xold", "0xnew"),
+            replacement_gate={"eligible": False, "reason": "retained"},
+            decisions={"0xold": decision},
+        )
+
+        self.assertEqual(overlay["selected"], ("0xold", "0xnew"))
+        self.assertEqual(overlay["replayParamsHash"], "winning-surface")
+        self.assertEqual(
+            overlay["search"]["algorithm"], "count_first_local_surface_v1",
+        )
+        self.assertTrue(overlay["search"]["retentionEvidenceReused"])
+        self.assertEqual(overlay["walletMetrics"]["0xold"], {"net": 8})
+
+    def test_retention_overlay_fails_closed_when_top16_evidence_is_missing(self):
+        decision = SimpleNamespace(
+            status="healthy", failure_streak=0, failure_reason=None,
+            action="healthy", retain_enabled=True,
+        )
+        formation = {
+            "qualifications": {"0xold": {"eligible": True}},
+            "policies": {"0xold": "old-policy"},
+            "walletMetrics": {},
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError, "core_retention_cached_evidence_missing:1",
+        ):
+            scanner._retention_evidence_formation(
+                formation, ("0xold",), replacement_gate={},
+                decisions={"0xold": decision},
+            )
 
     def test_daily_auto_tune_switch_can_publish_a_fixed_surface_promotion(self):
         source = inspect.getsource(scanner.refresh_challengers)
@@ -1767,10 +1821,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.finalize_profiled_generation)
 
         formation_at = source.index("formation = form_quality_prefix(")
-        selected_at = source.index("recommended_core_order = tuple(")
+        selected_at = source.index("publication_core_order = tuple(")
         prefetch_at = source.index(
             "_prefetch_selection_paths(\n"
-            "            db, recommended_core_order, now_ms, generation_id,"
+            "            db, publication_core_order, now_ms, generation_id,"
         )
         self.assertLess(formation_at, selected_at)
         self.assertLess(selected_at, prefetch_at)

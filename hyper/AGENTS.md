@@ -122,6 +122,9 @@ Strict-finalist paths are loaded only for a cache miss and released before Top16
 Individual formation evidence persists effective metrics, qualification and score only; full 30/14/7
 positions, equity paths and event trajectories must never enter `formation_prefix_evidence`. Legacy rows are
 trimmed with SQLite JSON projection before Python decodes them.
+Incumbent-retention overlays must reuse those same winning-surface Top16 individual results before the one
+final shared certification. They may not start a second individual strict pass or certify a provisional
+membership before retention and then replay a second effective membership.
 Final same-surface count search must apply the same actionable-open and capacity gates as atomic publication;
 those metrics cannot be treated as telemetry during count choice and then become blockers only at publish.
 Both tune-pool and final-membership fill sequences are lazy: persistent evidence lookup happens first, and a
