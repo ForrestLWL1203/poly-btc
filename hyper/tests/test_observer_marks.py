@@ -589,6 +589,33 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             execution_db.execute("PRAGMA journal_mode").fetchone()[0].lower(),
             "wal",
         )
+        self.assertEqual(
+            execution_db.execute("PRAGMA busy_timeout").fetchone()[0],
+            config.LIVE_EXECUTOR_DB_BUSY_TIMEOUT_MS,
+        )
+
+    def test_live_poll_round_batches_durable_cursors(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, ["0xsource", "0xsecond"], {})
+            with patch("hyper.execution.observer.rest.post_soft", return_value=[]):
+                first = await obs._poll_fills("0xsource", 1000, persist_cursor=False)
+                second = await obs._poll_fills("0xsecond", 1000, persist_cursor=False)
+
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM observer_target_cursor WHERE session_id=?",
+                (session_id,),
+            ).fetchone()[0], 0)
+            obs._persist_live_cursors([("0xsource", first), ("0xsecond", second)])
+            rows = db.execute(
+                "SELECT addr,last_fill_ms FROM observer_target_cursor WHERE session_id=? ORDER BY addr",
+                (session_id,),
+            ).fetchall()
+            self.assertEqual([row["addr"] for row in rows], ["0xsecond", "0xsource"])
+            self.assertTrue(all(int(row["last_fill_ms"]) > 1000 for row in rows))
+
+        asyncio.run(run())
 
     def test_threaded_volatility_refresh_does_not_share_observer_connection(self):
         async def run():
@@ -648,12 +675,19 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             executor = Mock()
             executor.equity = 205.0
             executor.available = 190.0
-            executor.reconcile.side_effect = sqlite3.OperationalError("database is locked")
+            executor.reconcile.side_effect = [
+                sqlite3.OperationalError("database is locked"),
+                sqlite3.OperationalError("database is locked"),
+                sqlite3.OperationalError("database is locked"),
+            ]
             obs.live_executor = executor
 
-            result = await obs._reconcile_live_once()
+            with patch("hyper.execution.observer.asyncio.sleep", new=AsyncMock()) as sleep:
+                result = await obs._reconcile_live_once()
 
             self.assertIsNone(result)
+            self.assertEqual(executor.reconcile.call_count, 3)
+            self.assertEqual(sleep.await_count, 2)
             self.assertFalse(obs.paused)
             self.assertEqual(obs.execution_state, "live_running")
             self.assertIn("database is locked", obs.live_reconcile_error)
@@ -668,6 +702,62 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertFalse(obs.paused)
+            self.assertIsNone(obs.live_reconcile_error)
+
+        asyncio.run(run())
+
+    def test_background_reconcile_hides_recovered_writer_collision(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.execution_state = "live_running"
+            obs._proc_state = "running"
+
+            executor = Mock()
+            executor.equity = 205.0
+            executor.available = 190.0
+            executor.reconcile.side_effect = [
+                sqlite3.OperationalError("database is locked"),
+                {"ok": True},
+            ]
+            obs.live_executor = executor
+
+            with patch("hyper.execution.observer.asyncio.sleep", new=AsyncMock()) as sleep:
+                result = await obs._reconcile_live_once()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(executor.reconcile.call_count, 2)
+            self.assertEqual(executor.rollback_after_error.call_count, 1)
+            self.assertEqual(sleep.await_count, 1)
+            self.assertIsNone(obs.live_reconcile_error)
+
+        asyncio.run(run())
+
+    def test_background_reconcile_retries_observer_account_sync_collision(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.execution_state = "live_running"
+            obs._proc_state = "running"
+
+            executor = Mock()
+            executor.equity = 205.0
+            executor.available = 190.0
+            executor.reconcile.return_value = {"ok": True}
+            obs.live_executor = executor
+
+            with patch.object(
+                obs, "_sync_live_account",
+                side_effect=[sqlite3.OperationalError("database is locked"), None],
+            ), patch("hyper.execution.observer.asyncio.sleep", new=AsyncMock()) as sleep:
+                result = await obs._reconcile_live_once()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(executor.reconcile.call_count, 2)
+            self.assertEqual(executor.rollback_after_error.call_count, 1)
+            self.assertEqual(sleep.await_count, 1)
             self.assertIsNone(obs.live_reconcile_error)
 
         asyncio.run(run())

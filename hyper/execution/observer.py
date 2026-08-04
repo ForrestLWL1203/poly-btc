@@ -581,25 +581,39 @@ class Observer:
         _log(f"live ledger projection drift on {len(drift)} coin(s); exposure increases frozen")
         return False
 
+    @staticmethod
+    def _is_db_contention(exc: Exception) -> bool:
+        return isinstance(exc, sqlite3.OperationalError) and any(
+            token in str(exc).lower() for token in ("locked", "busy")
+        )
+
+    async def _reconcile_live_with_retry(self, *, attempts: int, retry_all: bool) -> dict:
+        """Reconcile exchange truth and mirror it to the Observer book as one recoverable operation."""
+        for attempt in range(max(1, int(attempts))):
+            try:
+                result = await asyncio.to_thread(self.live_executor.reconcile)
+                self._sync_live_account()
+                return result
+            except Exception as exc:  # noqa: BLE001 - caller decides whether the terminal error pauses work
+                self.live_executor.rollback_after_error()
+                self._rollback_db()
+                if attempt + 1 >= attempts or (not retry_all and not self._is_db_contention(exc)):
+                    raise
+                await asyncio.sleep(0.1 * (2 ** attempt))
+        raise RuntimeError("live_reconcile_retry_exhausted")
+
     async def _refresh_live_sizing_state(self) -> None:
         """Refresh authoritative Mainnet equity before calculating any exposure increase."""
         if self.execution_mode != "live" or self.live_executor is None:
             return
-        result = None
-        for attempt in range(4):
-            try:
-                result = await asyncio.to_thread(self.live_executor.reconcile)
-                break
-            except Exception as exc:
-                self.live_executor.rollback_after_error()
-                self.live_reconcile_error = str(exc)[:120]
-                self.live_reconcile_error_at = now_iso()
-                if attempt == 3:
-                    raise
-                await asyncio.sleep(0.25 * (2 ** attempt))
+        try:
+            result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
+        except Exception as exc:
+            self.live_reconcile_error = str(exc)[:120]
+            self.live_reconcile_error_at = now_iso()
+            raise
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
-        self._sync_live_account()
         if result.get("ok") and not self._verify_live_ledger_projection():
             raise RuntimeError("live_ledger_projection_drift")
         if not result.get("ok"):
@@ -620,7 +634,10 @@ class Observer:
             return self.db
         db = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
         db.execute("PRAGMA journal_mode=WAL")
-        db.execute(f"PRAGMA busy_timeout={int(config.OBSERVER_DB_BUSY_TIMEOUT_MS)}")
+        # This connection is used only from worker threads, so a normal SQLite writer wait does not freeze
+        # target polling.  Reusing the Observer event-loop connection's 1.5s timeout made harmless cursor and
+        # mark commits surface as repeated Live reconciliation failures under an otherwise healthy WAL.
+        db.execute(f"PRAGMA busy_timeout={int(config.LIVE_EXECUTOR_DB_BUSY_TIMEOUT_MS)}")
         return db
 
     def _refresh_vol_worker(self, coin: str, asset_ctx=None):
@@ -1817,10 +1834,10 @@ class Observer:
         persistent ``reconcile_required``; transport/SQLite errors remain visible and retry automatically.
         """
         try:
-            result = await asyncio.to_thread(self.live_executor.reconcile)
-            self._sync_live_account()
+            # A writer that commits between retries is not an exchange-health failure. Keep this recovery
+            # inside the attempt so a normal WAL collision never becomes a false red Live control-plane state.
+            result = await self._reconcile_live_with_retry(attempts=3, retry_all=False)
         except Exception as exc:  # noqa: BLE001
-            self.live_executor.rollback_after_error()
             self.live_reconcile_error = str(exc)[:120]
             self.live_reconcile_error_at = now_iso()
             try:
@@ -2448,18 +2465,34 @@ class Observer:
             since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS   # but the network RTTs overlap
             async with sem:
                 try:
-                    await self._poll_fills(addr, since)
+                    cursor = await self._poll_fills(
+                        addr, since, persist_cursor=self.execution_mode != "live",
+                    )
+                    return (addr, cursor) if cursor is not None else None
                 except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
                     self._rollback_db()
                     self._tally("poll_error")
                     _log(f"poll_fills {addr[:10]} error: {exc}")
+                    return None
 
         while not self.stop:
             self._assert_mode_binding()
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_strategy()
                 last_reload = now_ms()
-            await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
+            updates = await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
+            if self.execution_mode == "live":
+                cursor_updates = [item for item in updates if item is not None]
+                if cursor_updates:
+                    try:
+                        self._persist_live_cursors(cursor_updates)
+                    except sqlite3.OperationalError as exc:
+                        message = str(exc).lower()
+                        if "locked" not in message and "busy" not in message:
+                            raise
+                        # The previous durable cursor remains a safe replay point.  The next round retries a
+                        # newer batch, while live_fills/execution_signal dedup any already-journalled receipts.
+                        self._rollback_db()
             await asyncio.sleep(1)                 # small breath between rounds
 
     async def signal_retry_loop(self):
@@ -2645,8 +2678,9 @@ class Observer:
         if self.execution_mode == "live":
             self._live_executor_db = self._open_live_executor_db()
             self.live_executor = LiveExecutor.from_db(self._live_executor_db)
-            result = await asyncio.to_thread(self.live_executor.reconcile)
-            self._sync_live_account()
+            # Startup uses the same recoverable exchange+ledger boundary as steady-state Live. A harmless
+            # Dashboard/maintenance commit during systemd restart must not crash-loop the real-position owner.
+            result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
             if not result.get("ok"):
                 self.paused = True
                 self.execution_state = "reconcile_required"
@@ -4059,7 +4093,29 @@ class Observer:
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
         return cur.lastrowid
 
-    async def _poll_fills(self, addr: str, since: int):
+    def _persist_live_cursors(self, updates) -> None:
+        """Persist one whole polling round with a single writer transaction.
+
+        Empty target windows used to commit once per wallet, continuously starving the independent Live
+        execution writer.  A stale durable cursor is intentionally safe: restart overlap plus tid/signal
+        idempotency simply replays receipts that were already journalled.
+        """
+        if not updates or self.execution_mode != "live":
+            return
+        stamp = now_iso()
+        self.db.executemany(
+            "INSERT INTO observer_target_cursor "
+            "(mode,session_id,addr,last_fill_ms,updated_at) VALUES ('live',?,?,?,?) "
+            "ON CONFLICT(mode,session_id,addr) DO UPDATE SET "
+            "last_fill_ms=MAX(last_fill_ms,excluded.last_fill_ms),updated_at=excluded.updated_at",
+            [
+                (self.execution_session_id, addr, int(cursor), stamp)
+                for addr, cursor in updates
+            ],
+        )
+        self.db.commit()
+
+    async def _poll_fills(self, addr: str, since: int, *, persist_cursor: bool = True):
         """SIGNAL fetch: REST-pull the wallet's fills since `since` (a few seconds back — the live
         poll window, NOT history) and replay through the idempotent process_fill (dedup by tid).
         aggregateByTime MERGES an order's partial fills into one TRADE-level row, so (a) one sliced
@@ -4083,15 +4139,13 @@ class Observer:
                 max((int(x.get("time") or 0) for x in page), default=0),
             )
             self.last_fill_ms[addr] = next_cursor
-            if self.execution_mode == "live":
-                self.db.execute(
-                    "INSERT INTO observer_target_cursor "
-                    "(mode,session_id,addr,last_fill_ms,updated_at) VALUES ('live',?,?,?,?) "
-                    "ON CONFLICT(mode,session_id,addr) DO UPDATE SET "
-                    "last_fill_ms=MAX(last_fill_ms,excluded.last_fill_ms),updated_at=excluded.updated_at",
-                    (self.execution_session_id, addr, next_cursor, now_iso()),
-                )
-            self.db.commit()
+            if self.execution_mode == "live" and persist_cursor:
+                self._persist_live_cursors([(addr, next_cursor)])
+            elif page:
+                # The receipt and durable execution signal must commit before the ordered signal consumer can
+                # act.  Empty pages have no writes and are batched by poll_loop instead.
+                self.db.commit()
+            return next_cursor
         except Exception:
             # A scanner write lock must never turn a fetched-but-uncommitted fill into a skipped fill.
             # Restore the exact prior cursor so the next round re-fetches the whole batch; tid dedup makes

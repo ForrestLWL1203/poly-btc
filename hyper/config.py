@@ -248,6 +248,8 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is belo
 # to clear Hyperliquid's venue minimum; otherwise the signal is skipped as an unexecutable dust order.
 EXECUTION_QUOTE_MAX_AGE_MS = 5_000  # Paper fills never reuse an older BBO; builder perps refetch l2Book on demand.
 OBSERVER_DB_BUSY_TIMEOUT_MS = 1_500  # Retry fills quickly instead of freezing the whole event loop for 30s.
+LIVE_EXECUTOR_DB_BUSY_TIMEOUT_MS = 30_000  # Runs in worker threads: wait through brief Observer/Scanner WAL
+#                                             writes instead of failing real-money reconciliation/orders.
 MAX_LEV = 50.0             # v10: raised 20→50 — leverage is now the VISIBLE σ-tier cap; MAX_LEV is only a
 #                            far backstop + the ceiling on the master's read leverage (so "never exceed master"
 #                            uses the master's REAL lev, not a 20-clipped one that wrongly under-levered us).
