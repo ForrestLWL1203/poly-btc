@@ -394,20 +394,34 @@ def _table_counts(db: sqlite3.Connection) -> dict[str, int]:
 def _estimated_reclaimed_pages(
     db: sqlite3.Connection, deleted: dict[str, int], page_size: int,
 ) -> int | None:
-    """Estimate dry-run pages proportionally from dbstat; never promises file shrink."""
-    try:
-        sizes = {str(name): int(size or 0) for name, size in db.execute(
-            "SELECT name,SUM(pgsize) FROM dbstat GROUP BY name"
-        ).fetchall()}
-    except sqlite3.Error:
-        return None
+    """Estimate pages from only affected b-trees; never traverse the whole DB.
+
+    An unfiltered ``dbstat`` aggregation reads every page (including the 37-day
+    fill cache) and can consume a CPU core for minutes on production.  Equality
+    constraints let SQLite visit only each affected table and its indexes.
+    """
     estimated = 0.0
     for table, delete_n in deleted.items():
         if not delete_n or not _table_exists(db, table):
             continue
         total = int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
-        if total:
-            estimated += float(sizes.get(table, 0)) * min(1.0, float(delete_n) / total)
+        if not total:
+            continue
+        objects = [table] + [
+            str(row[0]) for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?",
+                (table,),
+            ).fetchall()
+        ]
+        try:
+            size = int(db.execute(
+                f"SELECT COALESCE(SUM(pgsize),0) FROM dbstat "
+                f"WHERE name IN ({_marks(objects)})",
+                tuple(objects),
+            ).fetchone()[0] or 0)
+        except sqlite3.Error:
+            return None
+        estimated += float(size) * min(1.0, float(delete_n) / total)
     return int(estimated / max(1, page_size))
 
 
