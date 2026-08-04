@@ -377,7 +377,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertTrue(model["eligible"])
         self.assertNotIn("holdout_not_profitable", model["reasons"])
 
-    def test_margin_candidates_obey_four_add_ceiling_in_all_tiers(self):
+    def test_margin_candidates_obey_two_add_ceiling_in_all_tiers(self):
         follow = {
             "MARGIN_EQUITY_PCT": 1.0,
             "MIN_OPEN_MARGIN_PCT": 0.005,
@@ -395,9 +395,9 @@ class AutoTuneTests(unittest.TestCase):
 
         ceilings = auto_tune.margin_add_capacity_ceilings(follow)
         self.assertEqual(ceilings, {
-            "STABLE_MARGIN_PCT": 0.09875,
-            "MID_MARGIN_PCT": 0.05375,
-            "HIGH_MARGIN_PCT": 0.03625,
+            "STABLE_MARGIN_PCT": 0.40 / 3.0,
+            "MID_MARGIN_PCT": 0.22 / 3.0,
+            "HIGH_MARGIN_PCT": 0.15 / 3.0,
         })
         candidates = auto_tune.independent_margin_candidates(base, follow)
         for candidate in candidates:
@@ -1135,6 +1135,82 @@ class AutoTuneTests(unittest.TestCase):
         self.assertLessEqual(len(validated), 3)
         self.assertTrue(result["eligible_to_apply"])
         self.assertFalse(any(count < 8 or count > 12 for count, _stage, _marker in evaluated))
+
+    def test_final_membership_margin_calibration_is_upward_bounded(self):
+        follow = {
+            key: float(getattr(auto_tune.config, key))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+        follow.update({
+            key: float(getattr(auto_tune.config, key))
+            for key in (
+                "MARGIN_EQUITY_PCT", "MIN_OPEN_MARGIN_PCT",
+                *auto_tune.COIN_CAP_KEYS,
+            )
+        })
+        base = auto_tune._local_complete_surface(follow)
+        evaluated = []
+        validated = []
+
+        def evaluate(surface, stage):
+            evaluated.append((stage, dict(surface)))
+            margin_total = sum(float(surface[key]) for key in auto_tune.MARGIN_KEYS)
+            return {
+                "netPnl": margin_total * 1_000_000,
+                "feasible": True,
+                "liquidations": 0,
+                "capacityFit": .95,
+                "openRate": .95,
+                "addCaptureRate": .8,
+                "deploymentUtilization": {
+                    "timeWeightedAvgDeployPct": margin_total,
+                },
+            }
+
+        def validate(surface):
+            validated.append(dict(surface))
+            return {"eligible": True, "reasons": []}
+
+        result = auto_tune.tune_final_membership_margin_surface(
+            follow=follow, base_surface=base,
+            evaluate=evaluate, validate=validate,
+        )
+
+        self.assertEqual(
+            result["algorithm"], "final_membership_margin_calibration_v1",
+        )
+        self.assertTrue(result["eligible_to_apply"])
+        self.assertLessEqual(len(evaluated), 9)
+        self.assertLessEqual(len(validated), 3)
+        self.assertTrue(all(
+            all(
+                float(surface[key]) + 1e-12 >= float(base[key])
+                for key in auto_tune.MARGIN_KEYS
+            )
+            for _stage, surface in evaluated
+        ))
+        self.assertTrue(any(
+            all(
+                float(surface[key]) > float(base[key])
+                for key in auto_tune.MARGIN_KEYS
+            )
+            for _stage, surface in evaluated
+        ))
+
+    def test_deployment_utilization_sums_time_weighted_tiers(self):
+        summary = auto_tune.deployment_utilization_summary({
+            "avg_deploy_pct": .61,
+            "peak_deploy_pct": .94,
+            "tier_economics": {
+                "stable": {"avgDeployPct": .10},
+                "mid": {"avgDeployPct": .31},
+                "high": {"avgDeployPct": .17},
+            },
+        })
+
+        self.assertAlmostEqual(summary["timeWeightedAvgDeployPct"], .58)
+        self.assertEqual(summary["eventSampleAvgDeployPct"], .61)
+        self.assertEqual(summary["peakDeployPct"], .94)
 
     def test_local_tuner_leaves_memory_guard_to_cache_aware_evaluator(self):
         follow = {

@@ -283,9 +283,18 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["target_open_events"], 3)
         self.assertEqual(result["opened_n"], 2)
         self.assertLess(result["capacity_open_fit"], 1.0)
+        self.assertEqual(result["cash_congestion_fit"], 1.0)
+        self.assertEqual(
+            result["open_constraint_counts"]["aggregateDeploy"], 1,
+        )
+        self.assertEqual(result["open_constraint_counts"]["cash"], 0)
         self.assertEqual(recent["target_open_events"], 1)
         self.assertEqual(recent["opened_n"], 1)
         self.assertEqual(recent["capacity_open_fit"], 1.0)
+        self.assertEqual(recent["cash_congestion_fit"], 1.0)
+        self.assertEqual(
+            recent["open_constraint_counts"]["aggregateDeploy"], 0,
+        )
         self.assertEqual(recent["skip_reasons"].get("skip_deploy_cap"), 0)
 
     def test_recent_slice_uses_marked_boundary_not_full_cross_window_trade_pnl(self):

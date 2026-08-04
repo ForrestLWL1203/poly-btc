@@ -214,7 +214,9 @@ Wallet quality and funded-account membership are separate decisions.
 - Confirmed source-account zeroing liquidations and those >=8% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
 - With automatic tuning enabled, the active surface first locates a feasible wallet-count center using the
-  bounded count search, then exactly one `count_first_local_surface_v1` search tunes n±1 with n±2 guards. The
+  bounded count search, then one local-surface search tunes n±1 with n±2 guards. A material post-qualification
+  count drift receives one bounded exact-membership margin calibration; the overall formation audit is
+  `count_first_local_surface_v2`. The
   winning surface strictly replays only the frozen Top16 and the final shared prefix is confirmed on that same
   surface; a membership change cannot recursively launch a second tuning pool. With automatic tuning disabled,
   the same strict qualification and prefix search run entirely on the active fixed surface.
@@ -445,6 +447,13 @@ Core membership, avoiding a second coarse wallet-count grid after a transient pa
 the scanner lock with full and
 daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
 new selection, tuned parameters, and revision publish atomically.
+
+`python3 -m hyper.cli.discover --db data/hl.db calibrate-current-core --apply` is the narrower production
+operation for an already published Core. It freezes the exact current membership, tests at most nine
+first-open margin surfaces and three strict finalists, then atomically activates the winner only if every
+current member and the shared account still pass strict certification. It never refetches wallets, changes
+Core membership, searches leverage/add axes, or starts the general optimizer. Without `--apply` it validates
+and caches the same evidence without changing live parameters.
 
 The search evaluates a bounded local parameter surface, a small finalist set, continuous-capital windows and
 strict price-path validation. Production formation does not enumerate arbitrary wallet subsets, leave-one-out

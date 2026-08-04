@@ -103,10 +103,10 @@ class CopyEngineTests(unittest.TestCase):
             wallet_sector_side_room=75.0,
         ), 75.0)
 
-    def test_all_tiers_reserve_four_adds_and_last_add_fills_remaining_cap(self):
+    def test_all_tiers_reserve_two_full_adds(self):
         params = OpenSizingParams(
             high_sigma_min=0.09,
-            tier_margin={"stable": 0.085, "mid": 0.05274, "high": 0.03625},
+            tier_margin={"stable": 0.20, "mid": 0.10, "high": 0.08},
             tier_lev_cap={"stable": 20.0, "mid": 9.0, "high": 6.0},
             tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
@@ -114,7 +114,11 @@ class CopyEngineTests(unittest.TestCase):
             min_open_margin_pct=0.005,
             capital_anchor=10_000.0,
         )
-        cases = (("BTC", 0.04, 850.0), ("ETH", 0.06, 527.4), ("ZEC", 0.12, 362.5))
+        cases = (
+            ("BTC", 0.04, 4_000.0 / 3.0),
+            ("ETH", 0.06, 2_200.0 / 3.0),
+            ("ZEC", 0.12, 1_500.0 / 3.0),
+        )
         for coin, sigma, expected_margin in cases:
             with self.subTest(coin=coin):
                 plan = plan_open_sizing(
@@ -125,13 +129,13 @@ class CopyEngineTests(unittest.TestCase):
                 self.assertTrue(plan.ok)
                 self.assertAlmostEqual(plan.margin, expected_margin)
 
-        # BTC: open + three full adds = 34%; the fourth add fills the remaining 6%.
+        # BTC: the capped first margin can be repeated by two full adds to use the 40% coin cap.
         self.assertEqual(smart_add_order_margin(
-            first_margin=850.0, target_ratio=2.0, followed_margin=0.0,
-            coin_room=600.0, risk_available=10_000.0,
-        ), 600.0)
+            first_margin=4_000.0 / 3.0, target_ratio=2.0, followed_margin=0.0,
+            coin_room=4_000.0 / 3.0, risk_available=10_000.0,
+        ), 4_000.0 / 3.0)
         self.assertEqual(smart_add_order_margin(
-            first_margin=850.0, target_ratio=2.0, followed_margin=0.0,
+            first_margin=4_000.0 / 3.0, target_ratio=2.0, followed_margin=0.0,
             coin_room=0.0, risk_available=10_000.0,
         ), 0.0)
 

@@ -336,6 +336,14 @@ def main() -> int:
                     help="exit successfully when no resource-deferred generation is ready to resume")
     fg.add_argument("--offline", action="store_true",
                     help="validate only the frozen generation cache; never fetch missing price paths")
+    calibrate = sub.add_parser(
+        "calibrate-current-core",
+        help="strictly adjust first-open margins for the current Core without changing membership",
+    )
+    calibrate.add_argument(
+        "--apply", action="store_true",
+        help="atomically activate the strictly certified margin surface; default is validation only",
+    )
     reset = sub.add_parser("reset-paper", help="clear discovery/Paper state while preserving operator params")
     reset.add_argument("--factory-params", action="store_true",
                        help="also restore all params to code defaults")
@@ -639,6 +647,16 @@ def main() -> int:
                             "generation": generation_id,
                             "resource": exc.detail,
                         }
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
+        print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "calibrate-current-core":
+        try:
+            with scan_lock.acquire(args.db):
+                with scanner._ScannerHeartbeat(db):
+                    result = scanner.calibrate_current_core_margins(
+                        db, apply=bool(args.apply),
+                    )
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))

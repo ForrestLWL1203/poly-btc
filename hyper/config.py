@@ -215,7 +215,7 @@ ADD_GAP_K = 0.05            # 逆向摊价波动闸 σ 系数(逐币:x = k×该�
 POS_ADD_GAP_K = 0.08        # 顺势加仓波动闸 σ 系数; FOLLOW_POS_ADD 开时也要过此闸,避免小碎单全跟
 ADD_GAP_SHRINK_G = 1.3      # 收缩因子(每加一次门槛×此)
 ADD_MAX_HARD = 8           # 智能模式硬顶(兜底;通常单币预算先触顶)
-SMART_ADD_MIN_CAPACITY = 4 # 首仓必须为至少4次后续加仓保留单币容量；第4次允许用剩余额度部分成交
+SMART_ADD_MIN_CAPACITY = 2 # 首仓必须为2次后续完整加仓预留单币容量；单币上限至少容纳首仓+2次加仓
 FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有利方向、拉高成本)时是否跟。开=过 POS_ADD_GAP_K 才跟;
 #                            关=完全不追盈利加仓。B 逆向(摊低)始终按 ADD_GAP_K 波动闸走。
 # 智能模式加仓额 = min((目标本次加仓额 ÷ 目标首仓额) × 我们首仓保证金, 我们首仓保证金),
@@ -372,7 +372,7 @@ SELECTION_PATH_RETRY_INTERVAL_SEC = 10.0
 # requires preserved conservative profit and targets a 20% reduction from the effective path baseline.
 AUTO_TUNE_MARGIN_FACTORS = (0.85, 1.0, 1.15)
 # Cold-start databases do not have a learned margin surface to perturb.  Probe a few absolute points as a
-# fraction of each tier's four-add-safe ceiling so the bounded tuner can rediscover materially larger sizing
+# fraction of each tier's reserved-add-safe ceiling so the bounded tuner can rediscover materially larger sizing
 # (for example 5-7% stable margin) without restoring a large three-dimensional Cartesian grid.
 AUTO_TUNE_MARGIN_CEILING_FRACTIONS = (0.50, 0.75, 1.00)
 AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)

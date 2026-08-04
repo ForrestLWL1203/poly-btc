@@ -78,13 +78,15 @@ def smart_add_margin_ceiling(
     min_add_margin: float,
     reserved_adds: int = config.SMART_ADD_MIN_CAPACITY,
 ) -> float:
-    """Largest first margin that still leaves an executable final reserved add.
+    """Largest first margin that still leaves ``reserved_adds`` full-size add slots.
 
-    With four reserved adds, open plus the first three full-sized adds consume
-    four first-margin units. The fourth add may fill the remaining coin room.
+    Production currently reserves two adds, so the same-coin/direction cap must
+    hold three equal first-margin units: initial open plus two later adds. If
+    the resulting unit is below the minimum executable margin, the caller's
+    normal dust gate rejects the open.
     """
     adds = max(1, int(reserved_adds or 1))
-    return max(0.0, (max(0.0, coin_room) - max(0.0, min_add_margin)) / adds)
+    return max(0.0, max(0.0, coin_room) / (adds + 1))
 
 
 def smart_add_order_margin(

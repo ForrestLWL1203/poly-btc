@@ -47,6 +47,19 @@ CAPACITY_OPEN_OUTCOMES = frozenset({
     "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
     "skip_wallet_stock_side_position_cap",
 })
+OPEN_CONSTRAINT_GROUPS = {
+    # Actual free-cash exhaustion is the only literal funding congestion.
+    "cash": frozenset({"skip_no_cash"}),
+    # The remaining groups are independent strategy/risk limits. They still
+    # reduce execution capacity but must not be described as cash congestion.
+    "aggregateDeploy": frozenset({"skip_deploy_cap"}),
+    "coinCap": frozenset({"skip_coin_full"}),
+    "concentration": frozenset({
+        "skip_wallet_sector_side_full", "skip_wallet_full",
+        "skip_wallet_position_cap", "skip_wallet_stock_side_position_cap",
+    }),
+    "minimumSizing": frozenset({"skip_margin_too_small"}),
+}
 
 
 def open_execution_metrics(open_events) -> dict:
@@ -90,6 +103,17 @@ def open_execution_metrics(open_events) -> dict:
         opened_n / (opened_n + capacity_skips)
         if (opened_n + capacity_skips) else 1.0
     )
+    constraint_counts = {
+        group: sum(event.get("outcome") in outcomes for event in events)
+        for group, outcomes in OPEN_CONSTRAINT_GROUPS.items()
+    }
+    constraint_fit = {
+        group: (
+            opened_n / (opened_n + count)
+            if (opened_n + count) else 1.0
+        )
+        for group, count in constraint_counts.items()
+    }
     return {
         "raw_target_open_events": raw_n,
         "small_open_excluded_n": 0,
@@ -98,6 +122,10 @@ def open_execution_metrics(open_events) -> dict:
         "raw_open_capture_rate": raw_rate,
         "effective_open_follow_rate": effective_rate,
         "capacity_open_fit": capacity_fit,
+        "execution_capacity_fit": capacity_fit,
+        "cash_congestion_fit": constraint_fit["cash"],
+        "open_constraint_counts": constraint_counts,
+        "open_constraint_fit": constraint_fit,
         "open_execution_audit": {
             "rawTargetOpenN": raw_n,
             "smallOpenExcludedN": 0,
@@ -106,6 +134,9 @@ def open_execution_metrics(open_events) -> dict:
             "rawOpenCaptureRate": raw_rate,
             "effectiveOpenFollowRate": effective_rate,
             "capacityFit": capacity_fit,
+            "capacityLabel": "execution_capacity",
+            "constraintCounts": constraint_counts,
+            "constraintFit": constraint_fit,
             "skipDetails": sorted(
                 details.values(),
                 key=lambda item: (-int(item["count"]), item["reason"], item["coin"]),
@@ -1700,6 +1731,10 @@ class Backtest:
             "copy_peak_concurrent": self.copy_peak_concurrent,
             "max_concurrent_fit": self.copy_peak_concurrent / self.target_peak_concurrent if self.target_peak_concurrent else 1.0,
             "capacity_open_fit": open_metrics["capacity_open_fit"],
+            "execution_capacity_fit": open_metrics["execution_capacity_fit"],
+            "cash_congestion_fit": open_metrics["cash_congestion_fit"],
+            "open_constraint_counts": open_metrics["open_constraint_counts"],
+            "open_constraint_fit": open_metrics["open_constraint_fit"],
             "actionable_open_rate": open_rate,
             "execution_fill_rate": open_rate,
             "behavior_replication_rate": behavior_v2,
@@ -2189,6 +2224,14 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "actionable_open_rate": open_rate,
         "execution_fill_rate": open_rate,
         "capacity_open_fit": capacity_fit,
+        "execution_capacity_fit": open_metrics.get(
+            "execution_capacity_fit", capacity_fit
+        ),
+        "cash_congestion_fit": open_metrics.get("cash_congestion_fit", 1.0),
+        "open_constraint_counts": open_metrics.get(
+            "open_constraint_counts", {}
+        ),
+        "open_constraint_fit": open_metrics.get("open_constraint_fit", {}),
         "skip_reasons": sliced_skip_reasons,
         "add_events": window_add_events,
         "ambiguous_liquidations": len(ambiguous_ranges),

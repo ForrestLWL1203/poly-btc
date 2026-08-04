@@ -106,7 +106,9 @@ the complete individual/shared strict contract; congestion, insufficient open co
 shrink the profit-aligned Core prefix through the existing bounded adaptive count search (for example
 `16 → 8 → 12 → 10`), never sequential count enumeration. No feasible non-empty prefix may publish as an
 intentional zero-Core generation. When enabled, each generation may run at most one
-`count_first_local_surface_v1` tune; membership changes after that tune are strictly replayed on the chosen
+`count_first_local_surface_v2` formation; its main search uses one local-surface tune, and a material
+post-qualification count drift permits only one bounded exact-membership margin calibration. Membership changes
+after that calibration are strictly replayed on the chosen
 surface and may not start another pool. Top32 remains evidence/Challenger scope only; ranks 17-32 cannot be
 reabsorbed after the Top16 is frozen.
 
@@ -509,7 +511,7 @@ decide wallet admission. The selected set separately passes the official 30-day 
 contract and dynamic strict-Copy 30d/rolling-7d returns. There is no weekly, Campaign, per-close-density or
 cost-stress admission rule.
 Price-path and maintenance-risk validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
-few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
+few absolute margins at 50/75/100% of the reserved-add-safe ceiling; it does not restore the old large Cartesian grid.
 Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays
 approximately constant before capacity caps. Selection is profit-led, but candidates within the configured
 near-best profit band are ordered by fewer liquidations, better capacity/open fit, then measured add fidelity.
@@ -609,7 +611,7 @@ through those retries; only markets still missing after all five attempts are cl
 - Smart-add spacing compares target transaction prices only; our BBO price is execution/PnL, never mixed into the
   target volatility gate. Adverse and positive adds have separate sigma gaps that expand after each followed
   add. One target order can consume at most one first-margin unit, the final reserved add may fill remaining
-  same-coin room, and first-open sizing preserves at least four executable follow-on add slots before the hard
+  same-coin room, and first-open sizing preserves at least two executable follow-on add slots before the hard
   `ADD_MAX_HARD` ceiling.
 - Target reductions are percentage based: tiny fills accumulate until the target has unwound 10% since our last
   mirrored reduce, while a full close always executes. After a target reduce, a profitable tail at or below 20%
@@ -683,6 +685,7 @@ python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 8
 python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
 python3 -m hyper.cli.discover --db data/hl.db regate
 python3 -m hyper.cli.discover --db data/hl.db optimize
+python3 -m hyper.cli.discover --db data/hl.db calibrate-current-core --apply
 python3 -m hyper.cli.discover --db data/hl.db finalize-profiled --generation GENERATION_ID
 python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
 python3 -m hyper.cli.discover --db data/hl.db storage-maintenance
@@ -713,6 +716,10 @@ re-scores/re-ranks the current generation's frozen pre-strict evidence with the 
 and jointly tunes that generation at its sealed as-of time without Leaderboard, Portfolio, or wallet-fill
 refetch. A missing bounded public K-line path may still be completed before strict replay. Optimize,
 selection-repair, and finalize commands share the full/daily scanner process lock but may run with Observer.
+`calibrate-current-core` also shares that lock and freezes the published Core exactly. It may change only the
+three first-open margin percentages after bounded quick replay plus strict shared/member certification; it
+must not change membership, leverage, add parameters, or fetch wallet history. `--apply` activates params and
+one immutable strategy revision atomically; omit it for evidence-only validation.
 `optimize --reuse-tuned-surface` is the narrow post-scan repair path: it reuses the current tuned surface,
 replays the repaired bounded pool, and runs full tuning only for the exact changed membership instead of
 repeating the coarse count grid.

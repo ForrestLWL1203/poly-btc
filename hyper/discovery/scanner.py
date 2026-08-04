@@ -2296,7 +2296,7 @@ def _portfolio_selection_metrics(windows, selected_n=0):
     )
 
 
-_FORMATION_PREFIX_CACHE_POLICY = "count-first-local-surface-v1"
+_FORMATION_PREFIX_CACHE_POLICY = "count-first-local-surface-v2"
 
 
 def _formation_prefix_membership_hash(addrs) -> str:
@@ -3762,7 +3762,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
         "scores": scores,
         "policies": policies,
         "search": {
-            "algorithm": "count_first_local_surface_v1",
+            "algorithm": "count_first_local_surface_v2",
             "initialCount": len(rows),
             "selectedCount": 0,
             "explicitEmptyCore": True,
@@ -3840,7 +3840,9 @@ def _retune_exact_membership_surface(
 
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False, force_retune=False,
-                        retention_addrs=None, _follow_override=None) -> dict:
+                        retention_addrs=None, _follow_override=None,
+                        _fixed_membership_addrs=None,
+                        _margin_calibration_only=False) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
     resource_peak = {
@@ -3894,18 +3896,36 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
         ) or config.CORE_INITIAL_MAX_N),
     ))
+    fixed_membership = tuple(dict.fromkeys(
+        str(addr or "").lower()
+        for addr in (_fixed_membership_addrs or ()) if addr
+    ))
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
         retention_addrs=(
-            () if force_entry_requalification else retention_addrs
+            fixed_membership if fixed_membership else
+            (() if force_entry_requalification else retention_addrs)
         ),
     )
     # Top32 remains the rough/Challenger evidence pool.  Automatic formation freezes one bounded Top16
     # before any parameter work; ranks 17-32 are never reabsorbed after seeing a tuned surface.
-    pre_strict_candidates = _bounded_formation_candidates(
-        all_ranked_candidates,
-        core_upper,
-    )
+    if fixed_membership:
+        row_by_addr = {
+            str(row.get("addr") or "").lower(): row
+            for row in all_ranked_candidates if row.get("addr")
+        }
+        missing = [addr for addr in fixed_membership if addr not in row_by_addr]
+        if missing:
+            raise RuntimeError(
+                f"fixed_core_margin_calibration_candidate_missing:{len(missing)}"
+            )
+        pre_strict_candidates = [row_by_addr[addr] for addr in fixed_membership]
+        core_upper = len(pre_strict_candidates)
+    else:
+        pre_strict_candidates = _bounded_formation_candidates(
+            all_ranked_candidates,
+            core_upper,
+        )
     prepath_rows = list(pre_strict_candidates)
     prepath_rejected = []
     for row in prepath_rows:
@@ -3992,8 +4012,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     local_eval_cache = {}
     local_cache_stats = {"hits": 0, "persistentHits": 0, "writes": 0}
 
-    def quick_surface_evaluate(count, surface, stage):
-        count = max(1, min(len(tune_ordered), int(count)))
+    def quick_surface_evaluate(
+        count, surface, stage, *, membership=None, cache_label="quick",
+    ):
+        if membership is None:
+            count = max(1, min(len(tune_ordered), int(count)))
+            addrs = tuple(tune_ordered[:count])
+        else:
+            addrs = tuple(dict.fromkeys(
+                str(addr or "").lower() for addr in membership if addr
+            ))
+            if not addrs:
+                raise ValueError("quick_surface_membership_empty")
+            count = len(addrs)
         surface = {
             key: f(surface.get(key, base_follow.get(key)))
             for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
@@ -4001,9 +4032,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         surface_hash = hashlib.sha256(json.dumps(
             surface, sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
-        cache_params_hash = f"quick:{surface_hash}"
-        addrs = tuple(tune_ordered[:count])
-        cache_key = (count, surface_hash)
+        cache_params_hash = f"{cache_label}:{surface_hash}"
+        cache_key = (addrs, surface_hash, cache_label)
         if cache_key in local_eval_cache:
             local_cache_stats["hits"] += 1
             return local_eval_cache[cache_key]
@@ -4061,6 +4091,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "return7d": return_7d,
                 "openLossRatio30d": primary_economics.get("openLossRatio"),
                 "tierEconomics": primary.get("tier_economics") or {},
+                "deploymentUtilization": auto_tune.deployment_utilization_summary(
+                    primary
+                ),
                 "addCaptureRate": f(
                     primary.get("actionable_add_capture_rate")
                     if primary.get("actionable_add_capture_rate") is not None else 1.0
@@ -4106,6 +4139,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "return30d": replay_summary.get("return30d"),
             "return7d": replay_summary.get("return7d"),
             "tierEconomics": replay_summary.get("tierEconomics") or {},
+            "deploymentUtilization": replay_summary.get(
+                "deploymentUtilization"
+            ) or {},
             "prefixEvaluation": value,
             "paramsHash": surface_hash,
         }
@@ -4129,36 +4165,43 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             count_rows[int(count)] = row
             return row["prefixEvaluation"]
 
-        try:
-            tune_search = core_formation.search_quality_prefix(
-                len(tune_ordered), current_surface_evaluate,
-                retention_kwargs=retention,
-                tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
-                exhaustive_below=0,
-                required_count=0,
-            )
-            winning_count = int(tune_search.selected.count)
-        except RuntimeError as exc:
-            if str(exc) != "no_feasible_quality_prefix":
-                raise
-            # Keep the best repairable count as the local-search center; it cannot publish until a strict
-            # finalist passes below.
-            repairable = list(count_rows.values())
-            if not repairable:
-                repairable.append(quick_surface_evaluate(
-                    1,
-                    {
-                        key: f(base_follow.get(key))
-                        for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
-                    },
-                    "portfolio_count_search",
+        if _margin_calibration_only:
+            # An operator-requested current-Core calibration is an exact-membership sizing task.  It must
+            # not restart count search or the general leverage/add tuner before testing the bounded upward
+            # margin probes below.
+            winning_count = len(tune_ordered)
+            tune_reason = "current_core_margin_calibration"
+        else:
+            try:
+                tune_search = core_formation.search_quality_prefix(
+                    len(tune_ordered), current_surface_evaluate,
+                    retention_kwargs=retention,
+                    tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+                    exhaustive_below=0,
+                    required_count=0,
+                )
+                winning_count = int(tune_search.selected.count)
+            except RuntimeError as exc:
+                if str(exc) != "no_feasible_quality_prefix":
+                    raise
+                # Keep the best repairable count as the local-search center; it cannot publish until a strict
+                # finalist passes below.
+                repairable = list(count_rows.values())
+                if not repairable:
+                    repairable.append(quick_surface_evaluate(
+                        1,
+                        {
+                            key: f(base_follow.get(key))
+                            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+                        },
+                        "portfolio_count_search",
+                    ))
+                repair_center = max(repairable, key=lambda row: (
+                    f(row.get("openRate")) + f(row.get("capacityFit")),
+                    f(row.get("netPnl")), -int(row.get("count") or 0),
                 ))
-            repair_center = max(repairable, key=lambda row: (
-                f(row.get("openRate")) + f(row.get("capacityFit")),
-                f(row.get("netPnl")), -int(row.get("count") or 0),
-            ))
-            winning_count = int(repair_center["count"])
-            tune_reason = "active_surface_repair_center"
+                winning_count = int(repair_center["count"])
+                tune_reason = "active_surface_repair_center"
 
         validation_path_start = now_ms - (
             max(auto_tune._tune_days())
@@ -4193,22 +4236,28 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
 
         policy = load_copy_policy(base_follow)
 
-        def strict_local_validate(count, surface):
+        def strict_validate_membership(
+            addrs, surface, *, cache_label, validation_mode, progress_stage,
+        ):
+            addrs = tuple(dict.fromkeys(
+                str(addr or "").lower() for addr in (addrs or ()) if addr
+            ))
+            if not addrs:
+                return {"eligible": False, "reasons": ["empty_membership"]}
             _set_scan_progress(
-                db, stage="local_finalist_validation",
-                candidates_scanned=int(count), candidates_total=len(tune_ordered),
+                db, stage=progress_stage,
+                candidates_scanned=len(addrs), candidates_total=len(tune_ordered),
             )
-            addrs = tuple(tune_ordered[:int(count)])
             strict_surface_hash = hashlib.sha256(json.dumps(
                 surface, sort_keys=True, separators=(",", ":"), default=str,
             ).encode("utf-8")).hexdigest()
-            strict_cache_hash = f"strict-finalist:{strict_surface_hash}"
+            strict_cache_hash = f"{cache_label}:{strict_surface_hash}"
             cached = _load_formation_prefix_evidence(
                 db, generation_id, strict_cache_hash, addrs,
             )
             if cached is not None:
                 _cached_value, replay_summary = cached
-                if replay_summary.get("validationMode") == "strict-finalist":
+                if replay_summary.get("validationMode") == validation_mode:
                     local_cache_stats["hits"] += 1
                     local_cache_stats["persistentHits"] += 1
                     return dict(replay_summary.get("validation") or {})
@@ -4276,6 +4325,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "openRate": f(metrics_.actionable_open_rate),
                 "capacityFit": f(metrics_.capacity_fit),
                 "tierEconomics": primary.get("tier_economics") or {},
+                "deploymentUtilization": auto_tune.deployment_utilization_summary(
+                    primary
+                ),
                 "pricePathCoverage": f(primary.get("price_path_coverage")),
                 "maintenanceMarginCoverage": f(primary.get("maintenance_margin_coverage")),
             }
@@ -4290,17 +4342,25 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 params=dict(surface),
                 payload={
                     "return30d": return_30, "return7d": return_7,
-                    "validationMode": "strict-finalist",
+                    "validationMode": validation_mode,
                 },
             )
             _store_formation_prefix_evidence(
                 db, generation_id, strict_cache_hash, addrs, evidence,
-                {"validationMode": "strict-finalist", "validation": result},
+                {"validationMode": validation_mode, "validation": result},
             )
             del windows
             gc.collect()
             sample_resource_peak()
             return result
+
+        def strict_local_validate(count, surface):
+            return strict_validate_membership(
+                tune_ordered[:int(count)], surface,
+                cache_label="strict-finalist",
+                validation_mode="strict-finalist",
+                progress_stage="local_finalist_validation",
+            )
 
         def local_progress(stage, completed, _increment):
             _set_scan_progress(
@@ -4308,18 +4368,24 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 candidates_total=1,
             )
 
-        chosen_run = auto_tune.tune_local_prefix_surfaces(
-            candidate_count=len(tune_ordered), center_count=winning_count,
-            follow=base_follow, evaluate=quick_surface_evaluate,
-            validate=strict_local_validate, progress=local_progress,
-        )
-        db.commit()
-        sample_resource_peak()
-        winning_count = int(chosen_run.get("selected_count") or winning_count)
-        finalist_admission_audit = list(chosen_run.get("finalists") or ())
-        tuned_params, tune_eligible, tune_reason = _formation_param_surface(
-            base_follow, chosen_run, retune=True,
-        )
+        if _margin_calibration_only:
+            tuned_params, tune_eligible, _ = _formation_param_surface(
+                base_follow, None, retune=False,
+            )
+            tune_eligible = True
+        else:
+            chosen_run = auto_tune.tune_local_prefix_surfaces(
+                candidate_count=len(tune_ordered), center_count=winning_count,
+                follow=base_follow, evaluate=quick_surface_evaluate,
+                validate=strict_local_validate, progress=local_progress,
+            )
+            db.commit()
+            sample_resource_peak()
+            winning_count = int(chosen_run.get("selected_count") or winning_count)
+            finalist_admission_audit = list(chosen_run.get("finalists") or ())
+            tuned_params, tune_eligible, tune_reason = _formation_param_surface(
+                base_follow, chosen_run, retune=True,
+            )
         # The final Top16 individual and shared-count stages load their own
         # bounded paths.  Do not retain the finalist path across that phase
         # boundary; this overlap was the dominant single-process RSS peak.
@@ -4341,7 +4407,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # Rough ranks 17-32 remain Challenger evidence and cannot re-enter after observing tuned parameters.
     tuned_candidate_rows = list(prepath_rows)
 
-    def replay_effective_surface(follow_surface):
+    def replay_effective_surface(follow_surface, candidate_rows=None):
+        replay_rows = list(
+            tuned_candidate_rows if candidate_rows is None else candidate_rows
+        )
         qualifications = {}
         scores = {}
         score_details = {}
@@ -4356,11 +4425,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
         individual_cache_hash = f"individual:{surface_key}"
-        for index, row in enumerate(tuned_candidate_rows, start=1):
+        for index, row in enumerate(replay_rows, start=1):
             addr = row["addr"]
             _set_scan_progress(
                 db, stage="top16_individual_strict",
-                candidates_scanned=index - 1, candidates_total=len(tuned_candidate_rows),
+                candidates_scanned=index - 1, candidates_total=len(replay_rows),
             )
             cached = _load_formation_prefix_evidence(
                 db, generation_id, individual_cache_hash, (addr,),
@@ -4551,7 +4620,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "walletMetrics": effective_metrics,
             "replayParamsHash": effective_surface_hash,
             "search": {
-                "algorithm": "count_first_local_surface_v1", "initialCount": 0,
+                "algorithm": "count_first_local_surface_v2", "initialCount": 0,
                 "selectedCount": 0,
                 "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
@@ -4568,6 +4637,126 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "admission": admission_audit,
             },
         }
+    # The first local surface is intentionally found before individual strict
+    # qualification because sizing can repair a weak default-surface replay.
+    # Qualification may nevertheless shrink that tuned prefix materially (for
+    # example 14 -> 10). Reusing the 14-wallet margin surface without measuring
+    # the final ten systematically under-deploys the smaller set. Give the
+    # exact qualified membership one bounded margin-only calibration: baseline
+    # plus eight upward probes and at most three strict finalists. This is not
+    # another exact-membership full tuner and never searches leverage, adds,
+    # wallet counts or arbitrary subsets.
+    pre_calibration_count = len(ordered)
+    calibration_reference_count = int(
+        chosen_run.get("selected_count") or winning_count or pre_calibration_count
+    )
+    final_margin_calibration = {
+        "status": "skipped",
+        "reason": (
+            "retune_disabled" if not retune else "membership_count_unchanged"
+        ),
+        "algorithm": "final_membership_margin_calibration_v1",
+        "input_count": pre_calibration_count,
+    }
+    final_margin_calibration_applied = False
+    final_margin_recheck_audit = []
+    if retune and (
+        _margin_calibration_only
+        or pre_calibration_count != calibration_reference_count
+    ):
+        exact_addrs = tuple(ordered)
+
+        def evaluate_exact_margin_surface(surface, stage):
+            return quick_surface_evaluate(
+                len(exact_addrs), surface, stage,
+                membership=exact_addrs, cache_label="final-margin-quick",
+            )
+
+        def validate_exact_margin_surface(surface):
+            return strict_validate_membership(
+                exact_addrs, surface,
+                cache_label="strict-final-membership-margin",
+                validation_mode="strict-final-membership-margin",
+                progress_stage="final_membership_margin_validation",
+            )
+
+        final_margin_calibration = auto_tune.tune_final_membership_margin_surface(
+            follow=base_follow,
+            base_surface=fixed_follow,
+            evaluate=evaluate_exact_margin_surface,
+            validate=validate_exact_margin_surface,
+            progress=local_progress,
+        )
+        final_margin_calibration.update(
+            input_count=pre_calibration_count,
+            reference_count=calibration_reference_count,
+        )
+        if final_margin_calibration.get("status") == "ok":
+            calibrated_params, calibrated_eligible, _calibrated_reason = (
+                _formation_param_surface(
+                    base_follow, final_margin_calibration, retune=True,
+                )
+            )
+            if calibrated_eligible:
+                calibrated_follow = {
+                    **base_follow, **calibrated_params,
+                    "AMBIGUOUS_PATH_MODE": "liquidate",
+                }
+                final_margin_calibration_applied = (
+                    auto_tune._local_surface_marker(calibrated_follow)
+                    != auto_tune._local_surface_marker(fixed_follow)
+                )
+                tuned_params = calibrated_params
+                fixed_follow = calibrated_follow
+                tune_reason = (
+                    "final_membership_margin_calibrated"
+                    if final_margin_calibration_applied
+                    else "final_membership_margin_baseline_retained"
+                )
+        strict_path_context.clear()
+        tune_fill_context.clear()
+        gc.collect()
+
+        if final_margin_calibration_applied:
+            row_by_addr = {
+                str(row.get("addr") or "").lower(): row
+                for row in tuned_candidate_rows if row.get("addr")
+            }
+            recheck_rows = [
+                row_by_addr[addr] for addr in exact_addrs if addr in row_by_addr
+            ]
+            (recheck_qualifications, recheck_scores, recheck_score_details,
+             recheck_profit_priorities, recheck_policies, recheck_metrics,
+             recheck_ranked, final_margin_recheck_audit,
+             recheck_rejected, effective_surface_hash) = replay_effective_surface(
+                fixed_follow, recheck_rows,
+            )
+            effective_qualifications.update(recheck_qualifications)
+            effective_scores.update(recheck_scores)
+            effective_score_details.update(recheck_score_details)
+            effective_profit_priorities.update(recheck_profit_priorities)
+            effective_policies.update(recheck_policies)
+            effective_metrics.update(recheck_metrics)
+            effective_ranked = list(recheck_ranked)
+            qualification_rejected = list(dict.fromkeys([
+                *qualification_rejected, *recheck_rejected,
+            ]))
+            effective_ranked.sort(key=lambda row: follow_score.follow_score_sort_key(
+                effective_metrics.get(row["addr"]) or {},
+                follow_score_value=effective_scores.get(row["addr"], 0.0),
+                addr=row["addr"],
+            ))
+            ordered = tuple(
+                row["addr"] for row in effective_ranked[:core_upper]
+            )
+            if not ordered:
+                return _explicit_empty_core_formation(
+                    tuned_candidate_rows,
+                    reason="final_margin_calibration_recheck_empty",
+                    tunePoolCount=len(tune_ordered),
+                    finalMarginCalibration=final_margin_calibration,
+                )
+
     membership_fill_context = {}
 
     def get_membership_window_fills():
@@ -4661,6 +4850,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "profitabilityBasis": PROFITABILITY_BASIS,
             "return30d": return_30d,
             "return7d": return_7d,
+            "tierEconomics": primary.get("tier_economics") or {},
+            "deploymentUtilization": auto_tune.deployment_utilization_summary(
+                primary
+            ),
             "closedNetPnl30d": primary_economics.get("closedPnl"),
             "openProfitReference30d": primary_economics.get("openProfitReference"),
             "openLoss30d": primary_economics.get("openLoss"),
@@ -4703,7 +4896,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-        required_count=0,
+        required_count=(len(ordered) if _margin_calibration_only else 0),
     )
     # Core membership is a strict prefix of the final profit-aligned score order. An arbitrary add/swap search
     # would turn the deterministic ranking contract into an overfit subset search.
@@ -4736,6 +4929,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "looMarginalNetPnl": loo_marginals,
             "nonpositiveLoo": nonpositive_loo,
             "profitConcentration": replay_summary.get("pnlConcentration") or {},
+            "tierEconomics": replay_summary.get("tierEconomics") or {},
+            "deploymentUtilization": replay_summary.get(
+                "deploymentUtilization"
+            ) or {},
         })
         robust_cache[key] = check
         return check
@@ -4822,6 +5019,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "utility": value.utility,
         "feasible": bool(value.feasible),
     } for value in (tune_search.evaluated if tune_search is not None else ()))
+    final_membership_summary = dict(membership_replay_cache.get(
+        tuple(sorted(chosen_addrs)),
+    ) or {})
     sample_resource_peak()
     membership_fill_context.clear()
     gc.collect()
@@ -4834,7 +5034,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "policies": effective_policies, "walletMetrics": effective_metrics,
         "replayParamsHash": effective_surface_hash,
         "search": {
-            "algorithm": "count_first_local_surface_v1", "initialCount": len(ordered),
+            "algorithm": (
+                "current_core_margin_calibration_v1"
+                if _margin_calibration_only else "count_first_local_surface_v2"
+            ), "initialCount": len(ordered),
             "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
@@ -4881,11 +5084,42 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "guardPromoted": chosen_run.get("guard_promoted"),
             "sharedSurfaceCount": int(chosen_run.get("shared_surface_count") or 0),
             "tierBreakoutProbe": chosen_run.get("breakout_tier"),
-            "quickReplayCount": int(chosen_run.get("quick_replay_count") or 0),
-            "expensiveFinalistCount": len(chosen_run.get("finalists") or ()),
+            "quickReplayCount": (
+                int(chosen_run.get("quick_replay_count") or 0)
+                + int(final_margin_calibration.get("quick_replay_count") or 0)
+            ),
+            "expensiveFinalistCount": (
+                len(chosen_run.get("finalists") or ())
+                + len(final_margin_calibration.get("finalists") or ())
+            ),
             "cacheHitCount": int(chosen_run.get("cache_hit_count") or 0)
                 + int(local_cache_stats.get("hits") or 0),
-            "tierEconomics": dict(chosen_run.get("tier_economics") or {}),
+            "initialTuneTierEconomics": dict(
+                chosen_run.get("tier_economics") or {}
+            ),
+            "tierEconomics": dict(
+                final_membership_summary.get("tierEconomics")
+                or final_margin_calibration.get("tier_economics")
+                or chosen_run.get("tier_economics")
+                or {}
+            ),
+            "finalDeploymentUtilization": dict(
+                final_membership_summary.get("deploymentUtilization")
+                or final_margin_calibration.get("deployment_utilization")
+                or {}
+            ),
+            "finalMarginCalibration": final_margin_calibration,
+            "finalMarginCalibrationApplied": final_margin_calibration_applied,
+            "finalMarginCalibrationRan": (
+                final_margin_calibration.get("status") != "skipped"
+            ),
+            "finalMarginCalibrationReferenceCount": calibration_reference_count,
+            "finalMarginCalibrationInputCount": pre_calibration_count,
+            "finalMarginRecheckRejectedCount": sum(
+                1 for row in final_margin_recheck_audit
+                if not row.get("passed")
+            ),
+            "finalMarginRecheckAdmission": final_margin_recheck_audit,
             "finalCountDrift": len(chosen_addrs) - int(
                 chosen_run.get("selected_count") or len(chosen_addrs)
             ),
@@ -4905,13 +5139,158 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "closureStable": True,
         },
     }
-    # Membership changes after the one tuned surface are confirmed by the strict shared-account replay
-    # already contained in ``result``. They never recursively start another parameter pool.
+    # A material post-qualification count drift receives the one bounded
+    # margin-only calibration above. It never recursively starts another
+    # parameter pool if the calibrated individual recheck removes a member.
     result["search"]["initialTunedInputCount"] = winning_count
     result["search"]["closureRounds"] = []
     result["search"]["closureStable"] = True
-    result["search"]["membershipConfirmedWithoutRetune"] = True
+    result["search"]["membershipConfirmedWithoutRetune"] = not (
+        final_margin_calibration_applied
+    )
+    result["search"]["membershipConfirmedAfterBoundedCalibration"] = bool(
+        final_margin_calibration_applied
+    )
     return result
+
+
+def calibrate_current_core_margins(db, *, stamp=None, apply=False) -> dict:
+    """Strictly calibrate first-open margins for the published Core, without changing membership.
+
+    This operational entry point intentionally reuses the same bounded final-membership calibration as a
+    new generation.  It never fetches wallets, searches counts, changes leverage/add axes, or replaces
+    ``follow_selection``.  Applying a changed surface and activating its immutable strategy revision happen
+    in one transaction after the exact current membership has passed individual and shared certification.
+    """
+    generation_id = selection.latest_published_generation(db)
+    if not generation_id:
+        raise RuntimeError("current_core_margin_calibration_requires_generation")
+    meta = db.execute(
+        "SELECT COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
+        "FROM scan_generation sg LEFT JOIN generation_market_manifest gmm "
+        "ON gmm.generation=sg.generation WHERE sg.generation=? "
+        "AND sg.status='published' AND sg.complete=1 AND sg.is_current=1",
+        (generation_id,),
+    ).fetchone()
+    now_ms = int(meta[0] or 0) if meta else 0
+    if now_ms <= 0:
+        raise RuntimeError("current_core_margin_calibration_asof_missing")
+    expected_core = tuple(dict.fromkeys(
+        str(addr or "").lower()
+        for addr in (selection.published_core_membership(db) or ()) if addr
+    ))
+    if not expected_core:
+        raise RuntimeError("current_core_margin_calibration_requires_core")
+    expected_revision = strategy_revision.active_revision_id(db)
+    stamp = stamp or now_iso()
+    formation = form_quality_prefix(
+        db, generation_id, stamp, now_ms,
+        retune=True,
+        retention_addrs=expected_core,
+        _fixed_membership_addrs=expected_core,
+        _margin_calibration_only=True,
+    )
+    selected = tuple(dict.fromkeys(
+        str(addr or "").lower()
+        for addr in (formation.get("selected") or ()) if addr
+    ))
+    if len(selected) != len(expected_core) or set(selected) != set(expected_core):
+        raise RuntimeError(
+            "current_core_margin_calibration_membership_not_certified:"
+            f"{len(expected_core)}:{len(selected)}"
+        )
+    search = dict(formation.get("search") or {})
+    calibration = dict(search.get("finalMarginCalibration") or {})
+    if calibration.get("status") != "ok":
+        raise RuntimeError(
+            "current_core_margin_calibration_failed:"
+            f"{calibration.get('reason') or 'unknown'}"
+        )
+    proposal = dict(formation.get("params") or {})
+    keys = (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+    before = params.load_follow(db)
+    changed = any(
+        abs(f(proposal.get(key)) - f(before.get(key))) > 1e-12
+        for key in keys
+    )
+    revision = expected_revision
+    if apply and changed:
+        # Replay evidence is intentionally committed incrementally for resume safety.  Start a fresh
+        # transaction for the only production mutation: params plus immutable active revision.
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        if selection.latest_published_generation(db) != generation_id:
+            db.rollback()
+            raise RuntimeError("current_core_margin_calibration_generation_changed")
+        current_core = tuple(dict.fromkeys(
+            str(addr or "").lower()
+            for addr in (selection.published_core_membership(db) or ()) if addr
+        ))
+        if set(current_core) != set(expected_core) or len(current_core) != len(expected_core):
+            db.rollback()
+            raise RuntimeError("current_core_margin_calibration_membership_changed")
+        current_follow = params.load_follow(db)
+        if any(
+            abs(f(current_follow.get(key)) - f(before.get(key))) > 1e-12
+            for key in keys
+        ):
+            db.rollback()
+            raise RuntimeError("current_core_margin_calibration_params_changed")
+        _apply_formation_params(db, formation, stamp)
+        active = strategy_revision.create_revision(
+            db,
+            generation_id,
+            source="current_core_margin_calibration",
+            parent_revision=expected_revision,
+            expected_active_revision=expected_revision,
+            validation={
+                "algorithm": "current_core_margin_calibration_v1",
+                "coreCount": len(expected_core),
+                "finalMarginCalibration": calibration,
+                "tierEconomics": search.get("tierEconomics") or {},
+                "deploymentUtilization": search.get("finalDeploymentUtilization") or {},
+                "resourcePeak": search.get("resourcePeak") or {},
+            },
+            reason="strict_current_core_open_margin_adjustment",
+            stamp=stamp,
+        )
+        revision = active["revision"]
+        pipeline_audit._insert_event(
+            db,
+            stamp=stamp,
+            source="current_core_margin_calibration",
+            stage="strategy_revision",
+            status="applied",
+            reason="strict_current_core_open_margin_adjustment",
+            payload={
+                "generation": generation_id,
+                "coreCount": len(expected_core),
+                "strategyRevision": revision,
+                "algorithm": "current_core_margin_calibration_v1",
+                "deploymentUtilization": search.get("finalDeploymentUtilization") or {},
+            },
+        )
+        db.commit()
+    _set_scan_progress(
+        db, state="idle", stage="current_core_margin_calibration_complete",
+        candidates_scanned=len(expected_core), candidates_total=len(expected_core),
+    )
+    db.commit()
+    return {
+        "status": "applied" if apply and changed else "unchanged" if apply else "validated",
+        "generation": generation_id,
+        "coreCount": len(expected_core),
+        "changed": changed,
+        "strategyRevision": revision,
+        "algorithm": "current_core_margin_calibration_v1",
+        "params": {key: proposal.get(key) for key in keys},
+        "baselineParams": {key: before.get(key) for key in keys},
+        "deploymentUtilization": search.get("finalDeploymentUtilization") or {},
+        "tierEconomics": search.get("tierEconomics") or {},
+        "quickReplayCount": calibration.get("quick_replay_count"),
+        "strictFinalistCount": len(calibration.get("finalists") or ()),
+        "resourcePeak": search.get("resourcePeak") or {},
+    }
 
 
 def _apply_formation_params(db, formation, stamp) -> bool:
@@ -5878,6 +6257,22 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             "actionableOpenRate30d": f(final_metrics.actionable_open_rate),
             "paperActionableOpenRate30d": f(final_metrics.actionable_open_rate),
             "capacityFit30d": f(final_metrics.capacity_fit),
+            "executionCapacityFit30d": f(
+                final_result.get("execution_capacity_fit")
+                if final_result.get("execution_capacity_fit") is not None
+                else final_metrics.capacity_fit
+            ),
+            "cashCongestionFit30d": f(
+                final_result.get("cash_congestion_fit")
+                if final_result.get("cash_congestion_fit") is not None else 1.0
+            ),
+            "openConstraintCounts30d": dict(
+                final_result.get("open_constraint_counts") or {}
+            ),
+            "tierEconomics": dict(final_result.get("tier_economics") or {}),
+            "deploymentUtilization": auto_tune.deployment_utilization_summary(
+                final_result
+            ),
             "pricePathCoverage30d": f(final_result.get("price_path_coverage")),
             "maintenanceMarginCoverage30d": f(
                 final_result.get("maintenance_margin_coverage")

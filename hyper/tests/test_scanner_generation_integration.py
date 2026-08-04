@@ -179,10 +179,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
-    def test_core_formation_searches_count_on_active_surface_then_tunes_once(self):
+    def test_core_formation_searches_once_then_bounds_final_margin_calibration(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertEqual(source.count("auto_tune.tune_local_prefix_surfaces("), 1)
+        self.assertEqual(
+            source.count("auto_tune.tune_final_membership_margin_surface("), 1,
+        )
         self.assertNotIn("auto_tune.maybe_tune_margins(", source)
         self.assertIn("search_quality_prefix(", source)
         self.assertIn("current_surface_evaluate", source)
@@ -208,6 +211,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("_retune_exact_membership_surface(", source)
         self.assertNotIn("core_formation_membership_parameter_not_converged", source)
         self.assertIn('"membershipConfirmedWithoutRetune"', source)
+        self.assertIn('"membershipConfirmedAfterBoundedCalibration"', source)
+        self.assertIn('pre_calibration_count != calibration_reference_count', source)
+        self.assertIn('final_membership_margin_calibration_v1', source)
         self.assertEqual(scanner.config.CORE_PREFIX_EXHAUSTIVE_MAX_N, 0)
         self.assertFalse(scanner.config.CORE_FORMATION_ENABLE_LOO)
         self.assertIn(
@@ -217,9 +223,92 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("_load_formation_prefix_evidence(", source)
         self.assertIn("_store_formation_prefix_evidence(", source)
         for validation_mode in (
-            "quick:", "strict-finalist:", "individual:", "final-shared:",
+            'cache_label="quick"', 'cache_label="strict-finalist"', "individual:",
+            'cache_label="final-margin-quick"',
+            'cache_label="strict-final-membership-margin"',
+            "final-shared:",
         ):
             self.assertIn(validation_mode, source)
+
+    def test_current_core_margin_calibration_keeps_membership_fixed_and_activates_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,profile_complete) "
+                "VALUES ('g-current','published',1,1,1,'2026-01-01T00:00:00Z',1)"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selected_at,selection_rank) VALUES (?,?,?,?,?,?)",
+                [
+                    ("g-current", "0xaaa", "core", 1, "2026-01-01T00:01:00Z", 1),
+                    ("g-current", "0xbbb", "core", 1, "2026-01-01T00:01:00Z", 2),
+                ],
+            )
+            db.commit()
+            follow = params.load_follow(db)
+            proposal = {
+                key: follow[key]
+                for key in (*scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS)
+            }
+            proposal["STABLE_MARGIN_PCT"] = float(proposal["STABLE_MARGIN_PCT"]) + .01
+            formation = {
+                "selected": ("0xaaa", "0xbbb"),
+                "params": proposal,
+                "search": {
+                    "finalMarginCalibration": {
+                        "status": "ok", "quick_replay_count": 4,
+                        "finalists": [{"eligible": True}],
+                    },
+                    "finalDeploymentUtilization": {"timeWeightedAvgDeployPct": 74.0},
+                    "tierEconomics": {}, "resourcePeak": {},
+                },
+            }
+
+            with patch.object(scanner, "form_quality_prefix", return_value=formation) as form, \
+                    patch.object(scanner.strategy_revision, "active_revision_id", return_value="r0"), \
+                    patch.object(scanner.strategy_revision, "create_revision", return_value={"revision": "r1"}) as create, \
+                    patch.object(scanner, "_apply_formation_params", return_value=True) as apply_params:
+                result = scanner.calibrate_current_core_margins(db, apply=True)
+
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(result["coreCount"], 2)
+            self.assertEqual(result["strategyRevision"], "r1")
+            self.assertEqual(
+                form.call_args.kwargs["_fixed_membership_addrs"],
+                ("0xaaa", "0xbbb"),
+            )
+            self.assertTrue(form.call_args.kwargs["_margin_calibration_only"])
+            apply_params.assert_called_once()
+            create.assert_called_once()
+
+    def test_current_core_margin_calibration_rejects_member_loss_before_apply(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,profile_complete) "
+                "VALUES ('g-current','published',1,1,1,'2026-01-01T00:00:00Z',1)"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selected_at,selection_rank) VALUES (?,?,?,?,?,?)",
+                [
+                    ("g-current", "0xaaa", "core", 1, "2026-01-01T00:01:00Z", 1),
+                    ("g-current", "0xbbb", "core", 1, "2026-01-01T00:01:00Z", 2),
+                ],
+            )
+            db.commit()
+            with patch.object(
+                scanner, "form_quality_prefix",
+                return_value={"selected": ("0xaaa",), "params": {}, "search": {}},
+            ), patch.object(scanner, "_apply_formation_params") as apply_params:
+                with self.assertRaisesRegex(
+                    RuntimeError, "membership_not_certified:2:1",
+                ):
+                    scanner.calibrate_current_core_margins(db, apply=True)
+            apply_params.assert_not_called()
 
     def test_compact_prefix_evidence_round_trips_without_member_addresses(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1029,7 +1118,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             model_versions, {scanner.pre_strict.SELECTION_MODEL_VERSION},
         )
 
-    def test_formation_runs_one_checkpointed_individual_strict_surface(self):
+    def test_formation_rechecks_only_final_members_when_margin_surface_changes(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertNotIn("_rank_formation_candidates_for_surface", source)
@@ -1039,7 +1128,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("tune_ranked = ranked_candidates[:core_upper]", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
         self.assertIn('"finalSurfaceUniverseCount": len(tuned_candidate_rows)', source)
-        self.assertEqual(source.count("follow_score.follow_score_sort_key("), 1)
+        self.assertEqual(source.count("follow_score.follow_score_sort_key("), 2)
+        self.assertIn("recheck_rows", source)
+        self.assertIn("final_margin_calibration_applied", source)
+        self.assertNotIn("for round_index in range(1, max_rounds + 1)", source)
 
     def test_cached_strict_formation_releases_writer_lock_between_wallets(self):
         source = inspect.getsource(scanner.form_quality_prefix)
@@ -1076,7 +1168,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertLess(score_order, tier_order)
         self.assertLess(tier_order, profit_order)
 
-    def test_final_membership_is_strictly_confirmed_without_recursive_retune(self):
+    def test_final_membership_uses_bounded_margin_calibration_not_recursive_full_tune(self):
         source = inspect.getsource(scanner.form_quality_prefix)
         helper = inspect.getsource(scanner._retune_exact_membership_surface)
 
@@ -1085,7 +1177,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("CORE_FORMATION_CLOSURE_MAX_ROUNDS", source)
         self.assertNotIn("for round_index in range(1, max_rounds + 1)", source)
         self.assertIn('"membershipConfirmedWithoutRetune"', source)
+        self.assertIn('"membershipConfirmedAfterBoundedCalibration"', source)
         self.assertEqual(source.count("auto_tune.tune_local_prefix_surfaces("), 1)
+        self.assertEqual(
+            source.count("auto_tune.tune_final_membership_margin_surface("), 1,
+        )
         self.assertNotIn("auto_tune.maybe_tune_margins(", source)
         # The helper remains available only for explicit operator repair/optimization paths.
         self.assertIn('addrs_override=list(ordered_addrs)', helper)

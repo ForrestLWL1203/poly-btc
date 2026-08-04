@@ -92,19 +92,15 @@ def _evaluate_walk_forward_surface_process(overrides):
 
 
 def margin_add_capacity_ceilings(follow: dict) -> dict[str, float]:
-    """Per-tier margin ceilings that preserve four executable smart-add slots."""
+    """Per-tier margin ceilings that preserve the configured smart-add slots."""
     margin_equity_pct = max(1e-9, float(
         follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     ))
-    min_add_pct = max(0.0, float(
-        follow.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
-    ))
-    add_capacity = max(1, int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4))
+    add_capacity = max(1, int(getattr(config, "SMART_ADD_MIN_CAPACITY", 2) or 2))
     return {
-        margin_key: max(0.0, (
-            float(follow.get(cap_key, getattr(config, cap_key)))
-            - min_add_pct * margin_equity_pct
-        ) / (add_capacity * margin_equity_pct))
+        margin_key: max(0.0, float(
+            follow.get(cap_key, getattr(config, cap_key))
+        ) / ((add_capacity + 1) * margin_equity_pct))
         for margin_key, cap_key in zip(MARGIN_KEYS, COIN_CAP_KEYS)
     }
 
@@ -1034,7 +1030,7 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
         ),
         "add": {key: f(follow.get(key)) for key in ADD_TUNE_KEYS},
         "smartAddCapacity": {
-            "reservedAdds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4),
+            "reservedAdds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 2) or 2),
             "marginCeilings": margin_add_capacity_ceilings(follow),
         },
     }
@@ -1343,7 +1339,9 @@ def _compact_backtest(result: dict) -> dict:
         "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
         "body_after_top3_median_pnl",
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",
-        "capacity_open_fit", "master_leverage_coverage", "master_leverage_known",
+        "capacity_open_fit", "execution_capacity_fit", "cash_congestion_fit",
+        "open_constraint_counts", "open_constraint_fit",
+        "master_leverage_coverage", "master_leverage_known",
         "master_leverage_missing", "price_path_coverage", "model_coverage", "max_drawdown",
         "maintenance_margin_coverage", "maintenance_margin_known", "maintenance_margin_missing",
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
@@ -1884,10 +1882,10 @@ def _local_complete_surface(follow: dict, surface: dict | None = None) -> dict:
 def _local_breakout_margin_surface(
     follow: dict, base: dict, tier_economics: dict | None,
 ) -> tuple[dict | None, str | None]:
-    """Offer one evidence-backed probe beyond the four-add-safe research ceiling.
+    """Offer one evidence-backed probe beyond the reserved-add-safe research ceiling.
 
     The exchange/account coin cap remains the hard risk boundary. This probe merely lets a profitable,
-    signal-heavy but chronically under-deployed tier prove that reserving four future adds is too conservative.
+    signal-heavy but chronically under-deployed tier prove that reserving future adds is too conservative.
     It never creates more than one extra surface and still requires normal strict portfolio validation.
     """
     economics = dict(tier_economics or {})
@@ -1962,6 +1960,172 @@ def local_shared_margin_surfaces(
     for surface in surfaces:
         unique.setdefault(_local_surface_marker(surface), surface)
     return list(unique.values())[:9]
+
+
+def deployment_utilization_summary(result: dict | None) -> dict:
+    """Return compact, correctly-labelled deployment telemetry from one replay.
+
+    ``avg_deploy_pct`` is sampled at portfolio events and remains useful as a
+    compatibility metric.  Tier economics are time weighted; because every
+    deployment sample records all three tiers at the same timestamp, summing
+    their averages yields the account's time-weighted margin deployment.
+    """
+    result = dict(result or {})
+    economics = dict(result.get("tier_economics") or {})
+    tier_average = {
+        tier: float((economics.get(tier) or {}).get("avgDeployPct") or 0.0)
+        for tier in ("stable", "mid", "high")
+    }
+    return {
+        "timeWeightedAvgDeployPct": sum(tier_average.values()),
+        "eventSampleAvgDeployPct": float(result.get("avg_deploy_pct") or 0.0),
+        "peakDeployPct": float(result.get("peak_deploy_pct") or 0.0),
+        "tierTimeWeightedAvgDeployPct": tier_average,
+    }
+
+
+def final_membership_margin_surfaces(
+    follow: dict, base_surface: dict,
+) -> list[dict]:
+    """Bounded upward probes for a smaller post-qualification membership.
+
+    The first local search already tested contractions, leverage and add axes.
+    If individual strict qualification later removes wallets, the remaining
+    set needs one chance to prove that the inherited first-open margins are too
+    small.  Baseline is always retained as the safe fallback; the other eight
+    surfaces are only 15%/30% per-tier and global expansions.
+    """
+    base = _local_complete_surface(follow, base_surface)
+    sizing = enforce_margin_add_capacity(base, follow)
+    ceilings = margin_add_capacity_ceilings(follow)
+    surfaces = [dict(base)]
+    for key in MARGIN_KEYS:
+        for factor in (1.15, 1.30):
+            proposal = dict(base)
+            proposal[key] = min(ceilings[key], float(sizing[key]) * factor)
+            surfaces.append(proposal)
+    for factor in (1.15, 1.30):
+        proposal = dict(base)
+        for key in MARGIN_KEYS:
+            proposal[key] = min(ceilings[key], float(sizing[key]) * factor)
+        surfaces.append(proposal)
+    unique = {}
+    for surface in surfaces:
+        unique.setdefault(_local_surface_marker(surface), surface)
+    return list(unique.values())[:9]
+
+
+def tune_final_membership_margin_surface(
+    *,
+    follow: dict,
+    base_surface: dict,
+    evaluate: Callable[[dict, str], dict],
+    validate: Callable[[dict], dict] | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
+    """Calibrate first-open margins once for the exact final qualified set.
+
+    This is deliberately not another general tuner: it does not search wallet
+    counts, leverage, add parameters or arbitrary subsets.  At most nine quick
+    margin surfaces and three strict finalists are evaluated, then the caller
+    performs the one bounded individual recheck required by the new surface.
+    """
+    base = _local_complete_surface(follow, base_surface)
+    cache = {}
+
+    def run(surface: dict, stage: str) -> dict:
+        surface = _local_complete_surface(follow, surface)
+        marker = _local_surface_marker(surface)
+        if marker not in cache:
+            row = dict(evaluate(surface, stage) or {})
+            row.update(surface=surface, stage=stage)
+            cache[marker] = row
+            if progress:
+                progress(stage, len(cache), 1)
+        return cache[marker]
+
+    def rank(row: dict) -> tuple:
+        deployment = dict(row.get("deploymentUtilization") or {})
+        return (
+            int(bool(row.get("feasible"))),
+            float(row.get("netPnl") or 0.0),
+            -int(row.get("liquidations") or 0),
+            float(row.get("capacityFit") or 0.0),
+            float(row.get("openRate") or 0.0),
+            float(row.get("addCaptureRate") or 0.0),
+            float(deployment.get("timeWeightedAvgDeployPct") or 0.0),
+            -sum(
+                abs(float(row["surface"][key]) - float(base[key]))
+                for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+            ),
+        )
+
+    rows = [
+        run(surface, "final_membership_margin_calibration")
+        for surface in final_membership_margin_surfaces(follow, base)
+    ]
+    strict_candidates = []
+    seen = set()
+    for row in sorted(rows, key=rank, reverse=True):
+        marker = _local_surface_marker(row["surface"])
+        if marker in seen:
+            continue
+        seen.add(marker)
+        strict_candidates.append(row)
+        if len(strict_candidates) >= 2:
+            break
+    base_marker = _local_surface_marker(base)
+    if base_marker not in seen:
+        strict_candidates.append(run(base, "final_membership_baseline_control"))
+    strict_candidates = strict_candidates[:3]
+    strict_rows = []
+    for row in strict_candidates:
+        validation = dict(validate(row["surface"]) or {}) if validate else {
+            "eligible": bool(row.get("feasible")),
+        }
+        strict_rows.append({**row, "validation": validation})
+    finalists = [{
+        "params": dict(row["surface"]),
+        "netPnl": float(row.get("netPnl") or 0.0),
+        "feasible": bool(row.get("feasible")),
+        "liquidations": int(row.get("liquidations") or 0),
+        "openRate": float(row.get("openRate") or 0.0),
+        "capacityFit": float(row.get("capacityFit") or 0.0),
+        "tierEconomics": dict(row.get("tierEconomics") or {}),
+        "deploymentUtilization": dict(row.get("deploymentUtilization") or {}),
+        "validation": dict(row.get("validation") or {}),
+        "eligible": bool((row.get("validation") or {}).get("eligible")),
+    } for row in strict_rows]
+    eligible = [
+        row for row in strict_rows
+        if (row.get("validation") or {}).get("eligible")
+    ]
+    if not eligible:
+        return {
+            "status": "failed", "eligible_to_apply": False,
+            "reason": "no_validated_final_membership_margin",
+            "proposal": base, "baseline_proposal": base,
+            "search_profile": "final_membership_margin",
+            "algorithm": "final_membership_margin_calibration_v1",
+            "quick_replay_count": len(cache), "finalists": finalists,
+        }
+    winner = max(eligible, key=rank)
+    return {
+        "status": "ok", "eligible_to_apply": True,
+        "proposal": dict(winner["surface"]),
+        "params": {key: winner["surface"][key] for key in TUNE_KEYS},
+        "add_params": {key: winner["surface"][key] for key in ADD_TUNE_KEYS},
+        "baseline_proposal": base,
+        "validation": dict(winner.get("validation") or {}),
+        "search_profile": "final_membership_margin",
+        "algorithm": "final_membership_margin_calibration_v1",
+        "quick_replay_count": len(cache),
+        "tier_economics": dict(winner.get("tierEconomics") or {}),
+        "deployment_utilization": dict(
+            winner.get("deploymentUtilization") or {}
+        ),
+        "finalists": finalists,
+    }
 
 
 def _nearest_axis_neighbours(values, current: float) -> tuple[float | None, float | None]:
@@ -3094,7 +3258,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "selected_mult": None,
         "margins": selected_margins,
         "smart_add_capacity": {
-            "reserved_adds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4),
+            "reserved_adds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 2) or 2),
             "margin_ceilings": margin_add_capacity_ceilings(follow),
         },
         "lev_caps": selected.get("lev_caps"),
