@@ -155,6 +155,28 @@ class StorageGuardTests(unittest.TestCase):
             self.db.execute("SELECT COUNT(*) FROM leaderboard_staging").fetchone()[0], 2,
         )
 
+    def test_dry_run_counts_legacy_audit_owned_by_superseded_generation(self):
+        stale = self._generation(1, source="scan", status="leaderboard_validated")
+        started_at = self.db.execute(
+            "SELECT started_at FROM scan_generation WHERE generation=?", (stale,),
+        ).fetchone()[0]
+        current = self._generation(2, source="scan", current=1)
+        self.db.execute(
+            "INSERT INTO pipeline_audit(stamp,source,stage,created_at) VALUES (?,?,?,?)",
+            (started_at, "scan", "profile", started_at),
+        )
+        self.db.commit()
+
+        result = storage_guard.run(
+            self.db, self.db_path, now_epoch=self.now, dry_run=True,
+            disk_usage=(10_000, 2_000, 8_000), db_main_bytes=100, db_wal_bytes=10,
+        )
+
+        self.assertEqual(result["retention"]["deletedPipelineRows"], 1)
+        self.assertEqual(result["retention"]["protectedGenerations"]["current"], current)
+        self.assertEqual(result["retention"]["supersededGenerations"], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pipeline_audit").fetchone()[0], 1)
+
     def test_post_publish_cleanup_preserves_latest_full_cache_and_trade_ledgers(self):
         base = self._generation(1, source="scan")
         current = self._generation(2, current=1)

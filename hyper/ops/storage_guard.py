@@ -248,16 +248,17 @@ def _prune_pipeline_workspace(
     active = tuple(protected["nonterminal"])
     if active:
         owned = f"generation IS NOT NULL AND generation NOT IN ({_marks(active)})"
-        args: tuple = active
+        legacy = (
+            f"generation IS NULL AND stamp NOT IN ("
+            f"SELECT started_at FROM scan_generation WHERE generation IN ({_marks(active)}))"
+        )
+        args: tuple = (*active, *active)
     else:
         owned, args = "generation IS NOT NULL", ()
-    # Legacy rows have no explicit owner. Exact started_at equality is the only
-    # safe old association and protects an interrupted pre-migration scan.
-    legacy = (
-        "generation IS NULL AND NOT EXISTS ("
-        "SELECT 1 FROM scan_generation sg WHERE sg.started_at=pipeline_audit.stamp "
-        "AND sg.status NOT IN ('published','failed'))"
-    )
+        legacy = "generation IS NULL"
+    # Legacy rows have no explicit owner. Protect only exact started_at matches
+    # for generations that the lifecycle classifier has deemed resumable;
+    # superseded rows may still carry a nonterminal status during a dry-run.
     return _delete_batches(
         db, "pipeline_audit", f"(({owned}) OR ({legacy}))", args, dry_run=dry_run,
     )
