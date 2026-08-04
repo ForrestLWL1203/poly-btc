@@ -783,16 +783,18 @@ temporary databases out of commits.
 
 ## Data and audit retention
 
-Raw fill cache is bounded to the configured profile window plus warm-up. `wallet_registry`, generation history,
-selection history, and compact selection/risk/tuner audit are durable decision history. High-volume per-wallet
-`pipeline_audit` stages (`official_roi`, `perp_prefilter`, `profile`, `rough_copy`) retain 90 days.
-`leaderboard_staging` retains the current generation, the latest published complete scan generation, every
-unfinished generation, and the latest 30 generations overall. Live fill dedup data, account snapshots, and
-storage-health samples have explicit TTLs.
+Raw fill cache is bounded to the configured profile window plus warm-up. `pipeline_audit` and formation-prefix
+rows are resumable generation workspace: they survive running/resource-deferred work but are deleted after
+atomic publication or terminal failure. Reusable generation cache is limited to the current published
+generation, latest complete full-scan generation and every unfinished generation; only the latest full scan
+keeps pre-strict Challenger evidence. Observer account snapshots and normal reconcile checkpoints retain seven
+days, anomalous checkpoints retain 90 days, while Paper/Live positions, actions and signed-order/fill ledgers
+remain durable.
 
 Both scheduled scanner services run `storage-maintenance` through `ExecStopPost`, so 37-day fill expiry,
 blacklist cleanup and health recording still run after a failed scan. Deletes use indexed address batches and
-small commits. The guard never runs `VACUUM`; after its own transactions close it performs PASSIVE checkpoint,
+small commits. `storage-maintenance --dry-run` reports exact protected generations and planned deletes without
+writing. The guard never runs `VACUUM`; after its own transactions close it performs PASSIVE checkpoint,
 records busy/log/checkpointed frames, and truncates only when every frame is checkpointed and no reader blocks
 the reset. Connections cap the reusable WAL file at 64 MiB. Warning thresholds are 70% disk use, over 1 GB
-normalized database growth per 24 hours, or a WAL over 512 MB; disk use at 85% is critical.
+active-data growth per 24 hours, or a WAL over 512 MB; disk use at 85% is critical.

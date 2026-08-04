@@ -705,6 +705,7 @@ CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC)
 --   tuner_finalize    one synchronous formation/replay summary
 CREATE TABLE IF NOT EXISTS pipeline_audit (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation    TEXT,
     stamp         TEXT,
     source        TEXT,
     stage         TEXT,
@@ -741,6 +742,7 @@ CREATE TABLE IF NOT EXISTS storage_guard_run (
     db_growth_24h_bytes         INTEGER,
     db_page_bytes               INTEGER NOT NULL,
     db_freelist_bytes           INTEGER NOT NULL,
+    db_active_bytes             INTEGER,
     pipeline_audit_rows         INTEGER NOT NULL,
     staging_generation_count    INTEGER NOT NULL,
     deleted_pipeline_rows       INTEGER NOT NULL DEFAULT 0,
@@ -835,6 +837,8 @@ CREATE INDEX IF NOT EXISTS idx_execution_signal_pending
     ON execution_signal(mode, session_id, state, next_attempt_ms, signal_id);
 CREATE INDEX IF NOT EXISTS idx_execution_signal_episode_order
     ON execution_signal(mode, session_id, addr, coin, source_time_ms, signal_id);
+CREATE INDEX IF NOT EXISTS idx_execution_signal_status_completed
+    ON execution_signal(state, completed_at);
 
 -- Per-session source cursor.  Live restarts resume from the last successfully
 -- journalled API window instead of resetting every target to process start.
@@ -1039,6 +1043,8 @@ CREATE TABLE IF NOT EXISTS commands (
 );
 CREATE INDEX IF NOT EXISTS idx_cmd_status ON commands(status);
 CREATE INDEX IF NOT EXISTS idx_cmd_status_type_id ON commands(status, type, id);
+CREATE INDEX IF NOT EXISTS idx_commands_status_created
+    ON commands(status, created_at);
 
 -- Liveness + state machine for the two background processes. Each upserts its own row per heartbeat;
 -- a stale heartbeat_at (vs now) signals a dead process for self-heal / UI "stale" badge.
@@ -1362,6 +1368,8 @@ CREATE TABLE IF NOT EXISTS execution_account_snapshot (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_account_session_time
     ON execution_account_snapshot(session_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_execution_account_observed_at
+    ON execution_account_snapshot(observed_at);
 
 CREATE TABLE IF NOT EXISTS execution_reconcile_checkpoint (
     checkpoint_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1377,6 +1385,8 @@ CREATE TABLE IF NOT EXISTS execution_reconcile_checkpoint (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_reconcile_session
     ON execution_reconcile_checkpoint(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_reconcile_status_created
+    ON execution_reconcile_checkpoint(status, created_at);
 
 """
 
@@ -1384,6 +1394,8 @@ CREATE INDEX IF NOT EXISTS idx_execution_reconcile_session
 # Non-destructive column adds for EXISTING DBs (CREATE IF NOT EXISTS won't add columns to a table that
 # already exists). Idempotent: on a fresh DB the column is already in the CREATE → ALTER errors → ignored.
 _MIGRATIONS = (
+    "ALTER TABLE pipeline_audit ADD COLUMN generation TEXT",
+    "ALTER TABLE storage_guard_run ADD COLUMN db_active_bytes INTEGER",
     "ALTER TABLE profile ADD COLUMN market_type TEXT",
     "ALTER TABLE profile ADD COLUMN crypto_frac REAL DEFAULT 1",
     "ALTER TABLE watchlist ADD COLUMN market_type TEXT",
@@ -1732,6 +1744,11 @@ def _apply_migrations(db: sqlite3.Connection) -> None:
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_auto_tune_runs_generation "
             "ON auto_tune_runs(generation, created_at DESC, id DESC)"
+        )
+    if "pipeline_audit" in tables:
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pipeline_audit_generation_stage_id "
+            "ON pipeline_audit(generation, stage, id DESC)"
         )
 
 

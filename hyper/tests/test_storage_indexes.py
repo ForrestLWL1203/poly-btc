@@ -7,6 +7,28 @@ from hyper import storage
 
 
 class StorageIndexTests(unittest.TestCase):
+    def test_legacy_pipeline_table_gains_generation_before_generation_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "hl.db")
+            legacy = sqlite3.connect(path)
+            legacy.execute(
+                "CREATE TABLE pipeline_audit ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,stamp TEXT,source TEXT,stage TEXT,addr TEXT,"
+                "rank INTEGER,status TEXT,reason TEXT,raw_score REAL,follow_score REAL,"
+                "payload_json TEXT,created_at TEXT)"
+            )
+            legacy.commit()
+            legacy.close()
+
+            db = storage.connect(path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(pipeline_audit)")}
+            indexes = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )}
+            self.assertIn("generation", columns)
+            self.assertIn("idx_pipeline_audit_generation_stage_id", indexes)
+            db.close()
+
     def test_existing_maker_shadow_tables_and_param_are_retired(self):
         with tempfile.TemporaryDirectory() as td:
             path = str(Path(td) / "hl.db")
@@ -61,6 +83,7 @@ class StorageIndexTests(unittest.TestCase):
             "idx_pipeline_audit_stamp_source_stage_id",
             "idx_pipeline_audit_stage_id",
             "idx_pipeline_audit_addr_id",
+            "idx_pipeline_audit_generation_stage_id",
             "idx_wallet_risk_event_addr_type",
             "idx_cp_status_opened",
             "idx_cp_closed_closed_at",
@@ -69,6 +92,10 @@ class StorageIndexTests(unittest.TestCase):
             "idx_cp_side_status_opened",
             "idx_ca_pos_action_ts",
             "idx_cmd_status_type_id",
+            "idx_commands_status_created",
+            "idx_execution_signal_status_completed",
+            "idx_execution_account_observed_at",
+            "idx_execution_reconcile_status_created",
         }
         self.assertTrue(expected.issubset(names), expected - names)
 

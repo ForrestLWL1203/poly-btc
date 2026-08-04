@@ -39,6 +39,7 @@ from hyper.copy.sector import parse_json_obj, policy_allows_coin
 from hyper.market import rest, volatility, ws
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from hyper.selection import state as selection, strategy_revision, wallet_risk
+from hyper.ops import storage_guard
 from hyper.util import f, now_iso, now_ms
 from .liquidity import assess_order_book
 from .live_executor import LiveExecutor
@@ -1883,24 +1884,12 @@ class Observer:
             await asyncio.sleep(15)
 
     async def prune_live_fills(self):
-        """Keep live_fills bounded on disk. tid-dedup only needs the last POLL_OVERLAP_MS of history
-        (the cursor re-fetches only a few seconds back), while terminal Live handling is independently
-        recorded in execution_signal. The rest is receipt audit. Runs at startup then every 6h."""
+        """Bound replaceable execution diagnostics; business ledgers are never pruned."""
         while not self.stop:
-            cutoff = now_ms() - config.LIVE_FILLS_RETENTION_DAYS * 86400_000
-            n = self.db.execute("DELETE FROM live_fills WHERE time_ms < ?", (cutoff,)).rowcount
-            stats_cutoff = time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ",
-                time.gmtime(time.time() - config.ACCOUNT_STATS_RETENTION_DAYS * 86400),
-            )
-            self.db.execute("DELETE FROM account_stats WHERE ts < ?", (stats_cutoff,))
-            self.db.execute(
-                "DELETE FROM live_policy_skip WHERE last_ms < ?",
-                (now_ms() - 90 * 86_400_000,),
-            )
-            self.db.commit()
-            if n:
-                _log(f"pruned {n} live_fills older than {config.LIVE_FILLS_RETENTION_DAYS}d")
+            removed = storage_guard.prune_execution_transients(self.db)
+            total = sum(int(value or 0) for value in removed.values())
+            if total:
+                _log(f"pruned {total} expired execution diagnostics")
             await asyncio.sleep(6 * 3600)
 
     # -- dashboard control plane (command channel) ---------------------------

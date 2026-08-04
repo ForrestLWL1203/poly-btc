@@ -1,9 +1,9 @@
-"""Small audit helpers for the scanner/follow pipeline.
+"""Generation-scoped, resumable workspace for discovery decisions.
 
-The tables being audited (`profile`, `watchlist`, `params`, `auto_tune_runs`)
-remain the source of truth. This module snapshots the decision trail so the
-dashboard/operator can answer "why did this wallet enter/leave/follow?" after a
-scan without reverse-engineering transient logs.
+The rows in :mod:`pipeline_audit` are deliberately transient.  They keep an
+in-flight generation resumable and power live scan progress, but the published
+selection, strategy revision and compact generation metrics are authoritative.
+Storage maintenance removes this detail after publication or terminal failure.
 """
 from __future__ import annotations
 
@@ -18,23 +18,50 @@ from hyper.selection.follow_score import evaluate_follow_eligibility
 from hyper.util import now_iso
 
 
+_ACTIVE_GENERATION: str | None = None
+
+
+def set_generation(generation: str | None) -> None:
+    """Bind this scanner process (including its worker threads) to one generation.
+
+    The scanner lock permits only one discovery generation per process/DB, so a
+    process-wide binding is both simpler and safer than thread-local context.
+    """
+    global _ACTIVE_GENERATION
+    _ACTIVE_GENERATION = str(generation) if generation else None
+
+
 def _json(obj) -> str:
     return json.dumps(obj or {}, ensure_ascii=False, sort_keys=True, default=float)
 
 
 def _delete_stage(db: sqlite3.Connection, stamp: str, source: str, stage: str) -> None:
-    db.execute("DELETE FROM pipeline_audit WHERE stamp=? AND source=? AND stage=?", (stamp, source, stage))
+    generation = _ACTIVE_GENERATION
+    if generation:
+        db.execute(
+            "DELETE FROM pipeline_audit WHERE generation=? AND stamp=? AND source=? AND stage=?",
+            (generation, stamp, source, stage),
+        )
+    else:
+        db.execute(
+            "DELETE FROM pipeline_audit WHERE stamp=? AND source=? AND stage=?",
+            (stamp, source, stage),
+        )
 
 
 def _insert_event(db: sqlite3.Connection, *, stamp: str, source: str, stage: str, addr: str | None = None,
                   rank: int | None = None, status: str | None = None, reason: str | None = None,
                   raw_score: float | None = None, follow_score: float | None = None,
-                  payload: dict | None = None) -> None:
+                  payload: dict | None = None, generation: str | None = None) -> None:
+    generation = generation or _ACTIVE_GENERATION
+    if not generation and isinstance(payload, dict):
+        generation = payload.get("generation")
     db.execute(
         "INSERT INTO pipeline_audit "
-        "(stamp,source,stage,addr,rank,status,reason,raw_score,follow_score,payload_json,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "(generation,stamp,source,stage,addr,rank,status,reason,raw_score,follow_score,payload_json,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
+            str(generation) if generation else None,
             stamp,
             source,
             stage,

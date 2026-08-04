@@ -44,7 +44,7 @@ from hyper.copy.sector import (
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.market import generation_market, price_path, rest
 from hyper.execution.mode import selected_book
-from hyper.ops import resource_guard
+from hyper.ops import resource_guard, storage_guard
 from hyper.selection import (
     auto_tune,
     core_retention,
@@ -76,6 +76,25 @@ from hyper.util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 _STRICT_REPLAY_PROCESS_CONTEXT = {}
 _SCANNER_HEARTBEAT_INTERVAL_S = 60.0
+
+
+def _post_publish_storage_cleanup(db, generation_id: str) -> None:
+    """Compact only after publication is durable; later maintenance retries failures."""
+    try:
+        result = storage_guard.post_publish_cleanup(db, generation_id)
+        removed = int(result.get("pipelineAudit") or 0) + sum(
+            int(value or 0) for value in (result.get("generationData") or {}).values()
+        )
+        if removed:
+            print(
+                f"post-publish storage cleanup: generation={generation_id} rows={removed}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - the published generation remains authoritative
+        db.rollback()
+        print(
+            f"post-publish storage cleanup deferred: {str(exc)[:240]}", flush=True,
+        )
 
 
 @contextmanager
@@ -6881,6 +6900,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     """
     current = selection.latest_published_generation(db)
     generation_id = generation_id or current
+    pipeline_audit.set_generation(generation_id)
     if not current or generation_id != current:
         raise RuntimeError("selection_repair_requires_current_generation")
     meta = db.execute(
@@ -7127,6 +7147,7 @@ def optimize_published_generation(
 ) -> dict:
     """Re-form one published generation with the synchronous quality-prefix tuner."""
     generation_id = generation_id or selection.latest_published_generation(db)
+    pipeline_audit.set_generation(generation_id)
     stamp = stamp or now_iso()
     meta = db.execute(
         "SELECT COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
@@ -8023,6 +8044,7 @@ def finalize_profiled_generation(
         generation_id = row[0] if row else None
     if not generation_id:
         raise RuntimeError("no_profiled_generation_to_finalize")
+    pipeline_audit.set_generation(generation_id)
     meta = db.execute(
         "SELECT sg.status,sg.leaderboard_valid,sg.workset_n,sg.leaderboard_rows,"
         "sg.metrics_json,sg.started_at,"
@@ -8347,6 +8369,7 @@ def finalize_profiled_generation(
             commit=False,
         )
     db.commit()
+    _post_publish_storage_cleanup(db, generation_id)
     return {
         "status": "published", "generation": generation_id,
         "core": len(current_core),
@@ -9357,6 +9380,7 @@ def refresh_challengers(db, p) -> dict:
             {"last_challenger_refresh_at": now_iso(), "active": len(current_core)},
         )
         db.commit()
+        _post_publish_storage_cleanup(db, generation_id)
         return {
             "status": "published", "generation": generation_id,
             "baseFullGeneration": base_generation,
@@ -10627,6 +10651,8 @@ def scan(db, p):
         db, rescan_ids, run_full=run_full, complete=published, failed=failed, active=n_active
     )
     db.commit()
+    if published:
+        _post_publish_storage_cleanup(db, generation_id)
 
 
 # ------------------------------------------------------------------------ watchlist

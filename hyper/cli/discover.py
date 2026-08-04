@@ -300,9 +300,13 @@ def main() -> int:
     add_gate_args(g)
 
     sub.add_parser("repair-watchlist", help="rebuild watchlist if it drifted from active profiles")
-    sub.add_parser(
+    maintenance = sub.add_parser(
         "storage-maintenance",
         help="prune bounded discovery detail and record filesystem/database growth health",
+    )
+    maintenance.add_argument(
+        "--dry-run", action="store_true",
+        help="report protected generations and planned deletes without changing the database",
     )
     unblock = sub.add_parser(
         "unblacklist-wallet",
@@ -563,7 +567,7 @@ def main() -> int:
     elif args.cmd == "storage-maintenance":
         try:
             with scan_lock.acquire(args.db):
-                result = storage_guard.run(db, args.db)
+                result = storage_guard.run(db, args.db, dry_run=bool(args.dry_run))
         except scan_lock.ScanBusyError:
             result = {"status": "skipped", "reason": "scanner_run_already_active"}
         print(json.dumps(result, sort_keys=True, default=str))

@@ -322,7 +322,7 @@ def ep_pipeline_audit(db, qs):
     """Recent scanner/follow pipeline decisions for ops debugging."""
     where, args = [], []
     compact = _truthy(qs, "compact")
-    for key in ("stamp", "source", "stage", "addr"):
+    for key in ("generation", "stamp", "source", "stage", "addr"):
         val = (qs.get(key, [None]) or [None])[0]
         if not val:
             continue
@@ -330,7 +330,7 @@ def ep_pipeline_audit(db, qs):
         where.append(f"{col}=?")
         args.append(val.lower() if key == "addr" else val)
     sql = (
-        "SELECT id,stamp,source,stage,addr,rank,status,reason,raw_score,follow_score,payload_json,created_at "
+        "SELECT id,generation,stamp,source,stage,addr,rank,status,reason,raw_score,follow_score,payload_json,created_at "
         "FROM pipeline_audit"
     )
     if where:
@@ -347,6 +347,7 @@ def ep_pipeline_audit(db, qs):
             payload = _compact_audit_payload(payload)
         events.append({
             "id": r["id"],
+            "generation": r["generation"],
             "stamp": r["stamp"],
             "source": r["source"],
             "stage": r["stage"],
@@ -359,7 +360,83 @@ def ep_pipeline_audit(db, qs):
             "payload": payload,
             "createdAt": r["created_at"],
         })
-    return {"events": events, "total": len(events)}
+    requested_generation = (qs.get("generation", [None]) or [None])[0]
+    terminal = False
+    if not events:
+        if requested_generation:
+            row = q1(db, "SELECT status FROM scan_generation WHERE generation=?", (requested_generation,))
+        else:
+            row = q1(
+                db,
+                "SELECT status FROM scan_generation WHERE is_current=1 ORDER BY id DESC LIMIT 1",
+            )
+        terminal = bool(row and _col(row, "status", 0) in {"published", "failed"})
+    return {"events": events, "total": len(events), "evidenceExpired": terminal}
+
+
+def _published_pipeline_summary(db, qs):
+    """Project compact authoritative state after transient audit has been cleaned."""
+    requested = (qs.get("generation", [None]) or [None])[0]
+    if requested:
+        row = db.execute(
+            "SELECT generation,source,status,started_at,published_at,profile_total,profile_valid,"
+            "profile_deferred,profile_rejected,workset_n,metrics_json,error "
+            "FROM scan_generation WHERE generation=?",
+            (requested,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT generation,source,status,started_at,published_at,profile_total,profile_valid,"
+            "profile_deferred,profile_rejected,workset_n,metrics_json,error "
+            "FROM scan_generation WHERE is_current=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return {
+            "stamp": None, "source": None, "generation": requested,
+            "evidenceExpired": False, "profile": {}, "selection": {},
+            "autoTune": None, "workset": None, "prune": None,
+        }
+    generation = str(row[0])
+    try:
+        metrics = json.loads(row[10] or "{}")
+    except (TypeError, ValueError):
+        metrics = {}
+    counts = {
+        str(role): int(n or 0)
+        for role, n in db.execute(
+            "SELECT role,COUNT(*) FROM follow_selection WHERE generation=? GROUP BY role",
+            (generation,),
+        ).fetchall()
+    }
+    return {
+        "stamp": row[4] or row[3],
+        "source": row[1],
+        "generation": generation,
+        "evidenceExpired": str(row[2]) in {"published", "failed"},
+        "profile": {
+            "total": int(row[5] or 0), "active": int(row[6] or 0),
+            "qualified": int(row[6] or 0), "rejected": int(row[8] or 0),
+            "deferred": int(row[7] or 0), "retired": 0, "reasonCounts": [],
+        },
+        "selection": {
+            "generation": generation, "action": None,
+            "core": counts.get("core", int(metrics.get("selectionCore") or 0)),
+            "challenger": counts.get(
+                "challenger", int(metrics.get("selectionChallenger") or 0),
+            ),
+            "exitOnly": counts.get("exit_only", 0),
+        },
+        "autoTune": None,
+        "workset": {
+            "mode": metrics.get("worksetMode"),
+            "profiled": int(row[9] or 0),
+            "candidates": metrics.get("coarseRecallPassed"),
+            "qualified": metrics.get("profileValid", row[6]),
+            "deferredTail": metrics.get("profileDeferred", row[7]),
+        },
+        "prune": None,
+        "error": row[11],
+    }
 
 
 def _latest_pipeline_key(db, qs):
@@ -423,8 +500,7 @@ def ep_pipeline_summary(db, qs):
     """Compact latest pipeline audit into the Discovery page's operator summary."""
     stamp, source = _latest_pipeline_key(db, qs)
     if not stamp:
-        return {"stamp": None, "source": None, "profile": {},
-                "autoTune": None, "workset": None, "prune": None}
+        return _published_pipeline_summary(db, qs)
     base = [stamp] + ([source] if source else [])
     src_where = " AND source=?" if source else ""
 
@@ -512,6 +588,8 @@ def ep_pipeline_summary(db, qs):
     return {
         "stamp": stamp,
         "source": source,
+        "generation": selection_summary.get("generation"),
+        "evidenceExpired": False,
         "profile": {
             "total": sum(status_counts.values()),
             "active": status_counts.get("active", 0),

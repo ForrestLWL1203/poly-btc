@@ -140,6 +140,19 @@ class PipelineAuditTests(unittest.TestCase):
             ],
         )
 
+    def test_generation_binding_is_persisted_on_every_new_event(self):
+        db = self._db()
+        pipeline_audit.set_generation("g-bound")
+        pipeline_audit._insert_event(
+            db, stamp="scan-start", source="scan", stage="workset",
+            status="ok", payload={},
+        )
+        self.assertEqual(
+            db.execute("SELECT generation FROM pipeline_audit").fetchone()[0],
+            "g-bound",
+        )
+        pipeline_audit.set_generation(None)
+
     def test_refresh_watchlist_does_not_publish_legacy_score_line_membership(self):
         db = self._db()
         params.seed_params(db)
@@ -387,6 +400,37 @@ class PipelineAuditTests(unittest.TestCase):
 
         self.assertEqual(res["stamp"], "2026-07-07T00:00:00Z")
         self.assertEqual(res["source"], "scan")
+
+    def test_pipeline_summary_falls_back_to_published_generation_after_cleanup(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,source,status,complete,publishable,is_current,started_at,published_at,"
+            "profile_total,profile_valid,profile_deferred,profile_rejected,workset_n,metrics_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "g-published", "scan", "published", 1, 1, 1,
+                "2026-07-07T00:00:00Z", "2026-07-07T01:00:00Z",
+                12, 8, 1, 3, 12,
+                json.dumps({"selectionCore": 2, "selectionChallenger": 4}),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO follow_selection "
+            "(generation,addr,role,selected_at) VALUES (?,?,?,?)",
+            [
+                ("g-published", "0xaaa", "core", "2026-07-07T01:00:00Z"),
+                ("g-published", "0xbbb", "core", "2026-07-07T01:00:00Z"),
+            ],
+        )
+        db.commit()
+
+        res = api_discovery.ep_pipeline_summary(db, {})
+
+        self.assertTrue(res["evidenceExpired"])
+        self.assertEqual(res["generation"], "g-published")
+        self.assertEqual(res["profile"]["total"], 12)
+        self.assertEqual(res["selection"]["core"], 2)
 
 
 if __name__ == "__main__":

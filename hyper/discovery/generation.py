@@ -175,6 +175,10 @@ def begin_generation(
         (generation, source, "staging", started_at, previous[0] if previous else None,
          workset_mode, fill_mode, full_refresh_shard),
     )
+    # Every pipeline workspace row must carry an explicit generation.  Binding
+    # here covers all scanner helpers invoked after generation creation.
+    from hyper.discovery import pipeline_audit
+    pipeline_audit.set_generation(generation)
     return generation
 
 

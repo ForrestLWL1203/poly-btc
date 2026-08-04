@@ -101,10 +101,18 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5-minute snapshots)
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
-# Long-running storage guard. Per-wallet discovery detail is useful for recent debugging but grows by tens
-# of megabytes per complete generation; compact selection/risk/tuner conclusions remain durable forever.
-PIPELINE_DETAIL_RETENTION_DAYS = 90
-LEADERBOARD_STAGING_KEEP_GENERATIONS = 30
+# Long-running storage guard. Per-wallet discovery detail is resumable workspace;
+# compact published selection/strategy state remains authoritative.
+# Discovery detail is generation-scoped workspace, not historical audit.  The
+# old 90-day/30-generation knobs remain intentionally retired; completed
+# generations are compacted by lifecycle state instead of age.
+PIPELINE_DETAIL_RETENTION_DAYS = 0
+LEADERBOARD_STAGING_KEEP_GENERATIONS = 0
+SCAN_SUMMARY_RETENTION_DAYS = 90
+SCAN_SUMMARY_KEEP_COUNT = 30
+EXECUTION_DIAGNOSTIC_RETENTION_DAYS = 7
+EXECUTION_RECONCILE_ANOMALY_RETENTION_DAYS = 90
+STORAGE_DELETE_BATCH_ROWS = 2_000
 STORAGE_GUARD_SAMPLE_RETENTION_DAYS = 400
 STORAGE_GUARD_GROWTH_BASELINE_MIN_HOURS = 20
 STORAGE_GUARD_DISK_WARN_PCT = 70.0

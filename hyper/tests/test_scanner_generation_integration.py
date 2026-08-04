@@ -2712,13 +2712,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(calls, 2)
             self.assertEqual(latest, (1, 1, 1, "published"))
-            self.assertEqual(
-                db.execute(
-                    "SELECT status,reason FROM pipeline_audit "
-                    "WHERE stage='profile_worker_retry' ORDER BY id DESC LIMIT 1"
-                ).fetchone(),
-                ("recovered", "RuntimeError"),
-            )
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pipeline_audit").fetchone()[0], 0)
 
     def test_complete_profiles_remain_resumable_when_portfolio_formation_fails(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3039,13 +3033,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             rows = db.execute(
                 "SELECT addr,role,reason FROM follow_selection WHERE generation=? ORDER BY addr", (current,)
             ).fetchall()
-            summary = db.execute(
-                "SELECT reason,payload_json FROM pipeline_audit "
-                "WHERE stage='selection_summary' ORDER BY id DESC LIMIT 1"
+            revision = db.execute(
+                "SELECT sr.reason FROM active_strategy_revision a "
+                "JOIN strategy_revision sr ON sr.revision=a.revision"
             ).fetchone()
             self.assertEqual(rows, [])
-            self.assertEqual(summary[0], "manual_selection_preserved")
-            self.assertIn('"mode": "manual"', summary[1])
+            self.assertEqual(revision[0], "manual_selection_preserved")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pipeline_audit").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

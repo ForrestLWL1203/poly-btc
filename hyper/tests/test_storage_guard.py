@@ -47,7 +47,7 @@ class StorageGuardTests(unittest.TestCase):
         )
         return generation
 
-    def test_prunes_only_old_heavy_detail_and_redundant_staging(self):
+    def test_prunes_completed_pipeline_and_keeps_only_required_generations(self):
         old = "2026-04-01T00:00:00Z"
         recent = "2026-07-31T00:00:00Z"
         rows = [
@@ -79,19 +79,17 @@ class StorageGuardTests(unittest.TestCase):
         audit = self.db.execute(
             "SELECT stage,reason FROM pipeline_audit ORDER BY id"
         ).fetchall()
-        self.assertEqual(
-            audit,
-            [("selection_summary", "durable"), ("profile", "recent-heavy")],
-        )
+        self.assertEqual(audit, [])
         kept = {row[0] for row in self.db.execute(
             "SELECT DISTINCT generation FROM leaderboard_staging"
         )}
         self.assertIn(base, kept)
         self.assertIn(building, kept)
-        self.assertTrue({f"g{n:02d}" for n in range(6, 36)}.issubset(kept))
-        self.assertEqual(result["retention"]["deletedPipelineRows"], 3)
-        self.assertEqual(result["retention"]["deletedStagingRows"], 3)
-        self.assertEqual(result["retention"]["deletedStagingGenerations"], 3)
+        self.assertEqual(kept, {base, building, "g35"})
+        self.assertEqual(result["retention"]["deletedPipelineRows"], 5)
+        self.assertEqual(
+            result["retention"]["generationCleanup"]["leaderboard_staging"], 32,
+        )
 
     def test_warns_on_daily_growth_disk_and_wal_thresholds(self):
         storage_guard.run(
@@ -114,14 +112,102 @@ class StorageGuardTests(unittest.TestCase):
         self.assertEqual(result["status"], "warning")
         self.assertEqual(
             set(result["reasons"]),
-            {"disk_used_warning", "db_growth_24h_warning", "wal_size_warning"},
+            {"disk_used_warning", "wal_size_warning"},
         )
         state = self.db.execute(
             "SELECT state,detail_json FROM process_status WHERE name='storage_guard'"
         ).fetchone()
         self.assertEqual(state[0], "warning")
-        self.assertEqual(json.loads(state[1])["database"]["growth24hBytes"],
-                         config.STORAGE_GUARD_DB_GROWTH_WARN_BYTES_24H + 1)
+        # Physical preallocation does not count as active-data growth.
+        self.assertEqual(json.loads(state[1])["database"]["growth24hBytes"], 0)
+
+    def test_dry_run_is_read_only_and_reports_protected_generations(self):
+        current = self._generation(1, source="scan", current=1)
+        old = self._generation(2)
+        self.db.execute(
+            "INSERT INTO pipeline_audit(generation,stamp,source,stage,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (old, "old", "scan", "profile", "2026-07-01T00:00:00Z"),
+        )
+        self.db.commit()
+
+        result = storage_guard.run(
+            self.db, self.db_path, now_epoch=self.now, dry_run=True,
+            disk_usage=(10_000, 2_000, 8_000), db_main_bytes=100, db_wal_bytes=10,
+        )
+
+        self.assertTrue(result["dryRun"])
+        self.assertEqual(result["retention"]["deletedPipelineRows"], 1)
+        self.assertEqual(result["retention"]["protectedGenerations"]["current"], current)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pipeline_audit").fetchone()[0], 1)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM leaderboard_staging").fetchone()[0], 2,
+        )
+
+    def test_post_publish_cleanup_preserves_latest_full_cache_and_trade_ledgers(self):
+        base = self._generation(1, source="scan")
+        current = self._generation(2, current=1)
+        self.db.execute(
+            "INSERT INTO pre_strict_evidence "
+            "(generation,addr,policy_version,model_version,status,created_at) VALUES (?,?,?,?,?,?)",
+            (base, "0xaaa", "p", "m", "qualified", "2026-07-01T00:00:00Z"),
+        )
+        self.db.execute(
+            "INSERT INTO formation_prefix_evidence "
+            "(generation,policy_version,params_hash,membership_hash,member_count,evaluation_json,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (current, "p", "h", "m", 1, "{}", "2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+        )
+        self.db.execute(
+            "INSERT INTO pipeline_audit(generation,stamp,source,stage,created_at) VALUES (?,?,?,?,?)",
+            (current, "s", "challenger_daily", "profile", "2026-07-01T00:00:00Z"),
+        )
+        self.db.execute(
+            "INSERT INTO copy_position(addr,coin,side,status,opened_at) VALUES (?,?,?,?,?)",
+            ("0xaaa", "BTC", "long", "closed", "2026-07-01T00:00:00Z"),
+        )
+        ledger_before = self.db.execute("SELECT COUNT(*) FROM copy_position").fetchone()[0]
+        self.db.commit()
+
+        result = storage_guard.post_publish_cleanup(self.db, current, now_epoch=self.now)
+
+        self.assertEqual(result["pipelineAudit"], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM formation_prefix_evidence").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pre_strict_evidence").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM copy_position").fetchone()[0], ledger_before)
+
+    def test_execution_diagnostics_use_normal_and_anomaly_windows(self):
+        old = "2026-07-01T00:00:00Z"
+        recent = "2026-07-31T00:00:00Z"
+        self.db.executemany(
+            "INSERT INTO execution_account_snapshot "
+            "(session_id,equity,available,observed_at) VALUES (?,?,?,?)",
+            [("s", 1, 1, old), ("s", 1, 1, recent)],
+        )
+        self.db.executemany(
+            "INSERT INTO execution_reconcile_checkpoint(session_id,status,created_at) VALUES (?,?,?)",
+            [("s", "ok", old), ("s", "reconcile_required", old)],
+        )
+        self.db.executemany(
+            "INSERT INTO execution_signal "
+            "(mode,session_id,addr,coin,tid,source_time_ms,payload_json,state,received_at,updated_at,completed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("live", "s", "0xa", "BTC", 1, 1, "{}", "completed", old, old, old),
+                ("live", "s", "0xa", "BTC", 2, 2, "{}", "retryable", old, old, None),
+            ],
+        )
+        self.db.commit()
+
+        removed = storage_guard.prune_execution_transients(self.db, now_epoch=self.now)
+
+        self.assertEqual(removed["execution_account_snapshot"], 1)
+        self.assertEqual(removed["execution_reconcile_ok"], 1)
+        self.assertEqual(removed["execution_reconcile_anomaly"], 0)
+        self.assertEqual(removed["execution_signal"], 1)
+        self.assertEqual(
+            self.db.execute("SELECT state FROM execution_signal").fetchone()[0], "retryable",
+        )
 
     def test_critical_disk_state_takes_precedence(self):
         result = storage_guard.run(
