@@ -2228,9 +2228,13 @@ def tune_final_membership_margin_surface(
         "search_profile": "final_membership_margin",
         "algorithm": "final_membership_margin_calibration_v1",
         "quick_replay_count": len(cache),
-        "tier_economics": dict(winner.get("tierEconomics") or {}),
+        "tier_economics": dict(
+            (winner.get("validation") or {}).get("tierEconomics")
+            or winner.get("tierEconomics") or {}
+        ),
         "deployment_utilization": dict(
-            winner.get("deploymentUtilization") or {}
+            (winner.get("validation") or {}).get("deploymentUtilization")
+            or winner.get("deploymentUtilization") or {}
         ),
         "crowding_tradeoff": dict(winner.get("crowdingTradeoff") or {}),
         "finalists": finalists,
@@ -2561,8 +2565,13 @@ def tune_local_prefix_surfaces(
         "quick_replay_count": len(cache), "stage_counts": stage_counts,
         "cache_hit_count": cache_hit_count,
         "stage_durations": {key: round(value, 3) for key, value in stage_durations.items()},
-        "tier_economics": winner.get("tierEconomics") or {},
-        "deployment_utilization": winner.get("deploymentUtilization") or {},
+        "tier_economics": (
+            validation.get("tierEconomics") or winner.get("tierEconomics") or {}
+        ),
+        "deployment_utilization": (
+            validation.get("deploymentUtilization")
+            or winner.get("deploymentUtilization") or {}
+        ),
         "crowding_tradeoff": winner.get("crowdingTradeoff") or {},
         "finalists": audit_finalists,
     }

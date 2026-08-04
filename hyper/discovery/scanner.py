@@ -5155,14 +5155,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 chosen_run.get("tier_economics") or {}
             ),
             "tierEconomics": dict(
-                final_membership_summary.get("tierEconomics")
-                or final_margin_calibration.get("tier_economics")
+                final_margin_calibration.get("tier_economics")
+                or final_membership_summary.get("tierEconomics")
                 or chosen_run.get("tier_economics")
                 or {}
             ),
             "finalDeploymentUtilization": dict(
-                final_membership_summary.get("deploymentUtilization")
-                or final_margin_calibration.get("deployment_utilization")
+                final_margin_calibration.get("deployment_utilization")
+                or final_membership_summary.get("deploymentUtilization")
                 or {}
             ),
             "finalMarginCalibration": final_margin_calibration,

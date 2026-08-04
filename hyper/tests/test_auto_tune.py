@@ -1167,7 +1167,11 @@ class AutoTuneTests(unittest.TestCase):
 
         def validate(surface):
             validated.append(dict(surface))
-            return {"eligible": True, "reasons": []}
+            return {
+                "eligible": True, "reasons": [],
+                "deploymentUtilization": {"timeWeightedAvgDeployPct": .42},
+                "tierEconomics": {"high": {"netPnl": 123.0}},
+            }
 
         result = auto_tune.tune_final_membership_margin_surface(
             follow=follow, base_surface=base,
@@ -1178,6 +1182,10 @@ class AutoTuneTests(unittest.TestCase):
             result["algorithm"], "final_membership_margin_calibration_v1",
         )
         self.assertTrue(result["eligible_to_apply"])
+        self.assertEqual(
+            result["deployment_utilization"]["timeWeightedAvgDeployPct"], .42,
+        )
+        self.assertEqual(result["tier_economics"]["high"]["netPnl"], 123.0)
         self.assertLessEqual(len(evaluated), 13)
         self.assertLessEqual(len(validated), 3)
         non_control = [
