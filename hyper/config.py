@@ -133,17 +133,16 @@ MID_MAX_ADDS    = 2         # ETH/SOL/HYPE
 HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't build size on a wild coin; 0 = never add)
 
 # v8 SIZING (2026-06-30). Three VOLATILITY TIERS (by daily σ = high-low range, see volatility.py); each
-# tier has its own margin% + leverage cap; WITHIN a tier, leverage scales continuously with σ. σ classifies
-# AND fine-tunes — no coin lists. Anchored to AVAILABLE (self-throttles as positions fill). Tier by σ:
+# tier has its own margin% + leverage cap. σ classifies non-BTC markets; no target-wallet leverage is used.
+# Anchored to AVAILABLE (self-throttles as positions fill). Tier by σ:
 #   stable  BTC always → fixed product tier (real σ still drives smart-add spacing)
 #   mid     every non-BTC market while σ < HIGH_SIGMA_MIN
 #   high    every non-BTC market with σ ≥ HIGH_SIGMA_MIN → small
 #   margin   = SIZING_EQUITY × <tier>_MARGIN_PCT. Profits compound from current realized equity; below the
 #              initial strategy allocation a bounded sqrt curve slows shrinkage. Real risk equity still owns
 #              coin/deploy caps, and free cash remains the final hard backstop.
-#   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
-#              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV and the
-#              master's own leverage. σ still selects the tier.
+#   leverage = the σ-tier's LEV CAP, clipped by the venue's per-market maximum leverage. Target leverage
+#              is unavailable in historical fills and intentionally does not change replay/Paper/Live sizing.
 #   notional = margin × leverage. Source notional never gates or caps our independently sized order.
 HIGH_SIGMA_MIN   = 0.09     # non-BTC σ ≥ this → HIGH-VOL tier; otherwise → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
@@ -159,7 +158,7 @@ HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
 # minimum order notional remains fixed after our equity-based sizing.
 HYPERLIQUID_MIN_PERP_NOTIONAL_USD = 10.0
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
-#                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
+#                             liquidation-path replay and the venue max leverage own their risk.)
 REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge position out in 100s of tiny
 #                             orders → mirroring each is noise + fees. Only mirror a reduce once the master's
 #                             cumulative unwind since our last reduce reaches this fraction of his position
@@ -355,7 +354,6 @@ AUTO_TUNE_MIN_DIRECTION_STREAK = 1     # one complete Paper generation;真钱环
 AUTO_TUNE_MIN_RELATIVE_GAIN = 0.05
 AUTO_TUNE_APPLY_COOLDOWN_DAYS = 0  # Paper每次完整generation都可重新寻优；真钱环境再设冷却
 AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
-AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
 AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.94      # Paper: current bounded path cache; live-money should use >=.99.
 
 # Canonical profitable Core replay must survive a bounded 15m market path. Fills-only replay remains the

@@ -1706,7 +1706,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             }
 
             with (
-                patch.object(obs, "_target_snapshot", return_value=(4, None, None, None)) as target_snapshot,
+                patch.object(obs, "_target_snapshot", return_value=(4, None)) as target_snapshot,
                 patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=shallow_book),
             ):
                 obs._open_position("0xaaa", "VINE", now_ms(), 0.0098, -100000, 1, obs.taker)
@@ -1748,7 +1748,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             }
 
             with (
-                patch.object(obs, "_target_snapshot", return_value=(5, 5, 50000, 100)),
+                patch.object(obs, "_target_snapshot", return_value=(5, 100)),
                 patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=deep_book),
             ):
                 obs._open_position("0xaaa", "TAO", now_ms(), 100, 2500, 1, obs.taker)

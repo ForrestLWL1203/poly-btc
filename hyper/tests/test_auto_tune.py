@@ -150,7 +150,6 @@ class AutoTuneTests(unittest.TestCase):
                     for index in range(3)
                 ],
                 "openRate": .95, "capacityFit": .95,
-                "masterLeverageCoverage": 1.0,
                 "maintenanceMarginCoverage": 1.0,
                 "pricePathCoverage": 1.0,
             }
@@ -1040,7 +1039,6 @@ class AutoTuneTests(unittest.TestCase):
             "AUTO_TUNE_APPLY_MIN_SHADOW_DAYS": 0,
             "AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED": 0,
             "AUTO_TUNE_MIN_DIRECTION_STREAK": 1,
-            "AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE": 0.0,
             "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE": 0.0,
         })
 
@@ -1049,7 +1047,7 @@ class AutoTuneTests(unittest.TestCase):
             {
                 "folds": folds, "foldWins": 3, "holdout": folds[-1],
                 "stressNet": 50.0, "stressLiquidations": 0,
-                "masterLeverageCoverage": 0.0, "pricePathCoverage": 0.0,
+                "pricePathCoverage": 0.0,
             },
             "2026-07-11T00:00:00Z",
         )
@@ -1180,14 +1178,17 @@ class AutoTuneTests(unittest.TestCase):
             result["algorithm"], "final_membership_margin_calibration_v1",
         )
         self.assertTrue(result["eligible_to_apply"])
-        self.assertLessEqual(len(evaluated), 9)
+        self.assertLessEqual(len(evaluated), 13)
         self.assertLessEqual(len(validated), 3)
+        non_control = [
+            surface for _stage, surface in evaluated
+            if auto_tune._local_surface_marker(surface)
+            != auto_tune._local_surface_marker(base)
+        ]
         self.assertTrue(all(
-            all(
-                float(surface[key]) + 1e-12 >= float(base[key])
-                for key in auto_tune.MARGIN_KEYS
-            )
-            for _stage, surface in evaluated
+            all(abs(float(surface[key]) / .005 - round(float(surface[key]) / .005)) < 1e-8
+                for key in auto_tune.MARGIN_KEYS)
+            for surface in non_control
         ))
         self.assertTrue(any(
             all(
@@ -1211,6 +1212,66 @@ class AutoTuneTests(unittest.TestCase):
         self.assertAlmostEqual(summary["timeWeightedAvgDeployPct"], .58)
         self.assertEqual(summary["eventSampleAvgDeployPct"], .61)
         self.assertEqual(summary["peakDeployPct"], .94)
+
+    def test_crowding_tradeoff_accounts_for_skipped_and_candidate_only_episodes(self):
+        result = auto_tune.crowding_tradeoff(
+            {
+                "netPnl": 130,
+                "capacityFit": .72,
+                "openRate": .75,
+                "episodePnlIndex": {"common": 120, "new": 30},
+            },
+            {
+                "netPnl": 100,
+                "capacityFit": .90,
+                "openRate": .90,
+                "episodePnlIndex": {"common": 80, "skipped": 20},
+            },
+        )
+        self.assertEqual(result["commonEpisodePnlDelta"], 40)
+        self.assertEqual(result["foregoneBaselinePnl"], 20)
+        self.assertEqual(result["candidateOnlyPnl"], 30)
+        self.assertEqual(result["totalNetDelta"], 30)
+
+    def test_strict_winner_prefers_lower_liquidation_risk_inside_stress_near_optimal_band(self):
+        risky = {
+            "netPnl": 160,
+            "validation": {
+                "eligible": True, "netPnl30d": 160,
+                "liquidationStressNetPnl30d": 105,
+                "liquidations": 13, "maxLiquidationLossPct": .07,
+                "capacityFit": .85, "openRate": .85,
+            },
+        }
+        safer = {
+            "netPnl": 145,
+            "validation": {
+                "eligible": True, "netPnl30d": 145,
+                "liquidationStressNetPnl30d": 100,
+                "liquidations": 7, "maxLiquidationLossPct": .04,
+                "capacityFit": .84, "openRate": .84,
+            },
+        }
+        self.assertIs(auto_tune._select_strict_winner([risky, safer]), safer)
+
+    def test_strict_winner_keeps_material_stress_profit_advantage(self):
+        profitable = {
+            "netPnl": 200,
+            "validation": {
+                "eligible": True, "netPnl30d": 200,
+                "liquidationStressNetPnl30d": 140,
+                "liquidations": 10, "maxLiquidationLossPct": .06,
+            },
+        }
+        safer = {
+            "netPnl": 120,
+            "validation": {
+                "eligible": True, "netPnl30d": 120,
+                "liquidationStressNetPnl30d": 100,
+                "liquidations": 1, "maxLiquidationLossPct": .01,
+            },
+        }
+        self.assertIs(auto_tune._select_strict_winner([profitable, safer]), profitable)
 
     def test_local_tuner_leaves_memory_guard_to_cache_aware_evaluator(self):
         follow = {
@@ -1243,7 +1304,7 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertTrue(result["eligible_to_apply"])
 
-    def test_signal_heavy_profitable_underdeployed_tier_gets_one_breakout_probe(self):
+    def test_three_tiers_each_receive_grid_up_and_down_probes_with_capacity_ceiling(self):
         follow = {
             key: float(getattr(auto_tune.config, key))
             for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
@@ -1268,15 +1329,17 @@ class AutoTuneTests(unittest.TestCase):
             },
         )
 
-        self.assertLessEqual(len(surfaces), 9)
-        self.assertTrue(any(
-            surface["MID_MARGIN_PCT"] > ceilings["MID_MARGIN_PCT"]
-            for surface in surfaces
-        ))
-        self.assertFalse(any(
-            surface["STABLE_MARGIN_PCT"] > ceilings["STABLE_MARGIN_PCT"]
-            or surface["HIGH_MARGIN_PCT"] > ceilings["HIGH_MARGIN_PCT"]
-            for surface in surfaces
+        self.assertLessEqual(len(surfaces), 10)
+        anchor = {
+            key: auto_tune._margin_grid_floor(base[key])
+            for key in auto_tune.MARGIN_KEYS
+        }
+        for key in auto_tune.MARGIN_KEYS:
+            self.assertTrue(any(surface[key] < anchor[key] for surface in surfaces))
+            self.assertTrue(any(surface[key] > anchor[key] for surface in surfaces))
+        self.assertTrue(all(
+            surface[key] <= ceilings[key] + 1e-12
+            for surface in surfaces for key in auto_tune.MARGIN_KEYS
         ))
 
     def test_count_first_local_tuner_clips_edge_neighbourhoods(self):

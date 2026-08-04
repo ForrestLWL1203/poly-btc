@@ -652,26 +652,22 @@ class Observer:
             db.close()
 
     def _target_snapshot(self, addr, coin):
-        """The master's CURRENT position on this coin from clearinghouseState — returns
-        (capped_leverage_we_mirror, raw_leverage, margin_used, entry_px). ONE call serves both our
-        sizing (capped lev) and the at-OPEN record we persist (the target's leverage/margin/entry so
-        the report never has to re-fetch and shows them even after the position closes). MUST name the
-        builder dex for stock/builder perps (xyz:*) — the standard call returns [] for those, which
-        silently fell back to MAX_LEV and over-levered every stock-perp copy to 10x. capped lev falls
-        back to MAX_LEV if unreadable (mirror-capped intent); raw/margin/entry are None if unreadable."""
+        """Return the source's current margin and entry for immutable episode audit.
+
+        Source leverage is intentionally neither returned nor persisted: our versioned tier leverage is the
+        only sizing input, matching historical replay where fills do not carry leverage.
+        """
         dex = coin.split(":")[0] if ":" in coin else None
         cs = rest.clearinghouse_state(addr, dex)
-        raw_lev = margin = entry = None
+        margin = entry = None
         if isinstance(cs, dict):
             for ap in cs.get("assetPositions", []):
                 pos = ap.get("position", {})
                 if pos.get("coin") == coin:
-                    raw_lev = f((pos.get("leverage") or {}).get("value"))
                     entry = f(pos.get("entryPx"))
-                    margin = f(pos.get("marginUsed")) or (f(pos.get("positionValue")) / raw_lev
-                                                          if raw_lev else None)
+                    margin = f(pos.get("marginUsed"))
                     break
-        return max(1.0, min(raw_lev or self.max_lev, self.max_lev)), raw_lev, margin, entry
+        return margin, entry
 
     def _copyable(self, coin: str) -> bool:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
@@ -3171,15 +3167,15 @@ class Observer:
             self._tally("skip_chase", book)
             return                                            # chase-skip: price ran past master before we detected
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
-        # Fetch source leverage and L2 concurrently outside the account lock. The L2 is assessed only after
+        # Fetch source position audit and L2 concurrently outside the account lock. The L2 is assessed only after
         # sizing determines OUR actual notional, but it must not add a second network round trip to entry lag.
-        (master_cap, m_lev, m_mgn, m_entry), liquidity_book = await asyncio.gather(
+        (m_mgn, m_entry), liquidity_book = await asyncio.gather(
             asyncio.to_thread(self._target_snapshot, addr, coin),
             self._live_liquidity_book(coin),
         )
         # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
         #  margin = adaptive sizing equity × <tier>_margin_pct
-        #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ venue and master leverage)
+        #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ venue max leverage)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         sigma = self._sigma(coin)
@@ -3231,11 +3227,16 @@ class Observer:
                 ),
             )
             target_notl = abs(ep["master_peak"]) * master_px if master_px else 0.0
-            master_notl = (m_mgn or 0.0) * (m_lev or 0.0) or target_notl
+            master_notl = target_notl
             margin_row = self.db.execute(
                 "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
             ).fetchone()
             maintenance_leverage = margin_row[0] if margin_row and margin_row[0] else None
+            existing_coin_leverage = next((
+                f(existing.get("leverage"))
+                for (existing_addr, existing_coin), existing in book.open_ep.items()
+                if existing_coin == coin and existing is not ep and f(existing.get("leverage")) > 0
+            ), None)
             plan = plan_open_sizing(
                 coin=coin,
                 side=ep["side"],
@@ -3245,9 +3246,10 @@ class Observer:
                 available=avail,
                 existing_coin_margin=existing_coin,
                 master_notional=master_notl,
-                master_leverage=m_lev,
+                master_leverage=None,
                 params=self._open_sizing_params(book),
                 maintenance_leverage=maintenance_leverage,
+                existing_coin_leverage=existing_coin_leverage,
                 wallet_sector_side_room=group_room,
                 wallet_room=source_room,
             )
@@ -3298,9 +3300,10 @@ class Observer:
                     available=avail,
                     existing_coin_margin=existing_coin,
                     master_notional=master_notl,
-                    master_leverage=m_lev,
+                    master_leverage=None,
                     params=self._open_sizing_params(book),
                     maintenance_leverage=maintenance_leverage,
+                    existing_coin_leverage=existing_coin_leverage,
                     wallet_sector_side_room=group_room,
                     wallet_room=source_room,
                 )
@@ -3357,13 +3360,13 @@ class Observer:
                       maintenance_leverage=maintenance_leverage,
                       master_first_notl=target_notl,      # confirmed source opening → smart-add ratio anchor
                       last_target_add_px=master_px)       # 波动闸只比较目标成交价；我方BBO只负责执行/PnL
-            self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
+            self.db.execute(                         # persist source margin/entry audit, never source leverage
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
-                "liq_px=?,master_leverage=?,master_margin=?,master_open_notional=?,"
+                "liq_px=?,master_leverage=NULL,master_margin=?,master_open_notional=?,"
                 "master_open_px=COALESCE(?,master_open_px),opening_account_equity=? "
                 "WHERE pos_id=?",
                 (
-                    lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn,
+                    lev, margin, notional, px, size, size, size, liq_px, m_mgn,
                     target_notl, m_entry, risk_equity, ep["pos_id"],
                 ))
             if self.execution_mode != "live":

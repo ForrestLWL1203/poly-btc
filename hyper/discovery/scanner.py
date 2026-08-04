@@ -1219,9 +1219,8 @@ def _copy_profile_evidence(m, results, p):
     positions = list(primary.get("positions") or [])
     actionable_rate = primary.get("open_fill_rate")
     capacity_fit = primary.get("capacity_open_fit")
-    master_coverage = primary.get("master_leverage_coverage")
     price_coverage = primary.get("price_path_coverage")
-    coverage_parts = [x for x in (master_coverage, price_coverage) if x is not None]
+    coverage_parts = [x for x in (price_coverage,) if x is not None]
     model_coverage = min(coverage_parts) if coverage_parts else 0.0
     closed_n = int(primary.get("closed_n") or 0)
     if not by_days or evidence.issubset({"", "no_fills", "no_open_events"}):
@@ -2296,7 +2295,7 @@ def _portfolio_selection_metrics(windows, selected_n=0):
     )
 
 
-_FORMATION_PREFIX_CACHE_POLICY = "count-first-local-surface-v2"
+_FORMATION_PREFIX_CACHE_POLICY = "count-first-local-surface-v3-own-leverage-grid-risk"
 
 
 def _formation_prefix_membership_hash(addrs) -> str:
@@ -3470,9 +3469,11 @@ def _select_formation_finalist_surface(
                 )
                 failure_counts[reason] = failure_counts.get(reason, 0) + 1
 
-        portfolio_net = 0.0
+        portfolio_net = middle_net = stress_net = 0.0
         return_30d = return_7d = float("-inf")
         open_rate = capacity_fit = 0.0
+        liquidation_count = 0
+        max_liquidation_loss = max_liquidation_loss_pct = 0.0
         feasible = False
         if qualified:
             filtered = auto_tune._filter_window_fills_by_addr(
@@ -3486,6 +3487,7 @@ def _select_formation_finalist_surface(
                 compact=True,
             )
             primary = windows.get(30) or windows.get(max(windows)) or {}
+            middle = windows.get(14) or primary
             recent = windows.get(7) or {}
             portfolio_metrics = _portfolio_selection_metrics(
                 windows, selected_n=len(qualified),
@@ -3501,9 +3503,17 @@ def _select_formation_finalist_surface(
                 or recent.get("initial_margin_equity")
             )
             primary_economics = replay_result_profitability(primary)
+            middle_economics = replay_result_profitability(middle)
             recent_economics = replay_result_profitability(recent)
             portfolio_net = f(primary_economics.get("qualificationPnl"))
+            middle_net = f(middle_economics.get("qualificationPnl"))
             recent_net = f(recent_economics.get("qualificationPnl"))
+            liquidation_count = int(getattr(portfolio_metrics, "liquidations", 0) or 0)
+            max_liquidation_loss = f(primary.get("max_liquidation_loss"))
+            max_liquidation_loss_pct = f(primary.get("max_liquidation_loss_pct"))
+            stress_net = portfolio_net - (
+                int(math.ceil(liquidation_count * 0.50)) * max_liquidation_loss
+            )
             return_30d = (
                 portfolio_net / start_30d if start_30d > 0.0 else float("-inf")
             )
@@ -3523,7 +3533,12 @@ def _select_formation_finalist_surface(
             )
             feasible = bool(
                 portfolio_net > 0.0
+                and middle_net > 0.0
                 and recent_net > 0.0
+                and stress_net > 0.0
+                and max_liquidation_loss_pct < float(
+                    config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
+                )
                 and return_30d >= policy.portfolio_min_return_30d
                 and return_7d >= policy.portfolio_min_return_7d
                 and open_rate >= policy.min_actionable_open_rate
@@ -3537,6 +3552,8 @@ def _select_formation_finalist_surface(
             "qualifiedCount": len(qualified),
             "individualNetPnl": individual_net,
             "portfolioNetPnl": portfolio_net,
+            "portfolioNetPnl14d": middle_net,
+            "liquidationStressNetPnl": stress_net,
             "return30d": return_30d,
             "return7d": return_7d,
             "openRate": open_rate,
@@ -3545,7 +3562,9 @@ def _select_formation_finalist_surface(
             "paperReturn7d": return_7d if qualified else float("-inf"),
             "paperBasis": "standardized_projection",
             "strictPath": bool(finalist_path is not None),
-            "liquidations": int(item["liquidations"]),
+            "liquidations": liquidation_count,
+            "maxLiquidationLoss": max_liquidation_loss,
+            "maxLiquidationLossPct": max_liquidation_loss_pct,
             "feasible": feasible,
             "failureCounts": failure_counts,
         })
@@ -3553,17 +3572,19 @@ def _select_formation_finalist_surface(
     feasible = [item for item in audits if item["feasible"]]
     if not feasible:
         return unique[0]["params"], audits
-    best_net = max(item["portfolioNetPnl"] for item in feasible)
+    best_net = max(item["liquidationStressNetPnl"] for item in feasible)
     near_best = [
         item for item in feasible
-        if item["portfolioNetPnl"] >= best_net - max(
-            1.0, abs(best_net) * float(config.AUTO_TUNE_NEAR_BEST_PROFIT_REL),
-        )
+        if item["liquidationStressNetPnl"] >= best_net - max(1.0, abs(best_net) * 0.08)
     ]
     winner = min(
         near_best,
         key=lambda item: (
             item["liquidations"],
+            item["maxLiquidationLossPct"],
+            -item["capacityFit"],
+            -item["openRate"],
+            -item["liquidationStressNetPnl"],
             -item["portfolioNetPnl"],
             -item["qualifiedCount"],
             item["source"],
@@ -4066,6 +4087,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             )
             metrics_ = _portfolio_selection_metrics(windows, selected_n=count)
             primary = windows.get(30) or windows.get(max(windows)) or {}
+            middle = windows.get(14) or {}
             recent = windows.get(7) or {}
             start_equity = f(
                 primary.get("window_start_equity")
@@ -4077,6 +4099,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 or recent.get("initial_margin_equity")
             )
             primary_economics = replay_result_profitability(primary)
+            middle_economics = replay_result_profitability(middle)
             recent_economics = replay_result_profitability(recent)
             return_30d = (
                 f(primary_economics.get("qualificationPnl")) / start_equity
@@ -4094,16 +4117,24 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "deploymentUtilization": auto_tune.deployment_utilization_summary(
                     primary
                 ),
+                "episodePnlIndex": primary.get("episode_pnl_index") or {},
                 "addCaptureRate": f(
                     primary.get("actionable_add_capture_rate")
                     if primary.get("actionable_add_capture_rate") is not None else 1.0
                 ),
                 "pnlConcentration": primary.get("pnl_concentration") or {},
+                "maxLiquidationLoss": f(primary.get("max_liquidation_loss")),
+                "maxLiquidationLossPct": f(primary.get("max_liquidation_loss_pct")),
             }
+            liquidation_count = int(metrics_.liquidations)
+            replay_summary["liquidationStressNetPnl"] = f(metrics_.net_pnl) - (
+                int(math.ceil(liquidation_count * 0.50))
+                * replay_summary["maxLiquidationLoss"]
+            )
             value = core_formation.PrefixEvaluation(
                 count=count,
                 net_pnl=f(metrics_.net_pnl),
-                stress_net_pnl=f(metrics_.net_pnl),
+                stress_net_pnl=f(replay_summary["liquidationStressNetPnl"]),
                 max_drawdown=f(metrics_.max_drawdown),
                 actionable_open_rate=f(metrics_.actionable_open_rate),
                 capacity_fit=f(metrics_.capacity_fit),
@@ -4130,6 +4161,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         row = {
             "count": count,
             "netPnl": f(value.net_pnl),
+            "stressNetPnl": f(value.stress_net_pnl),
             "feasible": bool(value.feasible),
             "liquidations": int(value.liquidations),
             "maxDrawdown": f(value.max_drawdown),
@@ -4142,6 +4174,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "deploymentUtilization": replay_summary.get(
                 "deploymentUtilization"
             ) or {},
+            "episodePnlIndex": replay_summary.get("episodePnlIndex") or {},
+            "maxLiquidationLoss": f(replay_summary.get("maxLiquidationLoss")),
+            "maxLiquidationLossPct": f(replay_summary.get("maxLiquidationLossPct")),
             "prefixEvaluation": value,
             "paramsHash": surface_hash,
         }
@@ -4274,9 +4309,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 initial_balance=float(config.INITIAL_BALANCE), compact=True,
             )
             primary = windows.get(30) or windows.get(max(windows)) or {}
+            middle = windows.get(14) or {}
             recent = windows.get(7) or {}
             metrics_ = _portfolio_selection_metrics(windows, selected_n=len(addrs))
             primary_economics = replay_result_profitability(primary)
+            middle_economics = replay_result_profitability(middle)
             recent_economics = replay_result_profitability(recent)
             start_30 = f(
                 primary.get("window_start_equity")
@@ -4300,6 +4337,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 reasons.append("net_not_positive")
             if f(recent_economics.get("qualificationPnl")) <= 0.0:
                 reasons.append("recent_net_not_positive")
+            if f(middle_economics.get("qualificationPnl")) <= 0.0:
+                reasons.append("mid_window_net_not_positive")
             if return_30 < policy.portfolio_min_return_30d:
                 reasons.append("dynamic_return_30d")
             if return_7 < policy.portfolio_min_return_7d:
@@ -4308,8 +4347,21 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 reasons.append("open_loss_over_50pct")
             if f(metrics_.actionable_open_rate) < policy.min_actionable_open_rate:
                 reasons.append("open_follow_rate")
-            if f(metrics_.capacity_fit) < policy.min_capacity_fit:
+            # Standard quick admission remains 75%. One explicitly selected high-profit congestion
+            # challenger may reach strict validation down to 70%; its skipped orders are already debited
+            # from portfolio net PnL and audited against the control surface.
+            if f(metrics_.capacity_fit) < min(policy.min_capacity_fit, 0.70):
                 reasons.append("capacity_fit")
+            if f(primary.get("max_liquidation_loss_pct")) >= float(
+                config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
+            ):
+                reasons.append("catastrophic_single_liquidation")
+            liquidation_stress_net = f(primary_economics.get("qualificationPnl")) - (
+                int(math.ceil(int(metrics_.liquidations) * 0.50))
+                * f(primary.get("max_liquidation_loss"))
+            )
+            if liquidation_stress_net <= 0.0:
+                reasons.append("liquidation_stress_net_not_positive")
             if f(primary.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
                 reasons.append("path_coverage")
             if f(primary.get("maintenance_margin_coverage")) < float(
@@ -4319,9 +4371,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             result = {
                 "eligible": not reasons, "reasons": reasons,
                 "netPnl30d": f(primary_economics.get("qualificationPnl")),
+                "netPnl14d": f(middle_economics.get("qualificationPnl")),
                 "netPnl7d": f(recent_economics.get("qualificationPnl")),
                 "dynamicReturn30d": return_30, "dynamicReturn7d": return_7,
                 "liquidations": int(metrics_.liquidations),
+                "maxLiquidationLoss": f(primary.get("max_liquidation_loss")),
+                "maxLiquidationLossPct": f(primary.get("max_liquidation_loss_pct")),
+                "liquidationStressMultiplier": 1.5,
+                "liquidationStressNetPnl30d": liquidation_stress_net,
                 "openRate": f(metrics_.actionable_open_rate),
                 "capacityFit": f(metrics_.capacity_fit),
                 "tierEconomics": primary.get("tier_economics") or {},
@@ -4334,7 +4391,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             evidence = core_formation.PrefixEvaluation(
                 count=len(addrs),
                 net_pnl=f(primary_economics.get("qualificationPnl")),
-                stress_net_pnl=f(primary_economics.get("qualificationPnl")),
+                stress_net_pnl=liquidation_stress_net,
                 max_drawdown=f(metrics_.max_drawdown),
                 actionable_open_rate=f(metrics_.actionable_open_rate),
                 capacity_fit=f(metrics_.capacity_fit),
@@ -4642,8 +4699,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # Qualification may nevertheless shrink that tuned prefix materially (for
     # example 14 -> 10). Reusing the 14-wallet margin surface without measuring
     # the final ten systematically under-deploys the smaller set. Give the
-    # exact qualified membership one bounded margin-only calibration: baseline
-    # plus eight upward probes and at most three strict finalists. This is not
+    # exact qualified membership one bounded margin-only calibration: an exact
+    # control, a fair 0.5-point three-tier grid and at most three strict finalists. This is not
     # another exact-membership full tuner and never searches leverage, adds,
     # wallet counts or arbitrary subsets.
     pre_calibration_count = len(ordered)

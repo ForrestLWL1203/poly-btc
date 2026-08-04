@@ -147,7 +147,7 @@ PARAM_SPEC = [
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
-    #  tier cap + master-lev cap + margin/coin/deploy limits)
+    #  our tier cap + venue max leverage + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
         "自动调参", "开启后，每个新代际都对本代际Top Core统一优化保证金、杠杆和加仓参数；关闭后固定使用当前参数完成严格回放和自适应最佳Core前缀搜索，成员变化也不会触发调参"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
@@ -161,9 +161,6 @@ PARAM_SPEC = [
     ("AUTO_TUNE_MIN_DIRECTION_STREAK", "follow", "hidden", "int", "immediate",
         config.AUTO_TUNE_MIN_DIRECTION_STREAK,
         "调参方向确认次数", "真钱建议2;Paper首次自动Bootstrap可设1"),
-    ("AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE", "follow", "hidden", "pct", "immediate",
-        config.AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE * 100,
-        "主钱包杠杆覆盖门槛", "真钱建议80%;Paper验证可设0"),
     ("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", "follow", "hidden", "pct", "immediate",
         config.AUTO_TUNE_PRICE_PATH_MIN_COVERAGE * 100,
         "价格路径覆盖门槛", "真钱建议95%;Paper验证可设0"),

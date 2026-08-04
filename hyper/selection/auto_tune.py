@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 import sqlite3
 import time
 from datetime import datetime
@@ -38,6 +39,7 @@ from hyper.util import f, now_iso
 from . import state as selection, strategy_revision
 
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
+MARGIN_GRID_STEP = 0.005
 COIN_CAP_KEYS = ("STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
 DEPLOY_KEYS = ()
@@ -1341,16 +1343,29 @@ def _compact_backtest(result: dict) -> dict:
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",
         "capacity_open_fit", "execution_capacity_fit", "cash_congestion_fit",
         "open_constraint_counts", "open_constraint_fit",
-        "master_leverage_coverage", "master_leverage_known",
-        "master_leverage_missing", "price_path_coverage", "model_coverage", "max_drawdown",
+        "price_path_coverage", "model_coverage", "max_drawdown",
         "maintenance_margin_coverage", "maintenance_margin_known", "maintenance_margin_missing",
-        "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
+        "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "deployment_distribution",
+        "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
         "ambiguous_liquidations", "price_path_boundary_skips", "continuous_replay_days",
         "tier_economics",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
+    episode_index = {}
+    for position in [
+        *(result.get("positions") or ()), *(result.get("open_positions") or ()),
+    ]:
+        marker = hashlib.sha256("|".join((
+            str(position.get("addr") or "").lower(),
+            str(position.get("coin") or ""), str(position.get("side") or ""),
+            str(int(position.get("opened_at") or 0)),
+        )).encode("utf-8")).hexdigest()[:24]
+        episode_index[marker] = float(position.get("net_pnl") or 0.0) + float(
+            position.get("unrealized_pnl") or 0.0
+        )
+    out["episode_pnl_index"] = episode_index
     return out
 
 
@@ -1502,7 +1517,6 @@ def _walk_forward_surface(overrides, *, sigmas, market_ctx, path_meta, prepared)
             result.get("actionable_open_rate", result.get("open_fill_rate")) or 0.0
         ),
         "capacityFit": float(result.get("capacity_open_fit") or 0.0),
-        "masterLeverageCoverage": float(result.get("master_leverage_coverage") or 0.0),
         "maintenanceMarginCoverage": float(
             result.get("maintenance_margin_coverage") or 0.0
         ),
@@ -1543,7 +1557,6 @@ def _compose_walk_forward_validation(baseline, challenger, prepared) -> dict:
         "folds": compact_folds,
         "foldWins": wins,
         "holdout": compact_folds[-1] if compact_folds else {},
-        "masterLeverageCoverage": float(challenger.get("masterLeverageCoverage") or 0.0),
         "maintenanceMarginCoverage": float(
             challenger.get("maintenanceMarginCoverage") or 0.0
         ),
@@ -1690,11 +1703,6 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
         reasons.append("apply_cooldown")
     leverage_changed = any(abs(float(current.get(key, 0.0)) - float(proposal.get(key, current.get(key, 0.0)))) > 1e-9
                            for key in LEV_KEYS)
-    master_coverage_floor = float(
-        follow.get("AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE")
-        if follow.get("AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE") is not None
-        else getattr(config, "AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE", 0.80)
-    )
     price_path_floor = float(
         follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE")
         if follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE") is not None
@@ -1703,8 +1711,6 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
     price_path_floor = max(
         price_path_floor, float(getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", .95)),
     )
-    if leverage_changed and validation.get("masterLeverageCoverage", 0.0) < master_coverage_floor:
-        reasons.append("master_leverage_coverage_low")
     if leverage_changed and validation.get("pricePathCoverage", 0.0) < price_path_floor:
         reasons.append("price_path_coverage_low")
     if validation.get("maintenanceMarginCoverage", 0.0) < float(
@@ -1879,87 +1885,57 @@ def _local_complete_surface(follow: dict, surface: dict | None = None) -> dict:
     }
 
 
-def _local_breakout_margin_surface(
-    follow: dict, base: dict, tier_economics: dict | None,
-) -> tuple[dict | None, str | None]:
-    """Offer one evidence-backed probe beyond the reserved-add-safe research ceiling.
+def _margin_grid_floor(value: float) -> float:
+    return round(math.floor((float(value) + 1e-12) / MARGIN_GRID_STEP) * MARGIN_GRID_STEP, 10)
 
-    The exchange/account coin cap remains the hard risk boundary. This probe merely lets a profitable,
-    signal-heavy but chronically under-deployed tier prove that reserving future adds is too conservative.
-    It never creates more than one extra surface and still requires normal strict portfolio validation.
-    """
-    economics = dict(tier_economics or {})
-    margin_equity_pct = max(1e-9, float(
-        follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
-    ))
+
+def _margin_grid_ceil(value: float) -> float:
+    return round(math.ceil((float(value) - 1e-12) / MARGIN_GRID_STEP) * MARGIN_GRID_STEP, 10)
+
+
+def _margin_grid_bounds(follow: dict) -> tuple[dict[str, float], dict[str, float]]:
     ceilings = margin_add_capacity_ceilings(follow)
-    tier_rows = []
-    for tier, margin_key, cap_key in zip(
-        ("stable", "mid", "high"), MARGIN_KEYS, COIN_CAP_KEYS,
-    ):
-        row = dict(economics.get(tier) or {})
-        signal_share = float(row.get("signalShare") or 0.0)
-        net_pnl = float(row.get("netPnl") or 0.0)
-        average_deploy = float(row.get("avgDeployPct") or 0.0)
-        if signal_share < 0.30 or net_pnl <= 0.0 or average_deploy >= 0.50:
-            continue
-        tier_rows.append((
-            signal_share * max(1.0, net_pnl), signal_share, net_pnl,
-            tier, margin_key, cap_key,
-        ))
-    if not tier_rows:
-        return None, None
-    _score, _share, _net, tier, margin_key, cap_key = max(tier_rows)
-    hard_coin_margin = float(
-        follow.get(cap_key, getattr(config, cap_key))
-    ) / margin_equity_pct
-    proposal = dict(base)
-    proposal[margin_key] = min(
-        hard_coin_margin,
-        max(float(base[margin_key]) * 1.15, float(ceilings[margin_key]) * 1.10),
-    )
-    if proposal[margin_key] <= float(ceilings[margin_key]) + 1e-12:
-        return None, None
-    return proposal, tier
+    floors = {}
+    grid_ceilings = {}
+    for key in MARGIN_KEYS:
+        floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+        floors[key] = _margin_grid_ceil(float(follow.get(floor_key) or 0.0))
+        grid_ceilings[key] = max(floors[key], _margin_grid_floor(ceilings[key]))
+    return floors, grid_ceilings
+
+
+def _margin_grid_surface(follow: dict, base: dict, values: dict[str, float]) -> dict:
+    floors, ceilings = _margin_grid_bounds(follow)
+    out = dict(base)
+    for key in MARGIN_KEYS:
+        value = _margin_grid_floor(values.get(key, base[key]))
+        out[key] = min(ceilings[key], max(floors[key], value))
+    return out
 
 
 def local_shared_margin_surfaces(
     follow: dict, base_surface: dict, *, tier_economics: dict | None = None,
 ) -> list[dict]:
-    """Baseline plus symmetric per-tier/global probes, hard-capped at nine surfaces."""
+    """Exact control plus a bounded 0.5 percentage-point grid shared by all three tiers."""
     base = _local_complete_surface(follow, base_surface)
-    sizing = enforce_margin_add_capacity(base, follow)
-    ceilings = margin_add_capacity_ceilings(follow)
     surfaces = [dict(base)]
+    anchor = _margin_grid_surface(follow, base, {
+        key: _margin_grid_floor(base[key]) for key in MARGIN_KEYS
+    })
+    surfaces.append(anchor)
     for key in MARGIN_KEYS:
-        floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
-        floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
-        for factor in (0.85, 1.15):
-            proposal = dict(base)
-            proposal[key] = min(
-                ceilings[key], max(floor, float(sizing[key]) * factor),
-            )
-            surfaces.append(proposal)
-    for factor in (0.85, 1.15):
-        proposal = dict(base)
-        for key in MARGIN_KEYS:
-            floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
-            floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
-            proposal[key] = min(
-                ceilings[key], max(floor, float(sizing[key]) * factor),
-            )
-        surfaces.append(proposal)
-    breakout, _tier = _local_breakout_margin_surface(
-        follow, base, tier_economics,
-    )
-    if breakout is not None:
-        # The ordinary list has nine entries. Replace the low-information global contraction while retaining
-        # every tier's own up/down proof and the global expansion opportunity.
-        surfaces[-2] = breakout
+        for delta in (-MARGIN_GRID_STEP, MARGIN_GRID_STEP):
+            proposal = dict(anchor)
+            proposal[key] = anchor[key] + delta
+            surfaces.append(_margin_grid_surface(follow, base, proposal))
+    for delta in (-MARGIN_GRID_STEP, MARGIN_GRID_STEP):
+        surfaces.append(_margin_grid_surface(follow, base, {
+            key: anchor[key] + delta for key in MARGIN_KEYS
+        }))
     unique = {}
     for surface in surfaces:
         unique.setdefault(_local_surface_marker(surface), surface)
-    return list(unique.values())[:9]
+    return list(unique.values())[:10]
 
 
 def deployment_utilization_summary(result: dict | None) -> dict:
@@ -1976,43 +1952,156 @@ def deployment_utilization_summary(result: dict | None) -> dict:
         tier: float((economics.get(tier) or {}).get("avgDeployPct") or 0.0)
         for tier in ("stable", "mid", "high")
     }
+    distribution = dict(result.get("deployment_distribution") or {})
+    constraints = dict(result.get("open_constraint_counts") or {})
     return {
-        "timeWeightedAvgDeployPct": sum(tier_average.values()),
+        "timeWeightedAvgDeployPct": float(
+            distribution.get("timeWeightedAvgDeployPct", sum(tier_average.values())) or 0.0
+        ),
+        "activeTimeWeightedAvgDeployPct": float(
+            distribution.get("activeTimeWeightedAvgDeployPct") or 0.0
+        ),
+        "activeTimeShare": float(distribution.get("activeTimeShare") or 0.0),
+        "percentiles": dict(distribution.get("percentiles") or {}),
+        "timeAbove": dict(distribution.get("timeAbove") or {}),
         "eventSampleAvgDeployPct": float(result.get("avg_deploy_pct") or 0.0),
         "peakDeployPct": float(result.get("peak_deploy_pct") or 0.0),
         "tierTimeWeightedAvgDeployPct": tier_average,
+        "constraintAttribution": {
+            "noCash": int(constraints.get("cash") or 0),
+            "newEntryBudget": int(constraints.get("aggregateDeploy") or 0),
+            "coinCap": int(constraints.get("coinCap") or 0),
+            "minimumSizing": int(constraints.get("minimumSizing") or 0),
+            "walletConcentration": int(constraints.get("concentration") or 0),
+        },
     }
+
+
+def crowding_tradeoff(candidate: dict, baseline: dict) -> dict:
+    """Explain a candidate's net change without running an unconstrained shadow replay."""
+    candidate_index = dict(candidate.get("episodePnlIndex") or {})
+    baseline_index = dict(baseline.get("episodePnlIndex") or {})
+    common = set(candidate_index) & set(baseline_index)
+    baseline_only = set(baseline_index) - set(candidate_index)
+    candidate_only = set(candidate_index) - set(baseline_index)
+    return {
+        "commonEpisodeCount": len(common),
+        "commonEpisodePnlDelta": sum(
+            float(candidate_index[key]) - float(baseline_index[key]) for key in common
+        ),
+        "foregoneBaselineEpisodeCount": len(baseline_only),
+        "foregoneBaselinePnl": sum(float(baseline_index[key]) for key in baseline_only),
+        "candidateOnlyEpisodeCount": len(candidate_only),
+        "candidateOnlyPnl": sum(float(candidate_index[key]) for key in candidate_only),
+        "totalNetDelta": float(candidate.get("netPnl") or 0.0) - float(
+            baseline.get("netPnl") or 0.0
+        ),
+        "capacityFitDelta": float(candidate.get("capacityFit") or 0.0) - float(
+            baseline.get("capacityFit") or 0.0
+        ),
+        "openRateDelta": float(candidate.get("openRate") or 0.0) - float(
+            baseline.get("openRate") or 0.0
+        ),
+    }
+
+
+def _profitable_crowding_challenger(rows: Iterable[dict], standard: dict, base: dict) -> dict | None:
+    """Admit one 70-75% capacity surface when its post-skip net profit is materially better."""
+    best = None
+    standard_net = float(standard.get("netPnl") or 0.0)
+    standard_stress = float(standard.get("stressNetPnl", standard_net) or 0.0)
+    tier_by_key = dict(zip(MARGIN_KEYS, ("stable", "mid", "high")))
+    for row in rows:
+        capacity = float(row.get("capacityFit") or 0.0)
+        if not (0.70 <= capacity < float(config.SELECTION_MIN_CAPACITY_FIT)):
+            continue
+        if float(row.get("openRate") or 0.0) < float(config.SELECTION_MIN_ACTIONABLE_RATE):
+            continue
+        if float(row.get("netPnl") or 0.0) < standard_net * 1.05:
+            continue
+        if float(row.get("stressNetPnl", row.get("netPnl")) or 0.0) < standard_stress:
+            continue
+        economics = dict(row.get("tierEconomics") or {})
+        expanded = [
+            tier_by_key[key] for key in MARGIN_KEYS
+            if float((row.get("surface") or {}).get(key) or 0.0) > float(base.get(key) or 0.0) + 1e-12
+        ]
+        if expanded and any(float((economics.get(tier) or {}).get("netPnl") or 0.0) <= 0.0 for tier in expanded):
+            continue
+        if best is None or float(row.get("netPnl") or 0.0) > float(best.get("netPnl") or 0.0):
+            best = row
+    return best
+
+
+def _select_strict_winner(rows: list[dict]) -> dict:
+    """Maximize liquidation-stressed net; inside 8% prefer fewer/smaller liquidations."""
+    def strict_net(row):
+        return float((row.get("validation") or {}).get("netPnl30d", row.get("netPnl")) or 0.0)
+
+    def stress_net(row):
+        validation = row.get("validation") or {}
+        return float(validation.get(
+            "liquidationStressNetPnl30d", row.get("stressNetPnl", strict_net(row)),
+        ) or 0.0)
+
+    best_net = max(stress_net(row) for row in rows)
+    tolerance = max(1.0, abs(best_net) * 0.08)
+    near = [row for row in rows if stress_net(row) >= best_net - tolerance]
+    return max(near, key=lambda row: (
+        -int((row.get("validation") or {}).get("liquidations", row.get("liquidations")) or 0),
+        -float((row.get("validation") or {}).get("maxLiquidationLossPct", row.get("maxLiquidationLossPct")) or 0.0),
+        float((row.get("validation") or {}).get("capacityFit", row.get("capacityFit")) or 0.0),
+        float((row.get("validation") or {}).get("openRate", row.get("openRate")) or 0.0),
+        stress_net(row),
+        strict_net(row),
+    ))
 
 
 def final_membership_margin_surfaces(
     follow: dict, base_surface: dict,
 ) -> list[dict]:
-    """Bounded upward probes for a smaller post-qualification membership.
+    """Reuse the same fair three-tier grid for the exact final membership."""
+    return local_shared_margin_surfaces(follow, base_surface)
 
-    The first local search already tested contractions, leverage and add axes.
-    If individual strict qualification later removes wallets, the remaining
-    set needs one chance to prove that the inherited first-open margins are too
-    small.  Baseline is always retained as the safe fallback; the other eight
-    surfaces are only 15%/30% per-tier and global expansions.
-    """
+
+def grid_upward_extensions(
+    follow: dict, base_surface: dict, rows: Iterable[dict],
+) -> list[dict]:
+    """Continue each profitable/non-degrading +0.5 tier probe by one more grid step."""
     base = _local_complete_surface(follow, base_surface)
-    sizing = enforce_margin_add_capacity(base, follow)
-    ceilings = margin_add_capacity_ceilings(follow)
-    surfaces = [dict(base)]
+    anchor = _margin_grid_surface(follow, base, {
+        key: _margin_grid_floor(base[key]) for key in MARGIN_KEYS
+    })
+    by_marker = {
+        _local_surface_marker(row.get("surface") or {}): row for row in rows
+    }
+    anchor_row = by_marker.get(_local_surface_marker(anchor))
+    if anchor_row is None:
+        return []
+    out = []
     for key in MARGIN_KEYS:
-        for factor in (1.15, 1.30):
-            proposal = dict(base)
-            proposal[key] = min(ceilings[key], float(sizing[key]) * factor)
-            surfaces.append(proposal)
-    for factor in (1.15, 1.30):
-        proposal = dict(base)
-        for key in MARGIN_KEYS:
-            proposal[key] = min(ceilings[key], float(sizing[key]) * factor)
-        surfaces.append(proposal)
-    unique = {}
-    for surface in surfaces:
-        unique.setdefault(_local_surface_marker(surface), surface)
-    return list(unique.values())[:9]
+        first = dict(anchor)
+        first[key] += MARGIN_GRID_STEP
+        first = _margin_grid_surface(follow, base, first)
+        first_row = by_marker.get(_local_surface_marker(first))
+        if first_row is None:
+            continue
+        if float(first_row.get("netPnl") or 0.0) <= float(anchor_row.get("netPnl") or 0.0):
+            continue
+        if float(first_row.get("stressNetPnl", first_row.get("netPnl")) or 0.0) < float(
+            anchor_row.get("stressNetPnl", anchor_row.get("netPnl")) or 0.0
+        ):
+            continue
+        if float(first_row.get("openRate") or 0.0) < float(config.SELECTION_MIN_ACTIONABLE_RATE):
+            continue
+        if float(first_row.get("capacityFit") or 0.0) < 0.70:
+            continue
+        second = dict(first)
+        second[key] += MARGIN_GRID_STEP
+        second = _margin_grid_surface(follow, base, second)
+        if _local_surface_marker(second) != _local_surface_marker(first):
+            out.append(second)
+    return out[:3]
 
 
 def tune_final_membership_margin_surface(
@@ -2026,8 +2115,8 @@ def tune_final_membership_margin_surface(
     """Calibrate first-open margins once for the exact final qualified set.
 
     This is deliberately not another general tuner: it does not search wallet
-    counts, leverage, add parameters or arbitrary subsets.  At most nine quick
-    margin surfaces and three strict finalists are evaluated, then the caller
+    counts, leverage, add parameters or arbitrary subsets.  At most ten base-grid
+    surfaces, three one-step extensions and three strict finalists are evaluated, then the caller
     performs the one bounded individual recheck required by the new surface.
     """
     base = _local_complete_surface(follow, base_surface)
@@ -2048,6 +2137,7 @@ def tune_final_membership_margin_surface(
         deployment = dict(row.get("deploymentUtilization") or {})
         return (
             int(bool(row.get("feasible"))),
+            float(row.get("stressNetPnl", row.get("netPnl")) or 0.0),
             float(row.get("netPnl") or 0.0),
             -int(row.get("liquidations") or 0),
             float(row.get("capacityFit") or 0.0),
@@ -2064,20 +2154,36 @@ def tune_final_membership_margin_surface(
         run(surface, "final_membership_margin_calibration")
         for surface in final_membership_margin_surfaces(follow, base)
     ]
+    rows.extend(
+        run(surface, "final_membership_margin_extension")
+        for surface in grid_upward_extensions(follow, base, rows)
+    )
+    baseline_row = run(base, "final_membership_baseline_control")
+    for row in rows:
+        row["crowdingTradeoff"] = crowding_tradeoff(row, baseline_row)
+    standards = sorted(
+        (row for row in rows if row.get("feasible")), key=rank, reverse=True,
+    )
+    standard = standards[0] if standards else baseline_row
+    crowded = _profitable_crowding_challenger(rows, standard, base)
     strict_candidates = []
-    seen = set()
-    for row in sorted(rows, key=rank, reverse=True):
-        marker = _local_surface_marker(row["surface"])
-        if marker in seen:
+    for row in [*standards[:2], crowded, baseline_row]:
+        if row is None:
             continue
-        seen.add(marker)
+        marker = _local_surface_marker(row["surface"])
+        if any(_local_surface_marker(item["surface"]) == marker for item in strict_candidates):
+            continue
         strict_candidates.append(row)
-        if len(strict_candidates) >= 2:
-            break
-    base_marker = _local_surface_marker(base)
-    if base_marker not in seen:
-        strict_candidates.append(run(base, "final_membership_baseline_control"))
-    strict_candidates = strict_candidates[:3]
+    if crowded is not None:
+        strict_candidates = [standard, crowded, baseline_row]
+    deduped = []
+    seen = set()
+    for row in strict_candidates:
+        marker = _local_surface_marker(row["surface"])
+        if marker not in seen:
+            seen.add(marker)
+            deduped.append(row)
+    strict_candidates = deduped[:3]
     strict_rows = []
     for row in strict_candidates:
         validation = dict(validate(row["surface"]) or {}) if validate else {
@@ -2087,12 +2193,14 @@ def tune_final_membership_margin_surface(
     finalists = [{
         "params": dict(row["surface"]),
         "netPnl": float(row.get("netPnl") or 0.0),
+        "stressNetPnl": float(row.get("stressNetPnl", row.get("netPnl")) or 0.0),
         "feasible": bool(row.get("feasible")),
         "liquidations": int(row.get("liquidations") or 0),
         "openRate": float(row.get("openRate") or 0.0),
         "capacityFit": float(row.get("capacityFit") or 0.0),
         "tierEconomics": dict(row.get("tierEconomics") or {}),
         "deploymentUtilization": dict(row.get("deploymentUtilization") or {}),
+        "crowdingTradeoff": dict(row.get("crowdingTradeoff") or {}),
         "validation": dict(row.get("validation") or {}),
         "eligible": bool((row.get("validation") or {}).get("eligible")),
     } for row in strict_rows]
@@ -2109,7 +2217,7 @@ def tune_final_membership_margin_surface(
             "algorithm": "final_membership_margin_calibration_v1",
             "quick_replay_count": len(cache), "finalists": finalists,
         }
-    winner = max(eligible, key=rank)
+    winner = _select_strict_winner(eligible)
     return {
         "status": "ok", "eligible_to_apply": True,
         "proposal": dict(winner["surface"]),
@@ -2124,6 +2232,7 @@ def tune_final_membership_margin_surface(
         "deployment_utilization": dict(
             winner.get("deploymentUtilization") or {}
         ),
+        "crowding_tradeoff": dict(winner.get("crowdingTradeoff") or {}),
         "finalists": finalists,
     }
 
@@ -2248,6 +2357,7 @@ def tune_local_prefix_surfaces(
     def rank(row: dict) -> tuple:
         return (
             int(bool(row.get("feasible"))),
+            float(row.get("stressNetPnl", row.get("netPnl")) or 0.0),
             float(row.get("netPnl") or 0.0),
             -int(row.get("liquidations") or 0),
             float(row.get("capacityFit") or 0.0),
@@ -2264,13 +2374,23 @@ def tune_local_prefix_surfaces(
         follow, base,
         tier_economics=center_baseline.get("tierEconomics") or {},
     )
-    _breakout_surface, breakout_tier = _local_breakout_margin_surface(
-        follow, base, center_baseline.get("tierEconomics") or {},
-    )
+    breakout_tier = None
     shared_rows = [
         run(count, surface, "tier_shared_candidates")
         for count in primary_counts for surface in shared_surfaces
     ]
+    extension_surfaces = grid_upward_extensions(
+        follow, base,
+        [row for row in shared_rows if row["count"] == center_count],
+    )
+    shared_rows.extend(
+        run(count, surface, "tier_margin_extension")
+        for count in primary_counts for surface in extension_surfaces
+    )
+    for row in shared_rows:
+        row["crowdingTradeoff"] = crowding_tradeoff(
+            row, run(row["count"], base, "tier_baseline_control"),
+        )
     seeds = []
     for count in primary_counts:
         rows = [row for row in shared_rows if row["count"] == count]
@@ -2320,6 +2440,10 @@ def tune_local_prefix_surfaces(
         run(count, surface, "primary_finalist_cross")
         for count in primary_counts for surface in finalist_surfaces
     ]
+    for row in cross_rows:
+        row["crowdingTradeoff"] = crowding_tradeoff(
+            row, run(row["count"], base, "primary_baseline_control"),
+        )
     primary_best = max(cross_rows, key=rank)
 
     guard_rows = []
@@ -2355,6 +2479,16 @@ def tune_local_prefix_surfaces(
         strict_candidates.append(row)
         if len(strict_candidates) >= 3:
             break
+    standard = next(
+        (row for row in sorted(strict_pool, key=rank, reverse=True) if row.get("feasible")),
+        None,
+    )
+    if standard is not None:
+        crowded = _profitable_crowding_challenger(
+            [*refined_rows, *cross_rows, *guard_rows], standard, base,
+        )
+        if crowded is not None:
+            strict_candidates = [standard, crowded, *strict_candidates]
     baseline_pair = (center_count, _local_surface_marker(base))
     if baseline_pair not in {
         (row["count"], _local_surface_marker(row["surface"]))
@@ -2362,6 +2496,14 @@ def tune_local_prefix_surfaces(
     }:
         baseline_row = run(center_count, base, "strict_baseline_control")
         strict_candidates = [*strict_candidates[:2], baseline_row]
+    deduped = []
+    seen_pairs = set()
+    for row in strict_candidates:
+        pair = (row["count"], _local_surface_marker(row["surface"]))
+        if pair not in seen_pairs:
+            seen_pairs.add(pair)
+            deduped.append(row)
+    strict_candidates = deduped[:3]
     strict_rows = []
     for row in strict_candidates:
         validation = dict(validate(row["count"], row["surface"]) or {}) if validate else {
@@ -2372,11 +2514,14 @@ def tune_local_prefix_surfaces(
         "count": int(row["count"]),
         "params": dict(row["surface"]),
         "netPnl": float(row.get("netPnl") or 0.0),
+        "stressNetPnl": float(row.get("stressNetPnl", row.get("netPnl")) or 0.0),
         "feasible": bool(row.get("feasible")),
         "liquidations": int(row.get("liquidations") or 0),
         "openRate": float(row.get("openRate") or 0.0),
         "capacityFit": float(row.get("capacityFit") or 0.0),
         "tierEconomics": dict(row.get("tierEconomics") or {}),
+        "deploymentUtilization": dict(row.get("deploymentUtilization") or {}),
+        "crowdingTradeoff": dict(row.get("crowdingTradeoff") or {}),
         "validation": dict(row.get("validation") or {}),
         "eligible": bool((row.get("validation") or {}).get("eligible")),
     } for row in strict_rows]
@@ -2396,12 +2541,7 @@ def tune_local_prefix_surfaces(
             "stage_durations": {key: round(value, 3) for key, value in stage_durations.items()},
             "finalists": audit_finalists,
         }
-    best_profit = max(float(row.get("netPnl") or 0.0) for row in eligible)
-    near_best = [
-        row for row in eligible
-        if float(row.get("netPnl") or 0.0) >= best_profit - max(1.0, abs(best_profit) * 0.08)
-    ]
-    winner = max(near_best, key=rank)
+    winner = _select_strict_winner(eligible)
     validation = dict(winner.get("validation") or {})
     return {
         "status": "ok", "eligible_to_apply": True,
@@ -2422,6 +2562,8 @@ def tune_local_prefix_surfaces(
         "cache_hit_count": cache_hit_count,
         "stage_durations": {key: round(value, 3) for key, value in stage_durations.items()},
         "tier_economics": winner.get("tierEconomics") or {},
+        "deployment_utilization": winner.get("deploymentUtilization") or {},
+        "crowding_tradeoff": winner.get("crowdingTradeoff") or {},
         "finalists": audit_finalists,
     }
 

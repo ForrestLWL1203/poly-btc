@@ -29,6 +29,11 @@ COPY_POLICY_PARAM_KEYS = (
     "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT",
 )
 
+# Execution semantics belong in the immutable strategy revision even when no
+# numeric parameter changes.  Bump this whenever replay/Paper/Live sizing
+# interpretation changes so old evidence cannot masquerade as current policy.
+COPY_EXECUTION_MODEL_VERSION = "own-tier-leverage-v1"
+
 
 @dataclass(frozen=True)
 class CopyPolicy:
@@ -77,7 +82,10 @@ class CopyPolicy:
 
     @property
     def version(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            {**asdict(self), "execution_model": COPY_EXECUTION_MODEL_VERSION},
+            sort_keys=True, separators=(",", ":"),
+        )
         return "copy-policy-" + hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 

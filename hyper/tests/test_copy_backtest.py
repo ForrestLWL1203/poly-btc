@@ -2,6 +2,7 @@ import unittest
 
 from hyper.copy.copy_backtest import (
     PreparedPricePath,
+    deployment_distribution,
     liquidation_loss_metrics,
     path_risk_metrics,
     prepare_price_path,
@@ -34,6 +35,20 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_deployment_distribution_is_time_weighted_and_reports_tail_percentiles(self):
+        result = deployment_distribution([
+            {"time": 0, "pct": 0.0},
+            {"time": 10, "pct": 0.5},
+            {"time": 30, "pct": 0.9},
+            {"time": 40, "pct": 0.9},
+        ], end_ms=50)
+        self.assertAlmostEqual(result["timeWeightedAvgDeployPct"], 0.56)
+        self.assertAlmostEqual(result["activeTimeWeightedAvgDeployPct"], 0.70)
+        self.assertAlmostEqual(result["activeTimeShare"], 0.8)
+        self.assertEqual(result["percentiles"]["p50"], 0.5)
+        self.assertEqual(result["percentiles"]["p90"], 0.9)
+        self.assertAlmostEqual(result["timeAbove"]["90"], 0.4)
+
     def test_tier_economics_attributes_profit_capacity_and_deployment_without_replay(self):
         closed = [
             {"tier": "mid", "net_pnl": 120.0, "fee_drag": 5.0, "margin": 100.0,
@@ -615,7 +630,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(result["positions"][0]["margin"], 150.0)
         self.assertEqual(result["positions"][0]["leverage"], 25.0)
 
-    def test_master_leverage_on_fill_caps_backtest_leverage_like_live_observer(self):
+    def test_master_leverage_on_fill_does_not_change_our_backtest_leverage(self):
         fills = [
             fill(1, "BTC", "B", 10_000, 0, 100.0, 62),
             fill(2, "BTC", "A", 10_000, 10_000, 101.0, 63),
@@ -629,9 +644,18 @@ class CopyBacktestTests(unittest.TestCase):
         })
 
         self.assertEqual(result["closed_n"], 1)
-        self.assertEqual(result["positions"][0]["leverage"], 5.0)
-        self.assertEqual(result["master_leverage_known"], 1)
-        self.assertEqual(result["master_leverage_missing"], 0)
+        self.assertEqual(result["positions"][0]["leverage"], 25.0)
+        without_target_leverage = [dict(item) for item in fills]
+        without_target_leverage[0].pop("masterLeverage")
+        comparison = run_backtest(
+            "0xabc", without_target_leverage, sigmas={"BTC": 0.04}, overrides={
+                "STABLE_MARGIN_PCT": 0.015,
+                "STABLE_LEV_CAP": 25.0,
+                "STABLE_MIN_NOTIONAL": 0.0,
+            },
+        )
+        self.assertEqual(result["copy_net_pnl"], comparison["copy_net_pnl"])
+        self.assertNotIn("master_leverage_known", result)
 
     def test_tuned_margin_does_not_shrink_before_unified_entry_budget(self):
         fills = []

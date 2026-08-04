@@ -14,7 +14,7 @@ import bisect
 from hyper import config
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
-from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
+from .copy_engine import (OpenSizingParams, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
                           rebase_isolated_position,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
@@ -657,8 +657,6 @@ class Backtest:
         self.path_boundary_skips = 0
         self.ambiguous_path_events = set()
         self.ambiguous_path_mode = str(overrides.get("AMBIGUOUS_PATH_MODE", "ignore") or "ignore")
-        self.master_leverage_known = 0
-        self.master_leverage_missing = 0
         self.maintenance_margin_known = 0
         self.maintenance_margin_missing = 0
         self.deploy_samples = []
@@ -1029,11 +1027,6 @@ class Backtest:
             risk_equity=risk_equity,
             existing_margin=source_existing,
         )
-        master_lev = extract_master_leverage(fill)
-        if master_lev:
-            self.master_leverage_known += 1
-        else:
-            self.master_leverage_missing += 1
         maintenance_leverage = (self.market_ctx.get(coin) or {}).get("max_leverage")
         if maintenance_leverage:
             self.maintenance_margin_known += 1
@@ -1048,7 +1041,7 @@ class Backtest:
             available=avail,
             existing_coin_margin=existing_coin,
             master_notional=target_notl,
-            master_leverage=master_lev,
+            master_leverage=None,
             params=self.open_sizing_params(),
             maintenance_leverage=maintenance_leverage,
             wallet_sector_side_room=group_room,
@@ -1096,7 +1089,6 @@ class Backtest:
             "notional": notional,
             "leverage": lev,
             "maintenance_leverage": maintenance_leverage,
-            "master_leverage": master_lev,
             "liq_px": plan.liq_px,
             "last_target_add_px": px,
             "add_count": 0,
@@ -1616,6 +1608,9 @@ class Backtest:
         deploy_values = [value for _, value in self.deploy_samples]
         peak_deploy_pct = max(deploy_values, default=0.0)
         avg_deploy_pct = (sum(deploy_values) / len(deploy_values)) if deploy_values else 0.0
+        deploy_distribution = deployment_distribution(
+            self.deploy_samples, end_ms=self.valuation_asof_ms,
+        )
         add_metrics = add_fidelity_metrics(all_positions, self.add_outcome_counts)
         profit_metrics = profit_structure_metrics(closed_positions, total_net=closed_net)
         path_metrics = path_risk_metrics(
@@ -1645,10 +1640,6 @@ class Backtest:
                 total_abs += abs(value)
             return (max((abs(value) for value in buckets.values()), default=0.0) / total_abs) if total_abs else 0.0
 
-        leverage_coverage = (
-            self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
-            if (self.master_leverage_known + self.master_leverage_missing) else 1.0
-        )
         maintenance_coverage = (
             self.maintenance_margin_known / (self.maintenance_margin_known + self.maintenance_margin_missing)
             if (self.maintenance_margin_known + self.maintenance_margin_missing) else 1.0
@@ -1659,8 +1650,6 @@ class Backtest:
         fallback_reasons = []
         if not self.price_path_points:
             fallback_reasons.append("missing_price_path")
-        if leverage_coverage < 1.0:
-            fallback_reasons.append("missing_master_leverage")
         path_complete = bool(
             self.price_path_points
             and price_path_coverage >= float(getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", 0.95))
@@ -1746,6 +1735,7 @@ class Backtest:
             "cvar95": cvar95,
             "peak_deploy_pct": peak_deploy_pct,
             "avg_deploy_pct": avg_deploy_pct,
+            "deployment_distribution": deploy_distribution,
             "deploy_samples": [
                 {"time": int(stamp), "pct": float(value)}
                 for stamp, value in self.deploy_samples
@@ -1777,13 +1767,10 @@ class Backtest:
             "path_liquidation_times": self.path_liquidation_times,
             "current_open_loss_frac": current_open_loss,
             "current_bag_hours": current_bag_hours,
-            "master_leverage_known": self.master_leverage_known,
-            "master_leverage_missing": self.master_leverage_missing,
-            "master_leverage_coverage": leverage_coverage,
             "maintenance_margin_coverage": maintenance_coverage,
             "maintenance_margin_known": self.maintenance_margin_known,
             "maintenance_margin_missing": self.maintenance_margin_missing,
-            "model_coverage": min(leverage_coverage, maintenance_coverage, price_path_coverage),
+            "model_coverage": min(maintenance_coverage, price_path_coverage),
             "fallback_reasons": fallback_reasons,
             "skip_reasons": dict(self.skip_reasons),
             "positions": closed_positions,
@@ -1832,7 +1819,6 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
         },
         "entry_px": p["entry_px"],
         "master_avg_px": p["master_open_px"],
-        "master_leverage": p.get("master_leverage"),
         "leverage": p["leverage"],
         "margin": p["margin"],
         "risk_equity_at_open": p.get("risk_equity_at_open"),
@@ -1963,6 +1949,68 @@ def tier_economics(closed_positions, open_positions, *, open_events=(), add_even
             item["avgDeployPct"] / total_deploy if total_deploy else 0.0
         )
     return tiers
+
+
+def deployment_distribution(samples, *, end_ms=None) -> dict:
+    """Time-weighted deployment distribution derived from one replay's event samples."""
+    by_time = {}
+    for row in samples or ():
+        item = (
+            {"time": int(row.get("time") or 0), "pct": max(0.0, f(row.get("pct")))}
+            if isinstance(row, dict)
+            else {"time": int(row[0] or 0), "pct": max(0.0, f(row[1]))}
+        )
+        # Several fills can share a millisecond. The last state at that instant owns the next interval.
+        by_time[item["time"]] = item
+    rows = sorted(by_time.values(), key=lambda row: row["time"])
+    if not rows:
+        return {
+            "timeWeightedAvgDeployPct": 0.0,
+            "activeTimeWeightedAvgDeployPct": 0.0,
+            "activeTimeShare": 0.0,
+            "percentiles": {key: 0.0 for key in ("p50", "p75", "p90", "p95", "p99")},
+            "timeAbove": {key: 0.0 for key in ("70", "80", "90", "95")},
+        }
+    deltas = [max(0, right["time"] - left["time"]) for left, right in zip(rows, rows[1:])]
+    terminal = int(end_ms or rows[-1]["time"])
+    tail_weight = max(0, terminal - rows[-1]["time"])
+    weighted = [
+        (row["pct"], deltas[index] if index < len(deltas) else tail_weight)
+        for index, row in enumerate(rows)
+    ]
+    weighted = [(value, weight) for value, weight in weighted if weight > 0]
+    if not weighted:
+        weighted = [(rows[-1]["pct"], 1)]
+    total_weight = sum(weight for _value, weight in weighted) or 1
+    active_weight = sum(weight for value, weight in weighted if value > 1e-12)
+
+    def weighted_quantile(q: float) -> float:
+        threshold = total_weight * q
+        cumulative = 0
+        for value, weight in sorted(weighted):
+            cumulative += weight
+            if cumulative >= threshold:
+                return value
+        return max(value for value, _weight in weighted)
+
+    return {
+        "timeWeightedAvgDeployPct": sum(value * weight for value, weight in weighted) / total_weight,
+        "activeTimeWeightedAvgDeployPct": (
+            sum(value * weight for value, weight in weighted if value > 1e-12) / active_weight
+            if active_weight else 0.0
+        ),
+        "activeTimeShare": active_weight / total_weight,
+        "percentiles": {
+            key: weighted_quantile(q)
+            for key, q in (("p50", .50), ("p75", .75), ("p90", .90), ("p95", .95), ("p99", .99))
+        },
+        "timeAbove": {
+            str(int(threshold * 100)): sum(
+                weight for value, weight in weighted if value >= threshold
+            ) / total_weight
+            for threshold in (.70, .80, .90, .95)
+        },
+    }
 
 
 def liquidation_loss_metrics(positions, *, fallback_equity):
@@ -2186,16 +2234,24 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     )
     if str(out.get("path_risk_status") or "") != "complete":
         path_risk["path_risk_status"] = str(out.get("path_risk_status") or "missing")
-    deploy_samples = [
-        dict(row) for row in (out.get("deploy_samples") or ())
-        if int(row.get("time") or 0) >= int(start_ms)
-    ]
+    def sliced_deploy_samples(rows):
+        rows = list(rows or ())
+        prior = max(
+            (row for row in rows if int(row.get("time") or 0) < int(start_ms)),
+            key=lambda row: int(row.get("time") or 0), default=None,
+        )
+        sliced = []
+        if prior:
+            sliced.append({"time": int(start_ms), "pct": f(prior.get("pct"))})
+        sliced.extend(
+            dict(row) for row in rows if int(row.get("time") or 0) >= int(start_ms)
+        )
+        return sliced
+
+    deploy_samples = sliced_deploy_samples(out.get("deploy_samples"))
     deploy_values = [f(row.get("pct")) for row in deploy_samples]
     tier_deploy_samples = {
-        tier: [
-            dict(row) for row in rows
-            if int(row.get("time") or 0) >= int(start_ms)
-        ]
+        tier: sliced_deploy_samples(rows)
         for tier, rows in dict(out.get("tier_deploy_samples") or {}).items()
     }
     out.update({
@@ -2256,6 +2312,9 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "peak_deploy_pct": max(deploy_values, default=0.0),
         "avg_deploy_pct": (
             sum(deploy_values) / len(deploy_values) if deploy_values else 0.0
+        ),
+        "deployment_distribution": deployment_distribution(
+            deploy_samples, end_ms=out.get("valuation_asof_ms"),
         ),
         "deploy_samples": deploy_samples,
         "tier_deploy_samples": tier_deploy_samples,

@@ -55,7 +55,7 @@ export function OpenPositionsTable({
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
-                  <div className="muted" title="源(目标钱包)的加权均价(随其加仓更新)· 杠杆">源 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
+                  <div className="muted" title="源(目标钱包)的加权均价，随其加仓更新">源 {fPrice(p.masterEntry)}</div></td>
                 <td className="num">{fUsd(p.notional)}
                   <div className="muted" title="源(目标钱包)这一单的名义额(我们 ≤ 它)">源 {fUsd(p.masterNotional)}</div></td>
                 <td className="num">{fPrice(p.mark)}</td>

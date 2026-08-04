@@ -48,7 +48,7 @@ def ep_positions(db, qs):
         rows = qall(db, _follow_set_cte() +
                     ", closed_base AS ("
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
-                    "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
+                    "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_peak_sz,"
                     "cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id "
                     f"FROM {position_table} cp WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
@@ -81,7 +81,7 @@ def ep_positions(db, qs):
                         "followPos": r["follow_pos"],
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
-                        "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
+                        "masterEntry": r["master_open_px"],
                         "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
                         "strategyRevision": r["strategy_revision_id"],
                         })
@@ -123,7 +123,7 @@ def ep_positions(db, qs):
         _follow_set_cte() +
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
-        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,"
+        "cp.master_open_px,cp.master_peak_sz,cp.strategy_revision_id,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos,"
         "fs.retention_status,fs.retention_failure_streak,"
         "fs.operator_intent,fs.risk_block_reason "
@@ -154,7 +154,7 @@ def ep_positions(db, qs):
             "operatorIntent": r["operator_intent"] or "active",
             "executionBlockReason": r["risk_block_reason"],
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
-            "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
+            "masterEntry": r["master_open_px"],
             "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
             "addCount": r["add_count"] or 0,
             "strategyRevision": r["strategy_revision_id"],

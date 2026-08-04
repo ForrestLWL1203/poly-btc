@@ -397,6 +397,9 @@ and may find candidates, but must not replace the unbiased sample when choosing 
 The replay uses the same copyable-fill normalization and shared execution state used by the Observer. It models
 shared available balance, isolated margin, volatility-tier sizing, leverage caps, deployment and per-coin caps,
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
+Target wallets provide direction, timing and position-change signals; their leverage is not a sizing input and
+is not present in historical fills. Replay, Paper and Live use our tier leverage capped by each market's venue
+maximum, so the strategy is calibrated to our account rather than to the source account's capital scale.
 
 A replay starts with standardized `$10,000` equity and continuously compounds it. Conservative dynamic return
 divides complete closed-Episode PnL minus all current open loss by the applicable window-start floating equity;
@@ -449,8 +452,9 @@ daily refreshes, but it can run beside Observer; Observer keeps the old immutabl
 new selection, tuned parameters, and revision publish atomically.
 
 `python3 -m hyper.cli.discover --db data/hl.db calibrate-current-core --apply` is the narrower production
-operation for an already published Core. It freezes the exact current membership, tests at most nine
-first-open margin surfaces and three strict finalists, then atomically activates the winner only if every
+operation for an already published Core. It freezes the exact current membership, tests an exact control plus
+at most ten three-tier 0.5-percentage-point grid surfaces and three conditional upward extensions, with at most
+three strict finalists, then atomically activates the winner only if every
 current member and the shared account still pass strict certification. It never refetches wallets, changes
 Core membership, searches leverage/add axes, or starts the general optimizer. Without `--apply` it validates
 and caches the same evidence without changing live parameters.
@@ -458,7 +462,8 @@ and caches the same evidence without changing live parameters.
 The search evaluates a bounded local parameter surface, a small finalist set, continuous-capital windows and
 strict price-path validation. Production formation does not enumerate arbitrary wallet subsets, leave-one-out
 variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a bounded strict-prefix
-count center, crosses at most nine shared tier-margin surfaces over n±1, applies n±2 guards, and sends at most
+count center, crosses at most ten shared tier-margin surfaces plus three conditional extensions over n±1,
+applies n±2 guards, and sends at most
 three candidates to strict validation. Completed strict-prefix summaries
 are cached by generation, parameter surface and membership hash, so a retry resumes without keeping full
 trajectories in memory. It never changes Core membership using stale profiles and never runs a candle replay for
@@ -479,12 +484,12 @@ Pre-strict 粗评分没有60分基线，评分也始终不能替代任何准入�
 下一次完整扫描会把新公式作为正式不可变分数发布。
 
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
-margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;
-the exact best-profit surface is always retained. Only inside the configured near-best profit band does the tuner
-prefer fewer liquidations, less balance congestion, better open capture, and then stronger measured add fidelity;
-a low-risk surface outside that band cannot win merely by under-deploying. A profit-retaining proposal that
-strictly reduces liquidation evidence can be accepted as a safety repair even when it does not claim the ordinary
-minimum relative gain.
+margin (`margin × leverage` stays near the active notional before caps). Selection does not blindly maximize raw
+historical profit: each strict finalist is also scored after adding 50% more liquidations at that surface's worst
+historical single-liquidation loss. Pressure-adjusted profit leads; inside its 8% near-best band the tuner prefers
+fewer and smaller liquidations, then better capacity/open capture. Any single liquidation reaching 8% of opening
+equity remains a hard rejection. This keeps profitable risk-taking possible without assuming next month's
+liquidation count will equal the last 30 days.
 
 The current Paper defaults allow automatic application after the validation gates:
 

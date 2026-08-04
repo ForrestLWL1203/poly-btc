@@ -465,21 +465,6 @@ def smart_take_profit_decision(
     )
 
 
-def extract_master_leverage(fill: dict | None) -> float | None:
-    if not isinstance(fill, dict):
-        return None
-    for key in ("masterLeverage", "master_leverage", "targetLeverage", "target_leverage"):
-        lev = f(fill.get(key))
-        if lev > 0:
-            return lev
-    lev_obj = fill.get("leverage")
-    if isinstance(lev_obj, dict):
-        lev = f(lev_obj.get("value"))
-    else:
-        lev = f(lev_obj)
-    return lev if lev > 0 else None
-
-
 def plan_open_sizing(
     *,
     coin: str,
@@ -493,6 +478,7 @@ def plan_open_sizing(
     master_leverage: float | None,
     params: OpenSizingParams,
     maintenance_leverage: float | None = None,
+    existing_coin_leverage: float | None = None,
     wallet_sector_side_room: float | None = None,
     wallet_room: float | None = None,
 ) -> OpenSizingPlan:
@@ -503,8 +489,15 @@ def plan_open_sizing(
     # it creates impossible notionals and false liquidations (for example ETH/XRP under a 35x stable cap).
     if maintenance_leverage and maintenance_leverage > 0:
         lev = max(params.min_lev, min(lev, float(maintenance_leverage)))
-    if master_leverage and master_leverage > 0:
-        lev = max(params.min_lev, float(int(min(lev, master_leverage))))
+    # Copy risk is defined by our versioned tier surface, not by a source-wallet setting that historical
+    # fills do not contain.  Keeping source leverage out of sizing makes Paper, replay and Live identical.
+    # During a policy transition, however, Hyperliquid has one aggregate leverage setting per coin; reuse an
+    # already-open coin's leverage until it is flat instead of silently modifying that real position.
+    if existing_coin_leverage and existing_coin_leverage > 0:
+        locked = float(int(existing_coin_leverage))
+        if maintenance_leverage and maintenance_leverage > 0:
+            locked = min(locked, float(maintenance_leverage))
+        lev = max(params.min_lev, locked)
 
     risk_equity = max(0.0, balance)
     risk_available = max(0.0, min(available, risk_equity))

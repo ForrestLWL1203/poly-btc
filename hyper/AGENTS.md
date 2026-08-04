@@ -543,8 +543,8 @@ retain and expose the generation's original score as audit evidence; never rewri
 Current Paper defaults deliberately allow the full closed loop:
 
 - `AUTO_TUNE_MODE=apply`;
-- minimum shadow days, forward closed episodes and master-leverage coverage are zero for Paper; refined price
-  path and maintenance-metadata coverage still default to 94% and 95%;
+- minimum shadow days and forward closed episodes are zero for Paper; target leverage is not a model input;
+  refined price path and maintenance-metadata coverage still default to 94% and 95%;
 - a changed parameter candidate still must pass OOS/holdout/stress/risk gates;
 - portfolio tuning has no wall-clock cutoff; finite axes and finalist limits bound completion;
 - live-money deployments should use conservative shadow/coverage/forward thresholds instead.
