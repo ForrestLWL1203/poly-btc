@@ -232,6 +232,7 @@ class Observer:
         self.stop = False
         self._background_tasks: dict[str, asyncio.Task] = {}
         self._signal_tasks: set[asyncio.Task] = set()
+        self._critical_background_failure: BaseException | None = None
         self._live_order_inflight = 0
         prior_state = self.db.execute(
             "SELECT state FROM process_status WHERE name='observer'"
@@ -294,6 +295,7 @@ class Observer:
             _log(f"background task {name} failed: {message}")
             if not critical:
                 return
+            self._critical_background_failure = exc or RuntimeError(f"{name}_exited")
             self.stop = True
             try:
                 if self.execution_mode == "live":
@@ -320,6 +322,21 @@ class Observer:
 
         task.add_done_callback(_done)
         return task
+
+    def _raise_critical_background_failure(self) -> None:
+        """Make systemd's Restart=on-failure contract see critical loop exits.
+
+        The main WebSocket loop previously observed ``self.stop`` and returned
+        normally after a critical task crashed.  The CLI therefore exited 0 and
+        systemd left Live positions unmanaged.  An intentional drain/stop does
+        not set this field and still exits normally.
+        """
+        failure = self._critical_background_failure
+        if failure is None:
+            return
+        raise RuntimeError(
+            f"critical_background_task_failed:{type(failure).__name__}:{str(failure)[:120]}"
+        ) from failure
 
     def _signal_row(self, signal_id: int):
         return self.db.execute(
@@ -1338,6 +1355,7 @@ class Observer:
             try:
                 await self._reconcile_open()
             except Exception as exc:  # noqa: BLE001
+                self._rollback_db()
                 _log(f"reconcile loop error: {exc}")
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
@@ -1880,7 +1898,13 @@ class Observer:
     async def live_reconcile_loop(self):
         """Continuously refresh exchange truth and freeze increases on drift."""
         while not self.stop and self.execution_mode == "live":
-            await self._reconcile_live_once()
+            try:
+                await self._reconcile_live_once()
+            except Exception as exc:  # noqa: BLE001 - a short SQLite writer race is recoverable
+                if not self._is_db_contention(exc):
+                    raise
+                self._rollback_db()
+                _log("live reconcile database busy; rolled back and will retry")
             await asyncio.sleep(15)
 
     async def prune_live_fills(self):
@@ -1955,15 +1979,18 @@ class Observer:
         # A process may die after acknowledgement but before completing a signed order/ledger commit.
         # Requeue only Observer-owned commands; command-id-derived source event ids make Live closes
         # deterministic across the restart.
-        self.db.execute(
-            "UPDATE commands SET status='pending',acked_at=NULL,error=NULL "
-            "WHERE status='acked' AND type IN (" + ",".join("?" * len(OWNED)) + ")",
-            OWNED,
-        )
-        self.db.commit()
+        initialized = False
         last_hb = 0.0
         while not self.stop:
             try:
+                if not initialized:
+                    self.db.execute(
+                        "UPDATE commands SET status='pending',acked_at=NULL,error=NULL "
+                        "WHERE status='acked' AND type IN (" + ",".join("?" * len(OWNED)) + ")",
+                        OWNED,
+                    )
+                    self.db.commit()
+                    initialized = True
                 rows = self.db.execute(
                     "SELECT id,type,payload_json FROM commands WHERE status='pending' AND type IN "
                     "(" + ",".join("?" * len(OWNED)) + ") ORDER BY id", OWNED).fetchall()
@@ -2512,89 +2539,107 @@ class Observer:
         """
         if self.execution_mode != "live":
             return
-        self.db.execute(
+        initialized = False
+        last_busy_log_ms = 0
+        while not self.stop:
+            try:
+                if not initialized:
+                    self.db.execute(
+                        "UPDATE execution_signal SET state='retryable',next_attempt_ms=0,"
+                        "last_error=COALESCE(last_error,'observer_restarted'),updated_at=? "
+                        "WHERE mode='live' AND session_id=? AND state='processing'",
+                        (now_iso(), self.execution_session_id),
+                    )
+                    self.db.commit()
+                    initialized = True
+                await self._signal_retry_once()
+            except Exception as exc:  # noqa: BLE001 - SQLite writer races are locally recoverable
+                if not self._is_db_contention(exc):
+                    raise
+                self._rollback_db()
+                current_ms = now_ms()
+                if current_ms - last_busy_log_ms >= 5_000:
+                    _log("signal retry database busy; rolled back and will retry")
+                    last_busy_log_ms = current_ms
+                await asyncio.sleep(0.25)
+
+    async def _signal_retry_once(self):
+        """Process at most one durable signal; caller owns DB-contention retry."""
+        self._assert_mode_binding()
+        if self._signal_tasks:
+            await asyncio.sleep(0.05)
+            return
+        # With a single consumer, `processing` and no in-memory task can only mean the runner died
+        # between state changes.  Reclaim it immediately instead of waiting for another process restart.
+        reclaimed = self.db.execute(
             "UPDATE execution_signal SET state='retryable',next_attempt_ms=0,"
-            "last_error=COALESCE(last_error,'observer_restarted'),updated_at=? "
+            "last_error=COALESCE(last_error,'signal_runner_abandoned'),updated_at=? "
             "WHERE mode='live' AND session_id=? AND state='processing'",
             (now_iso(), self.execution_session_id),
-        )
-        self.db.commit()
-        while not self.stop:
-            self._assert_mode_binding()
-            if self._signal_tasks:
-                await asyncio.sleep(0.05)
-                continue
-            # With a single consumer, `processing` and no in-memory task can only mean the runner died
-            # between state changes.  Reclaim it immediately instead of waiting for another process restart.
-            reclaimed = self.db.execute(
-                "UPDATE execution_signal SET state='retryable',next_attempt_ms=0,"
-                "last_error=COALESCE(last_error,'signal_runner_abandoned'),updated_at=? "
-                "WHERE mode='live' AND session_id=? AND state='processing'",
-                (now_iso(), self.execution_session_id),
-            ).rowcount
-            if reclaimed:
-                self.db.commit()
-            rows = self.db.execute(
-                "SELECT s.signal_id,s.payload_json FROM execution_signal s "
-                "WHERE s.mode='live' AND s.session_id=? AND s.state IN ('pending','retryable') "
-                "AND s.next_attempt_ms<=? AND NOT EXISTS ("
-                "SELECT 1 FROM execution_signal prior WHERE prior.mode=s.mode "
-                "AND prior.session_id=s.session_id AND prior.addr=s.addr "
-                "AND prior.coin=s.coin AND prior.state IN ('pending','retryable','processing') "
-                "AND (prior.source_time_ms<s.source_time_ms OR "
-                "(prior.source_time_ms=s.source_time_ms AND prior.signal_id<s.signal_id))) "
-                "ORDER BY s.source_time_ms,s.signal_id LIMIT 1",
-                (
-                    self.execution_session_id, now_ms(),
-                ),
-            ).fetchall()
-            for signal_id, payload_json in rows:
-                try:
-                    x = json.loads(payload_json)
-                    addr = str(x.get("_addr") or "").lower()
-                    if not addr:
-                        source = self.db.execute(
-                            "SELECT addr FROM execution_signal WHERE signal_id=?", (signal_id,),
-                        ).fetchone()
-                        addr = str(source[0] or "").lower() if source else ""
-                    coin = x.get("coin")
-                    if not addr or not coin or x.get("tid") is None:
-                        raise ValueError("invalid_signal_payload")
-                    oid = x.get("oid")
-                    actions = {
-                        str(row[0] or "")
-                        for row in self.db.execute(
-                            "SELECT action FROM live_copy_action "
-                            "WHERE lower(addr)=lower(?) AND coin=? AND ts=? "
-                            "AND ((master_oid=?) OR (master_oid IS NULL AND ? IS NULL))",
-                            (addr, coin, int(x["time"]), oid, oid),
-                        ).fetchall()
-                    }
-                    signed = f(x.get("sz")) if x.get("side") == "B" else -f(x.get("sz"))
-                    pos0 = f(x.get("startPosition"))
-                    pos1 = pos0 + signed
-                    transition = classify_fill_transition(pos0, pos1)
-                    terminal_action = (
-                        (transition == "open" and "open" in actions)
-                        or (transition == "add" and "add" in actions)
-                        or (transition == "reduce" and bool(actions & {"reduce", "close"}))
-                        # A flip is two-phase.  A close action alone must resume the reverse open.
-                        or (transition == "flip" and "open" in actions)
-                    )
-                    if terminal_action:
-                        self._mark_signal(signal_id, "completed", code="LEDGER_ACTION_PRESENT")
-                        continue
-                    self._dispatch_fill(
-                        addr, coin, (addr, coin), int(x["time"]), signed, pos0, pos1,
-                        f(x.get("px")), bool(x.get("liquidation")), oid,
-                        signal_id=int(signal_id),
-                    )
-                except Exception as exc:  # noqa: BLE001 - keep corrupt/transient rows visible
-                    self._rollback_db()
-                    self._mark_signal(
-                        int(signal_id), "retryable", code=type(exc).__name__, error=exc, retry=True,
-                    )
-            await asyncio.sleep(0.05 if rows else 0.25)
+        ).rowcount
+        if reclaimed:
+            self.db.commit()
+        rows = self.db.execute(
+            "SELECT s.signal_id,s.payload_json FROM execution_signal s "
+            "WHERE s.mode='live' AND s.session_id=? AND s.state IN ('pending','retryable') "
+            "AND s.next_attempt_ms<=? AND NOT EXISTS ("
+            "SELECT 1 FROM execution_signal prior WHERE prior.mode=s.mode "
+            "AND prior.session_id=s.session_id AND prior.addr=s.addr "
+            "AND prior.coin=s.coin AND prior.state IN ('pending','retryable','processing') "
+            "AND (prior.source_time_ms<s.source_time_ms OR "
+            "(prior.source_time_ms=s.source_time_ms AND prior.signal_id<s.signal_id))) "
+            "ORDER BY s.source_time_ms,s.signal_id LIMIT 1",
+            (
+                self.execution_session_id, now_ms(),
+            ),
+        ).fetchall()
+        for signal_id, payload_json in rows:
+            try:
+                x = json.loads(payload_json)
+                addr = str(x.get("_addr") or "").lower()
+                if not addr:
+                    source = self.db.execute(
+                        "SELECT addr FROM execution_signal WHERE signal_id=?", (signal_id,),
+                    ).fetchone()
+                    addr = str(source[0] or "").lower() if source else ""
+                coin = x.get("coin")
+                if not addr or not coin or x.get("tid") is None:
+                    raise ValueError("invalid_signal_payload")
+                oid = x.get("oid")
+                actions = {
+                    str(row[0] or "")
+                    for row in self.db.execute(
+                        "SELECT action FROM live_copy_action "
+                        "WHERE lower(addr)=lower(?) AND coin=? AND ts=? "
+                        "AND ((master_oid=?) OR (master_oid IS NULL AND ? IS NULL))",
+                        (addr, coin, int(x["time"]), oid, oid),
+                    ).fetchall()
+                }
+                signed = f(x.get("sz")) if x.get("side") == "B" else -f(x.get("sz"))
+                pos0 = f(x.get("startPosition"))
+                pos1 = pos0 + signed
+                transition = classify_fill_transition(pos0, pos1)
+                terminal_action = (
+                    (transition == "open" and "open" in actions)
+                    or (transition == "add" and "add" in actions)
+                    or (transition == "reduce" and bool(actions & {"reduce", "close"}))
+                    # A flip is two-phase.  A close action alone must resume the reverse open.
+                    or (transition == "flip" and "open" in actions)
+                )
+                if terminal_action:
+                    self._mark_signal(signal_id, "completed", code="LEDGER_ACTION_PRESENT")
+                    continue
+                self._dispatch_fill(
+                    addr, coin, (addr, coin), int(x["time"]), signed, pos0, pos1,
+                    f(x.get("px")), bool(x.get("liquidation")), oid,
+                    signal_id=int(signal_id),
+                )
+            except Exception as exc:  # noqa: BLE001 - keep corrupt/transient rows visible
+                self._rollback_db()
+                self._mark_signal(
+                    int(signal_id), "retryable", code=type(exc).__name__, error=exc, retry=True,
+                )
+        await asyncio.sleep(0.05 if rows else 0.25)
 
     def _apply_authoritative_marks(self, contexts: dict, coins) -> int:
         """Apply fresh exchange markPx values and evaluate mark-based risk.
@@ -2792,6 +2837,7 @@ class Observer:
                 self._live_executor_db.close()
             except Exception:  # noqa: BLE001 - shutdown must not mask the completed drain
                 pass
+        self._raise_critical_background_failure()
 
     # -- WS message router (bbo only) ----------------------------------------
     def on_message(self, raw: str):

@@ -224,6 +224,48 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_signal_retry_survives_temporary_sqlite_writer_lock(self):
+        async def run():
+            db = self._db()
+            self._activate_live(db)
+            db.execute("PRAGMA busy_timeout=1")
+            obs = Observer(db, [], {})
+            db_path = db.execute("PRAGMA database_list").fetchone()[2]
+            blocker = sqlite3.connect(db_path, timeout=0.01)
+            blocker.execute("PRAGMA busy_timeout=1")
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                task = asyncio.create_task(obs.signal_retry_loop())
+                await asyncio.sleep(0.08)
+                self.assertFalse(task.done())
+                self.assertFalse(obs.stop)
+            finally:
+                blocker.rollback()
+                blocker.close()
+            await asyncio.sleep(0.08)
+            obs.stop = True
+            await task
+
+        asyncio.run(run())
+
+    def test_critical_background_failure_is_propagated_for_systemd_restart(self):
+        async def run():
+            obs = Observer(self._db(), [], {})
+
+            async def fail():
+                raise RuntimeError("test critical failure")
+
+            obs._spawn_background(fail(), "test_loop", critical=True)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(obs.stop)
+            with self.assertRaisesRegex(
+                RuntimeError, "critical_background_task_failed:RuntimeError:test critical failure",
+            ):
+                obs._raise_critical_background_failure()
+
+        asyncio.run(run())
+
     def test_flip_signal_with_only_close_action_resumes_reverse_open(self):
         async def run():
             db = self._db()
