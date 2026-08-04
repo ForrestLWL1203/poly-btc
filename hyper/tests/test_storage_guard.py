@@ -61,10 +61,11 @@ class StorageGuardTests(unittest.TestCase):
             "INSERT INTO pipeline_audit(stamp,source,stage,reason,created_at) VALUES (?,?,?,?,?)",
             rows,
         )
+        stale = self._generation(0, source="scan", status="leaderboard_validated")
         base = self._generation(1, source="scan")
-        building = self._generation(2, status="ready")
         for n in range(3, 36):
             self._generation(n, current=int(n == 35))
+        building = self._generation(36, status="ready")
         self.db.commit()
 
         result = storage_guard.run(
@@ -86,9 +87,16 @@ class StorageGuardTests(unittest.TestCase):
         self.assertIn(base, kept)
         self.assertIn(building, kept)
         self.assertEqual(kept, {base, building, "g35"})
+        self.assertEqual(
+            self.db.execute(
+                "SELECT status FROM scan_generation WHERE generation=?", (stale,),
+            ).fetchone()[0],
+            "failed",
+        )
+        self.assertEqual(result["retention"]["supersededGenerations"], 1)
         self.assertEqual(result["retention"]["deletedPipelineRows"], 5)
         self.assertEqual(
-            result["retention"]["generationCleanup"]["leaderboard_staging"], 32,
+            result["retention"]["generationCleanup"]["leaderboard_staging"], 33,
         )
 
     def test_warns_on_daily_growth_disk_and_wal_thresholds(self):

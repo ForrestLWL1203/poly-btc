@@ -123,16 +123,31 @@ def _delete_batches(
 def protected_generations(db: sqlite3.Connection) -> dict[str, list[str] | str | None]:
     """Return the only generation ids allowed to keep reusable bulk state."""
     rows = db.execute(
-        "SELECT generation,source,status,complete,is_current FROM scan_generation ORDER BY id"
+        "SELECT id,generation,source,status,complete,is_current "
+        "FROM scan_generation ORDER BY id"
     ).fetchall()
-    nonterminal = {
-        str(row[0]) for row in rows if str(row[2]) not in TERMINAL_GENERATION_STATES
-    }
-    current = next((str(row[0]) for row in reversed(rows) if int(row[4] or 0)), None)
-    latest_full = next((
-        str(row[0]) for row in reversed(rows)
-        if str(row[1] or "") == "scan" and str(row[2]) == "published" and int(row[3] or 0)
+    current_row = next((row for row in reversed(rows) if int(row[5] or 0)), None)
+    latest_full_row = next((
+        row for row in reversed(rows)
+        if str(row[2] or "") == "scan" and str(row[3]) == "published" and int(row[4] or 0)
     ), None)
+    current_id = int(current_row[0]) if current_row else None
+    latest_full_id = int(latest_full_row[0]) if latest_full_row else None
+    superseded = {
+        str(row[1])
+        for row in rows
+        if str(row[3]) not in TERMINAL_GENERATION_STATES
+        and (
+            (str(row[2] or "") == "scan" and latest_full_id is not None and int(row[0]) < latest_full_id)
+            or (str(row[2] or "") != "scan" and current_id is not None and int(row[0]) < current_id)
+        )
+    }
+    nonterminal = {
+        str(row[1]) for row in rows
+        if str(row[3]) not in TERMINAL_GENERATION_STATES and str(row[1]) not in superseded
+    }
+    current = str(current_row[1]) if current_row else None
+    latest_full = str(latest_full_row[1]) if latest_full_row else None
     cache = set(nonterminal)
     if current:
         cache.add(current)
@@ -145,9 +160,27 @@ def protected_generations(db: sqlite3.Connection) -> dict[str, list[str] | str |
         "current": current,
         "latestFullScan": latest_full,
         "nonterminal": sorted(nonterminal),
+        "superseded": sorted(superseded),
         "cache": sorted(cache),
         "evidence": sorted(evidence),
     }
+
+
+def _mark_superseded_generations(
+    db: sqlite3.Connection, protected: dict, *, failed_at: str,
+) -> int:
+    generations = tuple(protected.get("superseded") or ())
+    if not generations:
+        return 0
+    before = db.total_changes
+    db.execute(
+        f"UPDATE scan_generation SET status='failed',complete=0,publishable=0,"
+        f"failed_at=?,error=COALESCE(error,'superseded_by_newer_published_generation') "
+        f"WHERE generation IN ({_marks(generations)}) "
+        f"AND status NOT IN ('published','failed')",
+        (failed_at, *generations),
+    )
+    return int(db.total_changes - before)
 
 
 def _outside_generations(keep: Iterable[str]) -> tuple[str, tuple]:
@@ -451,6 +484,10 @@ def post_publish_cleanup(
         (generation, legacy_stamp),
     )
     protected = protected_generations(db)
+    superseded = _mark_superseded_generations(
+        db, protected, failed_at=_iso(time.time() if now_epoch is None else now_epoch),
+    )
+    db.commit()
     generations = _prune_generation_data(db, protected)
     now_epoch = float(time.time() if now_epoch is None else now_epoch)
     execution = prune_execution_transients(db, now_epoch=now_epoch)
@@ -470,6 +507,7 @@ def post_publish_cleanup(
         "expiredPriceCandles": price_candles,
         "blacklistCleanup": blacklist_cleanup,
         "protectedGenerations": protected,
+        "supersededGenerations": superseded,
     }
 
 
@@ -501,6 +539,7 @@ def run(
         }
     else:
         with db:
+            _mark_superseded_generations(db, protected, failed_at=checked_at)
             bootstrapped_blacklist = collection_blacklist.bootstrap_from_profiles(
                 db, stamp=checked_at,
             )
@@ -614,6 +653,7 @@ def run(
         },
         "retention": {
             "protectedGenerations": protected,
+            "supersededGenerations": len(protected.get("superseded") or ()),
             "deletedPipelineRows": deleted_pipeline_rows,
             "generationCleanup": generation_cleanup,
             "executionDiagnostics": execution_cleanup,
