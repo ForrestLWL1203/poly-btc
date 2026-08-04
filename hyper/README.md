@@ -188,7 +188,8 @@ Wallet quality and funded-account membership are separate decisions.
   same-coin specialization and planned adds inside one Episode are not failures.
   Historical replay assumes liquidity was executable. Every source flat-to-open lifecycle is eligible without
   a source-notional threshold; our open is sized independently by our equity, margin, leverage and capacity
-  rules. Further fills from the opening OID extend the opening anchor and are never treated as
+  rules. Observer records source position leverage when available for Dashboard audit, but it never enters
+  replay, Paper or Live sizing. Further fills from the opening OID extend the opening anchor and are never treated as
   smart adds. A later add OID may wait for cumulative slices to become actionable, but its first Copy execution
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.

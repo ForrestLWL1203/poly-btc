@@ -543,7 +543,8 @@ retain and expose the generation's original score as audit evidence; never rewri
 Current Paper defaults deliberately allow the full closed loop:
 
 - `AUTO_TUNE_MODE=apply`;
-- minimum shadow days and forward closed episodes are zero for Paper; target leverage is not a model input;
+- minimum shadow days and forward closed episodes are zero for Paper; target leverage is display/audit metadata,
+  not a model input;
   refined price path and maintenance-metadata coverage still default to 94% and 95%;
 - a changed parameter candidate still must pass OOS/holdout/stress/risk gates;
 - portfolio tuning has no wall-clock cutoff; finite axes and finalist limits bound completion;
@@ -601,7 +602,8 @@ through those retries; only markets still missing after all five attempts are cl
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use
-  the same tier leverage cap, plus the venue maximum and source-wallet leverage cap.
+  the same tier leverage cap, clipped only by the venue maximum. Observer may persist source-wallet leverage for
+  Dashboard audit, but that value never changes our sizing.
 - `MARGIN_EQUITY_PCT` is the single manual new-entry risk budget (default 90%, UI range 10–100%). It scales
   each new position's drawdown-adjusted equity base and also caps aggregate fresh-position margin against real
   risk equity. Once that cap is reached, new positions stop; follow-on adds may still use remaining real cash

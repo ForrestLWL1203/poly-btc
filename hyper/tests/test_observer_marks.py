@@ -84,6 +84,46 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         obs.bbo[coin] = (bid, ask)
         obs.bbo_ms[coin] = now_ms()
 
+    def test_target_snapshot_keeps_source_leverage_as_audit_only_metadata(self):
+        obs = Observer(self._db(), [], {})
+        state = {"assetPositions": [{"position": {
+            "coin": "BTC", "szi": "2", "entryPx": "101", "marginUsed": "40",
+            "leverage": {"type": "cross", "value": 5},
+        }}]}
+
+        with patch("hyper.execution.observer.rest.clearinghouse_state", return_value=state):
+            self.assertEqual(obs._target_snapshot("0xaaa", "BTC"), (40.0, 101.0, 5.0))
+
+    def test_reconcile_backfills_source_leverage_without_changing_ours(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.taker.open_ep = {
+                ("0xaaa", "BTC"): {"pos_id": pos_id, "side": "long", "entry_px": 100.0,
+                                     "realized_pnl": 0.0},
+            }
+            state = {"assetPositions": [{"position": {
+                "coin": "BTC", "szi": "2", "entryPx": "101", "marginUsed": "40",
+                "leverage": {"type": "cross", "value": 3},
+            }}]}
+
+            with patch("hyper.execution.observer.rest.clearinghouse_state", return_value=state):
+                await obs._reconcile_open()
+
+            row = db.execute(
+                "SELECT leverage,master_leverage,master_margin,master_open_px "
+                "FROM copy_position WHERE pos_id=?", (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["leverage"], 5)
+            self.assertEqual(row["master_leverage"], 3)
+            self.assertEqual(row["master_margin"], 40)
+            self.assertEqual(row["master_open_px"], 101)
+
+        asyncio.run(run())
+
     def test_observer_restart_preserves_operator_pause(self):
         db = self._db()
         db.execute(
@@ -1706,7 +1746,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             }
 
             with (
-                patch.object(obs, "_target_snapshot", return_value=(4, None)) as target_snapshot,
+                patch.object(obs, "_target_snapshot", return_value=(4, None, 2)) as target_snapshot,
                 patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=shallow_book),
             ):
                 obs._open_position("0xaaa", "VINE", now_ms(), 0.0098, -100000, 1, obs.taker)
@@ -1748,7 +1788,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             }
 
             with (
-                patch.object(obs, "_target_snapshot", return_value=(5, 100)),
+                patch.object(obs, "_target_snapshot", return_value=(5, 100, 2)),
                 patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=deep_book),
             ):
                 obs._open_position("0xaaa", "TAO", now_ms(), 100, 2500, 1, obs.taker)

@@ -23,7 +23,7 @@ export function ClosedPositionsTable({
     <React.Fragment>
       <div className="tbl-wrap">
         <table>
-          <thead><tr><th>币种</th><th>方向</th><th className="num">源入场</th><th className="num">入场/杠杆</th><th>结算类型</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>钱包</th></tr></thead>
+          <thead><tr><th>币种</th><th>方向</th><th className="num">源入场/杠杆</th><th className="num">入场/杠杆</th><th>结算类型</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>钱包</th></tr></thead>
           <tbody>
             {rows.length === 0 && <tr><td colSpan="10" className="empty">暂无</td></tr>}
             {items.map(p => { const pid = Number(String(p.id).replace("cls_", "")); const isOpen = expandedId === pid;
@@ -32,7 +32,8 @@ export function ClosedPositionsTable({
                 <td><span className="row-caret" style={{ transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span> <b>{p.coin}</b>
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                <td className="num muted" title="源(目标钱包)的加权均价，随其加仓更新">{fPrice(p.masterEntry)}</td>
+                <td className="num muted" title="源(目标钱包)最后记录的加权均价与仓位杠杆；仅展示，不参与我方下单计算">
+                  {fPrice(p.masterEntry)} · {p.masterLeverage != null ? fNum(p.masterLeverage, 0) + "x" : "—x"}</td>
                 <td className="num" title="我们的加权均价 · 杠杆">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x</td>
                 <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}
                   <div className="muted" style={{ fontSize: 11 }} title="我们的实际平仓价">@ {fPrice(p.closePx)}</div></td>

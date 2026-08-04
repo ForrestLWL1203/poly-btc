@@ -10,7 +10,7 @@ export function PositionDetail({ d }) {
     <div className="pos-detail">
       <div className="pos-detail-sum">
         <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
-        <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b></span>
+        <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b> · {d.masterLeverage != null ? fNum(d.masterLeverage, 0) + "x" : "—x"}</span>
         <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
         <span>我方投入保证金 <b>{fUsd(d.ourMargin)}</b></span>
         <span>{live ? "浮动" : "已实现"}盈亏 <b className={cls(pnl)}>{fSign(pnl, 1)}</b></span>

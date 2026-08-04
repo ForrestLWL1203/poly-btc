@@ -61,14 +61,14 @@ class ApiPositionsPerfTests(unittest.TestCase):
         db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,liq_px,"
-            "mark_px,unrealized_pnl,opened_at,add_count) "
-            "VALUES ('0xaaa','BTC','long','open',100,5,100,500,5,5,80,101,5,'2026-01-01T00:00:00Z',0)"
+            "mark_px,unrealized_pnl,master_open_px,master_leverage,opened_at,add_count) "
+            "VALUES ('0xaaa','BTC','long','open',100,5,100,500,5,5,80,101,5,99,3,'2026-01-01T00:00:00Z',0)"
         )
         db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
-            "master_open_px,was_liq,opened_at,closed_at,add_count) "
-            "VALUES ('0xaaa','ETH','short','closed',10,200,4,800,4,200,0,"
+            "master_open_px,master_leverage,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','ETH','short','closed',10,200,4,800,4,200,2,0,"
             "'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',1)"
         )
         db.commit()
@@ -86,11 +86,13 @@ class ApiPositionsPerfTests(unittest.TestCase):
         self.assertEqual(res["positions"][0]["followPos"], 1)
         self.assertEqual(res["positions"][0]["retentionStatus"], "probation")
         self.assertEqual(res["positions"][0]["retentionFailureStreak"], 1)
+        self.assertEqual(res["positions"][0]["masterLeverage"], 3)
 
     def test_closed_positions_embed_follow_positions_without_extra_query(self):
         res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
+        self.assertEqual(res["positions"][0]["masterLeverage"], 2)
 
     def test_closed_position_close_type_follows_terminal_status_not_stale_flag(self):
         db = self._db()

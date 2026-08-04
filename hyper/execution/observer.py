@@ -652,22 +652,27 @@ class Observer:
             db.close()
 
     def _target_snapshot(self, addr, coin):
-        """Return the source's current margin and entry for immutable episode audit.
+        """Return the source's current margin, entry and leverage for episode audit.
 
-        Source leverage is intentionally neither returned nor persisted: our versioned tier leverage is the
-        only sizing input, matching historical replay where fills do not carry leverage.
+        Source leverage is display/audit metadata only. It must never enter our sizing calculation: our
+        versioned tier leverage remains the sole strategy input, matching historical replay where fills do not
+        reliably carry source leverage.
         """
         dex = coin.split(":")[0] if ":" in coin else None
         cs = rest.clearinghouse_state(addr, dex)
-        margin = entry = None
+        margin = entry = leverage = None
         if isinstance(cs, dict):
             for ap in cs.get("assetPositions", []):
                 pos = ap.get("position", {})
                 if pos.get("coin") == coin:
                     entry = f(pos.get("entryPx"))
                     margin = f(pos.get("marginUsed"))
+                    leverage_value = pos.get("leverage")
+                    if isinstance(leverage_value, dict):
+                        leverage_value = leverage_value.get("value")
+                    leverage = f(leverage_value) or None
                     break
-        return margin, entry
+        return margin, entry, leverage
 
     def _copyable(self, coin: str) -> bool:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
@@ -1278,7 +1283,7 @@ class Observer:
             # standard perp + each builder dex we hold a position on (stock perps aren't in the
             # standard clearinghouseState — without the dex they'd read as flat and get wrong-closed).
             dexes = sorted({c.split(":")[0] for (a, c) in book.open_ep if a == addr and ":" in c})
-            szi, all_ok = {}, True
+            source_positions, all_ok = {}, True
             for dex in [None] + dexes:
                 st = await asyncio.to_thread(rest.clearinghouse_state, addr, dex)
                 if not isinstance(st, dict):
@@ -1287,15 +1292,32 @@ class Observer:
                 for ap in st.get("assetPositions", []):
                     p = ap.get("position", {}) or {}
                     if p.get("coin") is not None:
-                        szi[p["coin"]] = f(p.get("szi")) or 0.0
+                        leverage_value = p.get("leverage")
+                        if isinstance(leverage_value, dict):
+                            leverage_value = leverage_value.get("value")
+                        source_positions[p["coin"]] = {
+                            "size": f(p.get("szi")) or 0.0,
+                            "entry": f(p.get("entryPx")) or None,
+                            "margin": f(p.get("marginUsed")) or None,
+                            "leverage": f(leverage_value) or None,
+                        }
             if not all_ok:
                 continue
             for (a, coin), ep in list(book.open_ep.items()):
                 if a != addr:
                     continue
-                m = szi.get(coin, 0.0)                # master's signed size on this coin, now
+                source = source_positions.get(coin) or {}
+                m = source.get("size", 0.0)          # master's signed size on this coin, now
                 still = (m > config.FLAT) if ep["side"] == "long" else (m < -config.FLAT)
                 if still:
+                    # Backfill source metadata for current/legacy rows. This audit path deliberately does not
+                    # alter our leverage or sizing state.
+                    self.db.execute(
+                        f"UPDATE {book.pos_table} SET master_leverage=COALESCE(?,master_leverage),"
+                        "master_margin=COALESCE(?,master_margin),"
+                        "master_open_px=COALESCE(?,master_open_px) WHERE pos_id=?",
+                        (source.get("leverage"), source.get("margin"), source.get("entry"), ep["pos_id"]),
+                    )
                     continue                          # master still in it (same side) -> keep & follow
                 ba = await asyncio.to_thread(rest.book_top, coin)
                 mid = ((ba[0] + ba[1]) / 2) if ba else ep["entry_px"]
@@ -1303,6 +1325,7 @@ class Observer:
                                          closing=True, liq=False, gap=True, forced_px=mid, book=book)
                 _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
                      f"pnl=${ep['realized_pnl']:+,.1f}  bal=${book.balance:,.0f} (master no longer holds it)")
+            self.db.commit()
 
     async def reconcile_loop(self):
         """Periodic safety net for the startup reconcile. Forward polling should catch a master's close
@@ -3169,7 +3192,7 @@ class Observer:
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         # Fetch source position audit and L2 concurrently outside the account lock. The L2 is assessed only after
         # sizing determines OUR actual notional, but it must not add a second network round trip to entry lag.
-        (m_mgn, m_entry), liquidity_book = await asyncio.gather(
+        (m_mgn, m_entry, m_lev), liquidity_book = await asyncio.gather(
             asyncio.to_thread(self._target_snapshot, addr, coin),
             self._live_liquidity_book(coin),
         )
@@ -3360,13 +3383,13 @@ class Observer:
                       maintenance_leverage=maintenance_leverage,
                       master_first_notl=target_notl,      # confirmed source opening → smart-add ratio anchor
                       last_target_add_px=master_px)       # 波动闸只比较目标成交价；我方BBO只负责执行/PnL
-            self.db.execute(                         # persist source margin/entry audit, never source leverage
+            self.db.execute(                         # source audit only; our sizing never reads m_lev
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
-                "liq_px=?,master_leverage=NULL,master_margin=?,master_open_notional=?,"
+                "liq_px=?,master_leverage=?,master_margin=?,master_open_notional=?,"
                 "master_open_px=COALESCE(?,master_open_px),opening_account_equity=? "
                 "WHERE pos_id=?",
                 (
-                    lev, margin, notional, px, size, size, size, liq_px, m_mgn,
+                    lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn,
                     target_notl, m_entry, risk_equity, ep["pos_id"],
                 ))
             if self.execution_mode != "live":
