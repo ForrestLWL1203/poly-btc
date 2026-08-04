@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from hyper import config, storage
 from hyper.execution.live_executor import LiveExecutionResult
 from hyper.execution.observer import Observer, RetryableSignalError, TerminalSignalError
+from hyper.market import ws
 from hyper.market import volatility
 from hyper.util import now_iso, now_ms
 
@@ -83,6 +84,63 @@ class ObserverMarkRefreshTests(unittest.TestCase):
     def _set_bbo(obs, coin, bid, ask):
         obs.bbo[coin] = (bid, ask)
         obs.bbo_ms[coin] = now_ms()
+
+    def test_xyz_uses_same_ws_bbo_and_official_mark_subscriptions_as_crypto(self):
+        async def run():
+            obs = Observer(self._db(), [], {})
+            obs.valid_coins = {"BTC", "xyz:SNDK"}
+            obs.crypto_coins = {"BTC"}
+            obs.ws = object()
+
+            def discard(coro, *_args, **_kwargs):
+                coro.close()
+                return None
+
+            with patch.object(obs, "_spawn_background", side_effect=discard), \
+                    patch.object(obs, "_sub", new_callable=AsyncMock) as subscribe:
+                await obs.ensure_coin("BTC")
+                await obs.ensure_coin("xyz:SNDK")
+
+            self.assertEqual(
+                [call.args[0] for call in subscribe.await_args_list],
+                [
+                    ws.bbo("BTC"), ws.active_asset_ctx("BTC"),
+                    ws.bbo("xyz:SNDK"), ws.active_asset_ctx("xyz:SNDK"),
+                ],
+            )
+            self.assertEqual(obs.sub_coins, {"BTC", "xyz:SNDK"})
+
+        asyncio.run(run())
+
+    def test_active_asset_ctx_updates_official_mark_and_dashboard_pnl(self):
+        db = self._db()
+        obs = Observer(db, [], {})
+        obs.on_message(json.dumps({
+            "channel": "activeAssetCtx",
+            "data": {"coin": "BTC", "ctx": {"markPx": "110.0"}},
+        }))
+
+        row = db.execute(
+            "SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='BTC'"
+        ).fetchone()
+        self.assertEqual(obs.mark_mid["BTC"], 110.0)
+        self.assertGreater(obs.official_mark_ms["BTC"], 0)
+        self.assertEqual((row["mark_px"], row["unrealized_pnl"]), (110.0, 20.0))
+
+    def test_fresh_ws_marks_skip_rest_fallback(self):
+        async def run():
+            obs = Observer(self._db(), [], {})
+            obs.taker.open_ep = {
+                ("0xaaa", "BTC"): {"master_open_px": None},
+                ("0xbbb", "xyz:SNDK"): {"master_open_px": None},
+            }
+            obs.crypto_coins = {"BTC"}
+            obs.official_mark_ms = {"BTC": now_ms(), "xyz:SNDK": now_ms()}
+            with patch("hyper.execution.observer.rest.asset_contexts") as fetch:
+                self.assertEqual(await obs._refresh_stale_authoritative_marks_once(), 0)
+            fetch.assert_not_called()
+
+        asyncio.run(run())
 
     def test_target_snapshot_keeps_source_leverage_as_audit_only_metadata(self):
         obs = Observer(self._db(), [], {})
@@ -975,7 +1033,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_stale_builder_quote_is_refetched_before_execution(self):
+    def test_stale_builder_quote_does_not_poll_rest_from_observer(self):
         async def run():
             db = self._db()
             obs = Observer(db, [], {})
@@ -985,9 +1043,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             with patch("hyper.execution.observer.rest.realtime_book_top", return_value=(222.0, 223.0)) as fetch:
                 px = await obs._execution_px("xyz:IBM", True, 224.0)
 
-            self.assertEqual(px, 223.0)
-            self.assertEqual(obs.bbo["xyz:IBM"], (222.0, 223.0))
-            fetch.assert_called_once_with("xyz:IBM")
+            self.assertEqual(px, 224.0)
+            self.assertEqual(obs.bbo["xyz:IBM"], (220.0, 221.0))
+            fetch.assert_not_called()
 
         asyncio.run(run())
 

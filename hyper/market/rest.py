@@ -23,9 +23,14 @@ _request_stats = {
 _WEIGHT_ESTIMATE = {
     "userFills": 20, "userFillsByTime": 20, "portfolio": 20,
     "clearinghouseState": 2, "spotClearinghouseState": 2,
-    "candleSnapshot": 2, "meta": 2, "metaAndAssetCtxs": 2,
+    "l2Book": 2, "allMids": 2, "orderStatus": 2, "exchangeStatus": 2,
+    # The official schedule classifies all other documented /info calls as weight 20.
+    "candleSnapshot": 20, "meta": 20, "metaAndAssetCtxs": 20,
 }
-_RESULT_WEIGHTED_TYPES = {"userFills", "userFillsByTime", "frontendOpenOrders"}
+_RESULT_WEIGHT_DIVISORS = {
+    "userFills": 20, "userFillsByTime": 20, "frontendOpenOrders": 20,
+    "candleSnapshot": 60,
+}
 _budget = {
     "enabled": False,
     "weight_per_min": 0.0,
@@ -150,9 +155,10 @@ def _rate_limit_feedback(*, limited: bool) -> None:
 
 def _charge_result_weight(body: dict, result) -> int:
     """Charge response-sized weight after the server reveals the returned row count."""
-    if body.get("type") not in _RESULT_WEIGHTED_TYPES or not isinstance(result, list):
+    divisor = _RESULT_WEIGHT_DIVISORS.get(body.get("type"))
+    if divisor is None or not isinstance(result, list):
         return 0
-    extra = (len(result) + 19) // 20
+    extra = (len(result) + divisor - 1) // divisor
     if extra <= 0:
         return 0
     with _stats_lock:
@@ -312,7 +318,7 @@ def spot_clearinghouse_state(addr: str):
 
 def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
     """OHLC candles for coin over the last `days` (for realized-volatility sizing). Returns a list of
-    {t,T,s,i,o,c,h,l,v,n} or None. Cheap (weight 2); callers cache + refresh off the signal hot path."""
+    {t,T,s,i,o,c,h,l,v,n} or None. Callers cache + refresh this weight-20 request off the signal hot path."""
     now = int(time.time() * 1000)
     return post_soft({"type": "candleSnapshot",
                       "req": {"coin": coin, "interval": interval,
@@ -357,8 +363,8 @@ def asset_context(coin: str):
 
 
 def perp_universe() -> set:
-    """Standard crypto perp coin names. These price via WS bbo (subscribing bbo for a name NOT in
-    here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs).
+    """Standard crypto perp coin names. Builder/HIP-3 names are classified separately even though both
+    groups support the same public WS BBO and activeAssetCtx subscriptions.
     Retries: an empty result here is load-bearing — callers filter copyable fills by it, so a
     transient empty would silently DROP ALL CRYPTO. Retry hard before giving up."""
     for _ in range(6):
@@ -372,8 +378,8 @@ def perp_universe() -> set:
 
 
 # Transparent real-asset builder dexes we copy (stocks/commodities/indices, fully-qualified names
-# like 'xyz:AAPL'). Verified 2026-06-25: these price via REST l2Book {"coin":"xyz:AAPL"} and
-# allMids {"dex":"xyz"} (WS bbo does NOT serve builder dexes). EXCLUDES vntl (SPACEX/OPENAI/ANTHROPIC
+# like 'xyz:AAPL'). Verified 2026-08-04: these support public WS BBO/activeAssetCtx using the fully-qualified
+# coin name; REST l2Book remains an execution-time read only. EXCLUDES vntl (SPACEX/OPENAI/ANTHROPIC
 # = private-company synthetics, no transparent market price) and crypto-duplicate dexes (hyna/para).
 BUILDER_DEXES = ("xyz",)
 
@@ -423,8 +429,7 @@ def copyable_universe(builder_dexes=BUILDER_DEXES, force=False) -> set:
 
 
 def book_top(coin: str):
-    """Best (bid, ask) for ANY coin incl builder/stock perps, via REST l2Book — works where WS bbo
-    doesn't (builder dexes). Returns (bid, ask) or None."""
+    """On-demand best (bid, ask) for any standard or builder perp via REST l2Book."""
     b = post_soft({"type": "l2Book", "coin": coin})
     lv = b.get("levels") if isinstance(b, dict) else None
     if lv and len(lv) == 2 and lv[0] and lv[1]:

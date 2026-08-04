@@ -17,3 +17,8 @@ def sub_msg(subscription: dict) -> str:
 
 def bbo(coin: str) -> dict:
     return {"type": "bbo", "coin": coin}
+
+
+def active_asset_ctx(coin: str) -> dict:
+    """Official per-market mark context for standard and HIP-3 perpetuals."""
+    return {"type": "activeAssetCtx", "coin": coin}

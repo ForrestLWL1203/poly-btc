@@ -571,8 +571,10 @@ through those retries; only markets still missing after all five attempts are cl
 - A target newly added to Observer starts at the current time and never backfills historical fills into a new
   copy book. Within an active Mainnet session, source cursors and received fills are durable: a worker restart
   resumes the bounded polling window and retries every non-terminal signal with deterministic order ids.
-- Signal source is REST `userFillsByTime`; standard-perp pricing uses WS BBO and builder/stock pricing uses REST
-  `l2Book`.
+- Signal source is REST `userFillsByTime`; standard and transparent builder/stock perps use the same per-coin
+  WS BBO plus `activeAssetCtx` official-mark subscriptions. REST `l2Book` is fetched only for an actual
+  open/add/reduce/close execution. Official marks use a low-frequency REST fallback only after their WS stream
+  becomes stale.
 - Observer normally loads parameters, enabled Core targets, account context and sector policies from the active
   immutable strategy revision whose generation matches the current published selection. The direct published-
   selection/params loader is a rolling-migration fallback only. Existing positions for removed, disabled, or

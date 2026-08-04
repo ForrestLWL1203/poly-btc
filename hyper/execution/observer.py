@@ -198,11 +198,11 @@ class Observer:
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.bbo_ms: dict = {}           # coin -> local receive time; stale cached quotes cannot execute
         self.mark_mid: dict = {}         # coin -> latest official markPx used for display/risk
+        self.official_mark_ms: dict = {} # coin -> local receive time of activeAssetCtx/REST fallback
         self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
         self.hb: dict = {}               # per-heartbeat-interval tally (fills seen / copied / skipped-by-reason);
         #                                  reset each _announce. Answers "why no trades".
-        self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
-        self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
+        self.sub_coins: set = set()      # executable coins with WS bbo + activeAssetCtx subscriptions
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
@@ -995,21 +995,22 @@ class Observer:
         return ask if is_buy else bid             # honest taker catch-up across the spread, CURRENT book
 
     async def _execution_px(self, coin, is_buy, fallback):
-        """Return a fresh Paper quote without reusing an undated/stale order book."""
+        """Return the public WS execution quote or the target fill as a safe fallback.
+
+        This path plans Paper/Live intent only.  LiveExecutor always requests and
+        validates a fresh L2 book immediately before submitting a real order, so
+        the Observer must not duplicate that REST call merely because WS is stale.
+        """
         cached = self._fill_px(coin, is_buy, None)
         if cached:
             return cached
-        if coin.startswith("xyz:") or coin in self.stock_coins:
-            ba = await asyncio.to_thread(rest.realtime_book_top, coin)
-            if ba and ba[0] and ba[1] and ba[1] >= ba[0] > 0:
-                self.bbo[coin] = ba
-                self.bbo_ms[coin] = now_ms()
-                return ba[1] if is_buy else ba[0]
         return fallback
 
     def _mark_px(self, coin: str, fallback=None):
         mid = self.mark_mid.get(coin)
-        if mid and mid > 0:
+        mark_stamp = int(self.official_mark_ms.get(coin) or 0)
+        mark_fresh = not mark_stamp or now_ms() - mark_stamp <= config.AUTHORITATIVE_MARK_WS_STALE_MS
+        if mid and mid > 0 and mark_fresh:
             return mid
         ba = self.bbo.get(coin)
         if ba and ba[0] and ba[1]:
@@ -1711,22 +1712,19 @@ class Observer:
                     pass
 
     async def ensure_coin(self, coin: str):
-        """Route a coin to its pricing source: crypto -> WS bbo subscription; transparent builder
-        (stock/commodity) -> the REST l2Book poll set (WS bbo can't serve builder dexes)."""
-        if not coin or coin in self.sub_coins or coin in self.stock_coins:
+        """Subscribe every executable standard/HIP-3 perp to identical BBO and official-mark feeds."""
+        if not coin or coin in self.sub_coins:
             return
         self._spawn_background(
             self._ensure_vol(coin), f"ensure_vol:{coin}", critical=False,
         )
-        if coin in self.crypto_coins:
-            if self.ws is not None:
+        if self._copyable(coin) and self.ws is not None:
+            try:
+                await self._sub(ws.bbo(coin))
+                await self._sub(ws.active_asset_ctx(coin))
                 self.sub_coins.add(coin)
-                try:
-                    await self._sub(ws.bbo(coin))
-                except Exception:  # noqa: BLE001
-                    self.sub_coins.discard(coin)
-        elif self._copyable(coin):                 # builder/stock perp -> REST l2Book pricing
-            self.stock_coins.add(coin)
+            except Exception:  # noqa: BLE001
+                self.sub_coins.discard(coin)
 
     async def heartbeat(self):
         while not self.stop:
@@ -2654,6 +2652,7 @@ class Observer:
             if mark <= 0:
                 continue
             self.mark_mid[coin] = mark
+            self.official_mark_ms[coin] = now_ms()
             self._refresh_coin_marks_throttled(coin)
             for (a, c), ep in self.open_ep.items():
                 if c == coin and ep["master_open_px"]:
@@ -2665,58 +2664,46 @@ class Observer:
             applied += 1
         return applied
 
-    # -- OFFICIAL MARKS for liquidation + builder/stock REST execution books --
-    async def poll_authoritative_marks(self):
-        """Poll metaAndAssetCtxs markPx for every open market.
+    # -- Official mark REST fallback (normal realtime path is WS activeAssetCtx) --
+    async def _refresh_stale_authoritative_marks_once(self) -> int:
+        open_coins = {coin for (_, coin) in self.open_ep}
+        stale_before = now_ms() - int(config.AUTHORITATIVE_MARK_WS_STALE_MS)
+        stale_coins = {
+            coin for coin in open_coins
+            if int(self.official_mark_ms.get(coin) or 0) < stale_before
+        }
+        groups = {}
+        for coin in stale_coins:
+            dex = None if coin in self.crypto_coins else coin.split(":", 1)[0] if ":" in coin else None
+            groups.setdefault(dex, set()).add(coin)
+        if not groups:
+            return 0
+        dexes = list(groups)
+        results = await asyncio.gather(*(
+            asyncio.to_thread(rest.asset_contexts, dex, False) for dex in dexes
+        ))
+        return sum(
+            self._apply_authoritative_marks(contexts, groups[dex])
+            for dex, contexts in zip(dexes, results)
+        )
 
-        This is separate from fill polling and l2Book warming so liquidation checks are never blocked behind
-        historical REST work.  A failed/missing mark is fail-closed: hold and retry, never substitute a mid.
+    async def poll_authoritative_marks(self):
+        """Low-frequency REST safety fallback when official WS marks become stale.
+
+        Both standard and HIP-3 markets normally use per-coin ``activeAssetCtx``. REST is paced and used only
+        after the stream is stale long enough to preserve target-signal and order capacity.
         """
         last_log = 0
         while not self.stop:
-            open_coins = {coin for (_, coin) in self.open_ep}
-            groups = {}
-            for coin in open_coins:
-                dex = None if coin in self.crypto_coins else coin.split(":", 1)[0] if ":" in coin else None
-                groups.setdefault(dex, set()).add(coin)
+            await asyncio.sleep(config.AUTHORITATIVE_MARK_REST_FALLBACK_S)
             try:
-                dexes = list(groups)
-                results = await asyncio.gather(*(
-                    asyncio.to_thread(rest.asset_contexts, dex, True) for dex in dexes
-                ))
-                applied = sum(
-                    self._apply_authoritative_marks(contexts, groups[dex])
-                    for dex, contexts in zip(dexes, results)
-                )
-                if open_coins and time.time() - last_log > 300:
-                    _log(f"official marks refreshed: {applied}/{len(open_coins)} open coins")
+                applied = await self._refresh_stale_authoritative_marks_once()
+                if applied and time.time() - last_log > 300:
+                    _log(f"official mark REST fallback refreshed: {applied} stale open coins")
                     last_log = time.time()
             except Exception as exc:  # noqa: BLE001
                 self._rollback_db()
-                _log(f"official mark refresh failed: {exc}")
-            await asyncio.sleep(2 if open_coins else 5)
-
-    async def poll_stock_books(self):
-        """Keep best bid/ask warm for stock execution pricing. Round-robin: marks come from allMids."""
-        book_i = 0
-        while not self.stop:
-            coins = sorted(self.stock_coins)
-
-            if coins:
-                coin = coins[book_i % len(coins)]
-                book_i += 1
-                try:
-                    ba = await asyncio.to_thread(rest.book_top, coin)
-                except Exception as exc:  # noqa: BLE001
-                    _log(f"stock book {coin} failed: {exc}")
-                    ba = None
-                if ba and ba[0] and ba[1] and ba[0] > 0 and ba[1] > 0:   # need a REAL two-sided book —
-                    if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
-                        ba = None
-                    if ba:
-                        self.bbo[coin] = ba                              # used for execution bid/ask
-                        self.bbo_ms[coin] = now_ms()
-            await asyncio.sleep(2 if self.stock_coins else 5)
+                _log(f"official mark REST fallback failed: {exc}")
 
     @staticmethod
     def _quiet(loop, context):
@@ -2741,20 +2728,17 @@ class Observer:
         # fails closed if either standard Crypto or the transparent builder/stock universe is missing;
         # starting with a partial set would silently ignore one whole sector of Core signals.
         self.valid_coins = rest.copyable_universe(force=True)
-        self.crypto_coins = rest.perp_universe()           # standard perps price via WS bbo
+        self.crypto_coins = rest.perp_universe()           # classification only; every perp prices via WS
         if not self.crypto_coins or not self.crypto_coins.issubset(self.valid_coins):
             raise RuntimeError("copyable universe mismatch — refusing partial Observer market scope")
-        _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
-             f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
+        _log(f"universe: {len(self.crypto_coins)} crypto + "
+             f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (unified WS pricing)")
         self._load_account(self.taker)
         self._reload_open(self.taker)
         if self.execution_mode == "live":
             self._verify_live_ledger_projection()
         self._resolve_all_draining_intents()
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
-        for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
-            if coin not in self.crypto_coins and self._copyable(coin):
-                self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_strategy(init=True)           # atomic Core + exact follow-param revision
         try:
@@ -2794,7 +2778,6 @@ class Observer:
         self._spawn_background(self.wallet_safety_retry_loop(), "wallet_safety", critical=False)
         self._spawn_background(self.prune_live_fills(), "prune", critical=False)
         self._spawn_background(self.poll_authoritative_marks(), "authoritative_marks", critical=False)
-        self._spawn_background(self.poll_stock_books(), "stock_books", critical=False)
         self._spawn_background(self.poll_loop(), "poll", critical=True)
         while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
             try:
@@ -2839,11 +2822,16 @@ class Observer:
                 pass
         self._raise_critical_background_failure()
 
-    # -- WS message router (bbo only) ----------------------------------------
+    # -- WS message router: unified standard/HIP-3 BBO + official marks ------
     def on_message(self, raw: str):
         m = json.loads(raw)
         if m.get("channel") == "bbo":
             self.on_bbo(m.get("data", {}))
+        elif m.get("channel") == "activeAssetCtx":
+            data = m.get("data") or {}
+            coin = data.get("coin")
+            if coin:
+                self._apply_authoritative_marks({coin: data.get("ctx") or {}}, {coin})
 
     def on_bbo(self, d: dict):
         coin = d.get("coin")
@@ -2928,7 +2916,7 @@ class Observer:
                     self._confirm_wallet_safety(addr, coin),
                     f"wallet_safety:{addr[:8]}:{coin}", critical=False,
                 )
-            if coin not in self.sub_coins and coin not in self.stock_coins:
+            if coin not in self.sub_coins:
                 self._spawn_background(
                     self.ensure_coin(coin), f"ensure_coin:{coin}", critical=False,
                 )
@@ -2953,7 +2941,7 @@ class Observer:
                 self._confirm_wallet_safety(addr, coin),
                 f"wallet_safety:{addr[:8]}:{coin}", critical=False,
             )
-        if coin not in self.sub_coins and coin not in self.stock_coins:
+        if coin not in self.sub_coins:
             self._spawn_background(
                 self.ensure_coin(coin), f"ensure_coin:{coin}", critical=False,
             )

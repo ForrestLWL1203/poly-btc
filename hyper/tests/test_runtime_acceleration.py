@@ -42,6 +42,13 @@ class RuntimeAccelerationTests(unittest.TestCase):
             self.assertAlmostEqual(rest._reserve_post(20), 1.0)
             self.assertAlmostEqual(rest._reserve_post(2), 0.1)
 
+    def test_official_rest_weights_cover_market_calls_correctly(self):
+        self.assertEqual(rest._WEIGHT_ESTIMATE["l2Book"], 2)
+        self.assertEqual(rest._WEIGHT_ESTIMATE["allMids"], 2)
+        self.assertEqual(rest._WEIGHT_ESTIMATE["metaAndAssetCtxs"], 20)
+        self.assertEqual(rest._WEIGHT_ESTIMATE["meta"], 20)
+        self.assertEqual(rest._WEIGHT_ESTIMATE["candleSnapshot"], 20)
+
     def test_active_scan_weight_budget_preserves_heavy_interval(self):
         self.assertAlmostEqual(
             discover._scan_post_weight_budget(True, 8.0),
