@@ -138,6 +138,9 @@ class StorageGuardTests(unittest.TestCase):
 
         self.assertTrue(result["dryRun"])
         self.assertEqual(result["retention"]["deletedPipelineRows"], 1)
+        self.assertGreater(result["retention"]["estimatedReclaimedPages"], 0)
+        self.assertGreater(result["retention"]["estimatedReclaimedBytes"], 0)
+        self.assertEqual(result["database"]["reclaimedFreelistBytes"], 0)
         self.assertEqual(result["retention"]["protectedGenerations"]["current"], current)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pipeline_audit").fetchone()[0], 1)
         self.assertEqual(

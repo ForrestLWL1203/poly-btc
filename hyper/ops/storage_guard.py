@@ -24,6 +24,35 @@ TERMINAL_GENERATION_STATES = ("published", "failed")
 TERMINAL_SIGNAL_STATES = ("completed", "policy_skipped", "failed_terminal")
 TERMINAL_COMMAND_STATES = ("done", "failed")
 
+# Dry-run estimates must remain constant-time with respect to database pages.
+# SQLite's dbstat virtual table traverses b-trees even when filtered by object
+# name, which made a harmless retention preview saturate one CPU on the 4GiB
+# production database.  These deliberately conservative row-width estimates
+# include table payload and index overhead; real cleanup reports the exact
+# freelist delta instead.
+ESTIMATED_ROW_BYTES = {
+    "pipeline_audit": 1_600,
+    "leaderboard_staging": 400,
+    "generation_market_snapshot": 240,
+    "generation_market_manifest": 320,
+    "follow_selection": 1_800,
+    "wallet_risk_assessment": 800,
+    "auto_tune_runs": 2_000,
+    "pre_strict_evidence": 1_600,
+    "formation_prefix_evidence": 1_600,
+    "execution_account_snapshot": 128,
+    "execution_reconcile_checkpoint": 600,
+    "execution_signal": 1_200,
+    "commands": 800,
+    "execution_preflight": 1_200,
+    "live_fills": 160,
+    "account_stats": 128,
+    "live_policy_skip": 160,
+    "scan_runs": 256,
+    "candidate_fills": 640,
+    "coin_price_candle": 128,
+}
+
 
 def _iso(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
@@ -392,37 +421,16 @@ def _table_counts(db: sqlite3.Connection) -> dict[str, int]:
 
 
 def _estimated_reclaimed_pages(
-    db: sqlite3.Connection, deleted: dict[str, int], page_size: int,
-) -> int | None:
-    """Estimate pages from only affected b-trees; never traverse the whole DB.
-
-    An unfiltered ``dbstat`` aggregation reads every page (including the 37-day
-    fill cache) and can consume a CPU core for minutes on production.  Equality
-    constraints let SQLite visit only each affected table and its indexes.
-    """
-    estimated = 0.0
-    for table, delete_n in deleted.items():
-        if not delete_n or not _table_exists(db, table):
-            continue
-        total = int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
-        if not total:
-            continue
-        objects = [table] + [
-            str(row[0]) for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?",
-                (table,),
-            ).fetchall()
-        ]
-        try:
-            size = int(db.execute(
-                f"SELECT COALESCE(SUM(pgsize),0) FROM dbstat "
-                f"WHERE name IN ({_marks(objects)})",
-                tuple(objects),
-            ).fetchone()[0] or 0)
-        except sqlite3.Error:
-            return None
-        estimated += float(size) * min(1.0, float(delete_n) / total)
-    return int(estimated / max(1, page_size))
+    deleted: dict[str, int], page_size: int,
+) -> int:
+    """Estimate reusable pages without reading table or index b-trees."""
+    estimated_bytes = sum(
+        max(0, int(delete_n)) * ESTIMATED_ROW_BYTES.get(table, 512)
+        for table, delete_n in deleted.items()
+    )
+    if not estimated_bytes:
+        return 0
+    return (estimated_bytes + max(1, page_size) - 1) // max(1, page_size)
 
 
 def post_publish_cleanup(
@@ -479,13 +487,16 @@ def run(
     now_epoch = float(time.time() if now_epoch is None else now_epoch)
     checked_at = _iso(now_epoch)
     protected = protected_generations(db)
+    page_size_before = int(db.execute("PRAGMA page_size").fetchone()[0] or 0)
+    freelist_count_before = int(db.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+    freelist_bytes_before = page_size_before * freelist_count_before
 
     if dry_run:
         bootstrapped_blacklist = 0
         blacklisted_cleanup = {
             "candidate_fills": int(db.execute(
                 "SELECT COUNT(*) FROM candidate_fills cf WHERE EXISTS ("
-                "SELECT 1 FROM wallet_scan_blacklist b WHERE lower(b.addr)=lower(cf.addr))"
+                "SELECT 1 FROM wallet_scan_blacklist b WHERE b.addr=cf.addr)"
             ).fetchone()[0] or 0),
         }
     else:
@@ -560,10 +571,21 @@ def run(
 
     delete_by_table = dict(generation_cleanup)
     delete_by_table["pipeline_audit"] = deleted_pipeline_rows
+    execution_tables = {
+        "execution_reconcile_ok": "execution_reconcile_checkpoint",
+        "execution_reconcile_anomaly": "execution_reconcile_checkpoint",
+    }
     for key, value in execution_cleanup.items():
-        table = key.split("_ok")[0].split("_anomaly")[0]
+        table = execution_tables.get(key, key)
         delete_by_table[table] = delete_by_table.get(table, 0) + int(value)
-    estimated_pages = _estimated_reclaimed_pages(db, delete_by_table, page_size)
+    delete_by_table["scan_runs"] = deleted_scan_runs
+    delete_by_table["candidate_fills"] = (
+        int(expired_fills) + int(blacklisted_cleanup.get("candidate_fills", 0))
+    )
+    delete_by_table["coin_price_candle"] = expired_price_candles
+    estimated_pages = _estimated_reclaimed_pages(delete_by_table, page_size)
+    reclaimed_freelist_pages = max(0, freelist_count - freelist_count_before)
+    reclaimed_freelist_bytes = max(0, freelist_bytes - freelist_bytes_before)
     detail = {
         "status": "dry_run" if dry_run else severity,
         "checkedAt": checked_at,
@@ -576,6 +598,9 @@ def run(
         "database": {
             "mainBytes": main_bytes, "activeBytes": active_bytes,
             "pageBytes": page_bytes, "freelistBytes": freelist_bytes,
+            "freelistBytesBefore": freelist_bytes_before,
+            "reclaimedFreelistPages": reclaimed_freelist_pages,
+            "reclaimedFreelistBytes": reclaimed_freelist_bytes,
             "walBytes": wal_bytes, "walPhysicalBytes": wal_bytes,
             "walLogFrames": checkpoint.get("logFrames"),
             "walCheckpointedFrames": checkpoint.get("checkpointedFrames"),
@@ -599,6 +624,7 @@ def run(
             "bootstrappedBlacklistWallets": bootstrapped_blacklist,
             "blacklistCleanup": blacklisted_cleanup,
             "estimatedReclaimedPages": estimated_pages,
+            "estimatedReclaimedBytes": estimated_pages * page_size,
         },
     }
     if dry_run:
