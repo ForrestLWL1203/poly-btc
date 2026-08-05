@@ -4,6 +4,8 @@ Pure data access: no episode/metric logic (that lives in fills.py / metrics.py).
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 import json
 import threading
 import time
@@ -11,10 +13,34 @@ import urllib.error
 import urllib.request
 
 from hyper import config
+from hyper.market.rate_usage import USAGE
+
+
+_usage_category = contextvars.ContextVar("hyper_rest_usage_category", default=None)
+_default_usage_category = ["other"]
+
+
+@contextmanager
+def request_category(category: str):
+    token = _usage_category.set(str(category or "other"))
+    try:
+        yield
+    finally:
+        _usage_category.reset(token)
+
+
+def set_default_request_category(category: str) -> None:
+    _default_usage_category[0] = str(category or "other")
+
+
+def _current_usage_category() -> str:
+    return str(_usage_category.get() or _default_usage_category[0] or "other")
 
 _last_post = [0.0]
 _pace_lock = threading.Lock()   # serialize POST spacing across worker threads (the network call
 #                                 itself runs OUTSIDE the lock, so RTTs overlap = real concurrency)
+_pace_condition = threading.Condition(_pace_lock)
+_WAIT_EPSILON_S = 1e-6
 _stats_lock = threading.Lock()
 _request_stats = {
     "requests": 0, "retries": 0, "estimated_weight": 0,
@@ -33,6 +59,7 @@ _RESULT_WEIGHT_DIVISORS = {
 }
 _budget = {
     "enabled": False,
+    "paused": False,
     "weight_per_min": 0.0,
     "burst_weight": 0.0,
     "min_interval": 0.0,
@@ -41,7 +68,29 @@ _budget = {
     "scale": 1.0,
     "successes": 0,
     "cooldown_until": 0.0,
+    "mode": "legacy",
+    "reason": None,
+    "observer_peak_weight": 0.0,
+    "metric_started_at": time.monotonic(),
+    "metric_updated_at": time.monotonic(),
+    "budget_integral": 0.0,
+    "accelerated_s": 0.0,
+    "paused_s": 0.0,
+    "min_weight_per_min": None,
 }
+
+
+def _update_budget_metrics_locked(now: float | None = None) -> None:
+    now = float(time.monotonic() if now is None else now)
+    elapsed = max(0.0, now - float(_budget["metric_updated_at"]))
+    if _budget["enabled"]:
+        configured = 0.0 if _budget["paused"] else float(_budget["weight_per_min"])
+        _budget["budget_integral"] = float(_budget["budget_integral"]) + configured * elapsed
+        if _budget["mode"] == "ws_released" and not _budget["paused"]:
+            _budget["accelerated_s"] = float(_budget["accelerated_s"]) + elapsed
+        if _budget["paused"]:
+            _budget["paused_s"] = float(_budget["paused_s"]) + elapsed
+    _budget["metric_updated_at"] = now
 
 
 def reset_request_stats():
@@ -50,20 +99,47 @@ def reset_request_stats():
             requests=0, retries=0, estimated_weight=0,
             rate_limited=0, budget_wait_s=0.0,
         )
+    with _pace_lock:
+        now = time.monotonic()
+        _budget.update(
+            metric_started_at=now,
+            metric_updated_at=now,
+            budget_integral=0.0,
+            accelerated_s=0.0,
+            paused_s=0.0,
+            min_weight_per_min=(
+                0.0 if _budget["paused"] else float(_budget["weight_per_min"])
+            ) if _budget["enabled"] else None,
+        )
 
 
 def request_stats():
     with _stats_lock:
         out = dict(_request_stats)
     with _pace_lock:
+        now = time.monotonic()
+        _update_budget_metrics_locked(now)
+        metric_elapsed = max(0.0, now - float(_budget["metric_started_at"]))
         out["budget_enabled"] = bool(_budget["enabled"])
+        out["budget_paused"] = bool(_budget["paused"])
         out["budget_scale"] = float(_budget["scale"])
         out["budget_weight_per_min"] = float(_budget["weight_per_min"])
+        out["budget_mode"] = str(_budget["mode"])
+        out["budget_reason"] = _budget["reason"]
+        out["observer_peak_weight"] = float(_budget["observer_peak_weight"])
+        out["avg_weight_budget"] = (
+            float(_budget["budget_integral"]) / metric_elapsed if metric_elapsed > 0 else 0.0
+        )
+        out["min_weight_budget"] = float(_budget["min_weight_per_min"] or 0.0)
+        out["accelerated_s"] = float(_budget["accelerated_s"])
+        out["budget_paused_s"] = float(_budget["paused_s"])
     return out
 
 
 def configure_post_budget(*, weight_per_min: float | None, burst_weight: float = 20.0,
-                          min_interval: float = 0.02) -> None:
+                          min_interval: float = 0.02, paused: bool = False,
+                          mode: str | None = None, reason: str | None = None,
+                          observer_peak_weight: float = 0.0) -> None:
     """Switch the process-local POST pacer between weighted scan mode and legacy interval mode.
 
     Hyperliquid accounts ``/info`` traffic by request weight, so one fixed sleep wastes most of the
@@ -72,67 +148,100 @@ def configure_post_budget(*, weight_per_min: float | None, burst_weight: float =
     former weight-20 request allowance, and while Observer is idle it uses the larger scan-only budget.  The
     Observer runs in its own process and retains its independent low-latency request path.
     """
-    with _pace_lock:
-        enabled = weight_per_min is not None and float(weight_per_min) > 0.0
+    with _pace_condition:
+        now = time.monotonic()
+        _update_budget_metrics_locked(now)
+        enabled = bool(paused) or (weight_per_min is not None and float(weight_per_min) > 0.0)
+        was_enabled = bool(_budget["enabled"])
+        if was_enabled:
+            old_rate = (
+                float(_budget["weight_per_min"]) * max(0.05, float(_budget["scale"])) / 60.0
+            )
+            elapsed = max(0.0, now - float(_budget["updated_at"]))
+            carried_tokens = float(_budget["tokens"]) + elapsed * old_rate
+        else:
+            carried_tokens = max(0.0, float(burst_weight or 0.0))
+        next_burst = max(0.0, float(burst_weight or 0.0))
+        next_weight = max(0.0, float(weight_per_min or 0.0))
+        effective_budget = 0.0 if paused else next_weight
+        current_min = _budget["min_weight_per_min"]
         _budget.update(
             enabled=enabled,
-            weight_per_min=max(0.0, float(weight_per_min or 0.0)),
-            burst_weight=max(0.0, float(burst_weight or 0.0)),
+            paused=bool(paused),
+            weight_per_min=next_weight,
+            burst_weight=next_burst,
             min_interval=max(0.0, float(min_interval or 0.0)),
-            tokens=max(0.0, float(burst_weight or 0.0)),
-            updated_at=time.monotonic(),
+            # A live budget adjustment must never mint a fresh burst. Preserve
+            # the previous balance/debt and only clamp it to the new capacity.
+            tokens=min(next_burst, carried_tokens) if enabled else 0.0,
+            updated_at=now,
             scale=1.0,
             successes=0,
             cooldown_until=0.0,
+            mode=str(mode or ("paused" if paused else "weighted" if enabled else "legacy")),
+            reason=(str(reason) if reason else None),
+            observer_peak_weight=max(0.0, float(observer_peak_weight or 0.0)),
+            min_weight_per_min=(
+                effective_budget if current_min is None else min(float(current_min), effective_budget)
+            ) if enabled else current_min,
         )
-        _last_post[0] = 0.0
+        if not was_enabled:
+            _last_post[0] = 0.0
+        _pace_condition.notify_all()
 
 
 def _reserve_post(weight: float) -> float:
     """Reserve one weighted request slot and return the sleep required before sending it."""
-    with _pace_lock:
-        now = time.monotonic()
-        if not _budget["enabled"]:
-            wait = max(0.0, float(config.MIN_POST_INTERVAL) - (time.time() - _last_post[0]))
-            if wait > 0.0:
-                time.sleep(wait)
-            _last_post[0] = time.time()
-            return wait
-
-        rate_per_s = (
-            float(_budget["weight_per_min"]) * max(0.05, float(_budget["scale"])) / 60.0
-        )
-        elapsed = max(0.0, now - float(_budget["updated_at"]))
-        tokens = min(
-            float(_budget["burst_weight"]),
-            float(_budget["tokens"]) + elapsed * rate_per_s,
-        )
-        required = max(1.0, float(weight))
-        token_wait = max(0.0, required - tokens) / max(rate_per_s, 1e-9)
-        interval_wait = max(
-            0.0,
-            float(_budget["min_interval"]) - (time.time() - _last_post[0]),
-        )
-        wait = max(
-            token_wait,
-            interval_wait,
-            float(_budget["cooldown_until"]) - now,
-        )
-        if wait > 0.0:
-            time.sleep(wait)
+    total_wait = 0.0
+    required = max(1.0, float(weight))
+    with _pace_condition:
+        while True:
             now = time.monotonic()
+            if _budget["paused"]:
+                wait_started = now
+                _pace_condition.wait(timeout=5.0)
+                total_wait += max(0.0, time.monotonic() - wait_started)
+                continue
+            if not _budget["enabled"]:
+                wait = max(0.0, float(config.MIN_POST_INTERVAL) - (time.time() - _last_post[0]))
+                if wait > 0.0:
+                    wait_started = now
+                    _pace_condition.wait(timeout=wait)
+                    total_wait += max(0.0, time.monotonic() - wait_started)
+                    continue
+                _last_post[0] = time.time()
+                break
+
+            rate_per_s = (
+                float(_budget["weight_per_min"]) * max(0.05, float(_budget["scale"])) / 60.0
+            )
             elapsed = max(0.0, now - float(_budget["updated_at"]))
             tokens = min(
                 float(_budget["burst_weight"]),
                 float(_budget["tokens"]) + elapsed * rate_per_s,
             )
-        _budget["tokens"] = max(0.0, tokens - required)
-        _budget["updated_at"] = now
-        _last_post[0] = time.time()
-    if wait > 0.0:
+            token_wait = max(0.0, required - tokens) / max(rate_per_s, 1e-9)
+            interval_wait = max(
+                0.0,
+                float(_budget["min_interval"]) - (time.time() - _last_post[0]),
+            )
+            wait = max(token_wait, interval_wait, float(_budget["cooldown_until"]) - now)
+            # Token arithmetic can leave a sub-microsecond residue that the
+            # platform clock (or a deterministic test clock) cannot advance
+            # through. Treat it as settled instead of spinning forever.
+            if wait > _WAIT_EPSILON_S:
+                wait_started = now
+                _pace_condition.wait(timeout=wait)
+                total_wait += max(0.0, time.monotonic() - wait_started)
+                continue
+            _budget["tokens"] = tokens - required
+            _budget["updated_at"] = now
+            _last_post[0] = time.time()
+            break
+    if total_wait > 0.0:
         with _stats_lock:
-            _request_stats["budget_wait_s"] += wait
-    return wait
+            _request_stats["budget_wait_s"] += total_wait
+    return total_wait
 
 
 def _rate_limit_feedback(*, limited: bool) -> None:
@@ -146,6 +255,11 @@ def _rate_limit_feedback(*, limited: bool) -> None:
             _budget["cooldown_until"] = max(
                 float(_budget["cooldown_until"]), time.monotonic() + 2.0,
             )
+            if _current_usage_category() == "scanner":
+                _update_budget_metrics_locked()
+                _budget["paused"] = True
+                _budget["mode"] = "rate_limit_pause"
+                _budget["reason"] = "recent_429_pause"
             return
         _budget["successes"] = int(_budget["successes"]) + 1
         if _budget["successes"] >= 20 and float(_budget["scale"]) < 1.0:
@@ -163,6 +277,7 @@ def _charge_result_weight(body: dict, result) -> int:
         return 0
     with _stats_lock:
         _request_stats["estimated_weight"] += extra
+    USAGE.record(category=_current_usage_category(), weight=extra, requests=0)
     with _pace_lock:
         if _budget["enabled"]:
             # A negative balance is deliberate debt.  The next reservation waits for both its own request
@@ -173,12 +288,11 @@ def _charge_result_weight(body: dict, result) -> int:
 
 def _get(url: str, retries: int = 3):
     err = None
-    with _stats_lock:
-        _request_stats["requests"] += 1
-        _request_stats["estimated_weight"] += 1
     for attempt in range(retries):
-        if attempt:
-            with _stats_lock:
+        with _stats_lock:
+            _request_stats["requests"] += 1
+            _request_stats["estimated_weight"] += 1
+            if attempt:
                 _request_stats["retries"] += 1
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=config.UA), timeout=60) as r:
@@ -194,14 +308,14 @@ def post(body: dict, retries: int = 7):
     data = json.dumps(body).encode()
     err = None
     weight = _WEIGHT_ESTIMATE.get(body.get("type"), 1)
-    with _stats_lock:
-        _request_stats["requests"] += 1
-        _request_stats["estimated_weight"] += weight
     for attempt in range(retries):
-        if attempt:
-            with _stats_lock:
+        with _stats_lock:
+            _request_stats["requests"] += 1
+            _request_stats["estimated_weight"] += weight
+            if attempt:
                 _request_stats["retries"] += 1
         _reserve_post(weight)
+        USAGE.record(category=_current_usage_category(), weight=weight, requests=1)
         try:                                               # ... the request below runs concurrently
             req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -215,6 +329,10 @@ def post(body: dict, retries: int = 7):
                 with _stats_lock:
                     _request_stats["rate_limited"] += 1
                 _rate_limit_feedback(limited=True)
+                USAGE.record(
+                    category=_current_usage_category(), weight=0, requests=0,
+                    rate_limited=True,
+                )
             time.sleep(min(2.0 ** attempt, 20.0) if exc.code == 429 else 0.5 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001
             err = exc
@@ -235,11 +353,26 @@ def realtime_post_soft(body: dict, timeout: float = 5.0):
 
     This deliberately does not use the global historical/fill pacer: one allMids call every few seconds is
     cheap, and sharing the fill-signal queue can leave stock marks stale behind dozens of userFills calls."""
+    weight = _WEIGHT_ESTIMATE.get(body.get("type"), 1)
+    with _stats_lock:
+        _request_stats["requests"] += 1
+        _request_stats["estimated_weight"] += weight
+    USAGE.record(category=_current_usage_category(), weight=weight, requests=1)
     try:
         data = json.dumps(body).encode()
         req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+            result = json.loads(r.read().decode())
+            _charge_result_weight(body, result)
+            return result
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            with _stats_lock:
+                _request_stats["rate_limited"] += 1
+            USAGE.record(
+                category=_current_usage_category(), weight=0, requests=0, rate_limited=True,
+            )
+        return None
     except Exception:  # noqa: BLE001
         return None
 

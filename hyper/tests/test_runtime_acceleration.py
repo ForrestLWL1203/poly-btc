@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 import inspect
@@ -34,7 +35,7 @@ class RuntimeAccelerationTests(unittest.TestCase):
 
         with patch.object(rest.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(rest.time, "time", side_effect=lambda: clock[0]), \
-                patch.object(rest.time, "sleep", side_effect=sleep):
+                patch.object(rest._pace_condition, "wait", side_effect=lambda timeout=None: sleep(timeout or 0)):
             rest.configure_post_budget(
                 weight_per_min=1200.0, burst_weight=20.0, min_interval=0.0,
             )
@@ -81,7 +82,7 @@ class RuntimeAccelerationTests(unittest.TestCase):
 
         with patch.object(rest.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(rest.time, "time", side_effect=lambda: clock[0]), \
-                patch.object(rest.time, "sleep", side_effect=sleep):
+                patch.object(rest._pace_condition, "wait", side_effect=lambda timeout=None: sleep(timeout or 0)):
             rest.configure_post_budget(
                 weight_per_min=1200.0, burst_weight=20.0, min_interval=0.0,
             )
@@ -93,6 +94,74 @@ class RuntimeAccelerationTests(unittest.TestCase):
                 2,
             )
             self.assertAlmostEqual(rest._reserve_post(2), 0.2)
+
+    def test_scanner_budget_uses_ws_released_headroom_only_with_fresh_eligible_telemetry(self):
+        now = 2_000_000_000.0
+        detail = {
+            "accountMonitor": {
+                "state": "healthy", "accelerationEligible": True,
+                "unmatchedFillCount": 0, "pendingConfirmationCount": 0,
+            },
+            "restUsage": {"observedAt": now - 5, "weightPeak1mOver5m": 620},
+            "targetPollDegraded": False,
+        }
+
+        decision = discover._scanner_budget_from_observer(
+            observer_running=True, detail=detail, now=now,
+        )
+
+        self.assertEqual(decision["budget"], 200.0)
+        self.assertEqual(decision["mode"], "ws_released")
+        self.assertTrue(decision["accelerated"])
+
+    def test_scanner_budget_degrades_and_pauses_when_observer_needs_headroom(self):
+        now = 2_000_000_000.0
+        stale = discover._scanner_budget_from_observer(
+            observer_running=True,
+            detail={"accountMonitor": {"state": "healthy", "accelerationEligible": True}},
+            now=now,
+        )
+        paused = discover._scanner_budget_from_observer(
+            observer_running=True,
+            detail={
+                "restUsage": {"observedAt": now, "weightPeak1mOver5m": 920},
+                "accountMonitor": {"state": "healthy", "accelerationEligible": True},
+            },
+            now=now,
+        )
+
+        self.assertEqual(stale["budget"], 150.0)
+        self.assertFalse(stale["accelerated"])
+        self.assertTrue(paused["paused"])
+        self.assertEqual(paused["budget"], 0.0)
+
+    def test_scanner_429_pause_then_cooldown(self):
+        now = 2_000_000_000.0
+        detail = {
+            "restUsage": {"observedAt": now, "weightPeak1mOver5m": 100},
+            "accountMonitor": {"state": "healthy", "accelerationEligible": True},
+        }
+        paused = discover._scanner_budget_from_observer(
+            observer_running=True, detail=detail, scanner_last_429_at=now - 60, now=now,
+        )
+        cooldown = discover._scanner_budget_from_observer(
+            observer_running=True, detail=detail, scanner_last_429_at=now - 600, now=now,
+        )
+
+        self.assertTrue(paused["paused"])
+        self.assertEqual(cooldown["budget"], 80.0)
+        self.assertEqual(cooldown["mode"], "rate_limit_cooldown")
+
+    def test_zero_budget_pauses_reservation_until_reconfigured(self):
+        rest.configure_post_budget(weight_per_min=0, paused=True, mode="observer_budget_paused")
+        finished = threading.Event()
+        worker = threading.Thread(target=lambda: (rest._reserve_post(2), finished.set()), daemon=True)
+        worker.start()
+        self.assertFalse(finished.wait(0.05))
+
+        rest.configure_post_budget(weight_per_min=80, paused=False, mode="observer_protected")
+
+        self.assertTrue(finished.wait(1.0))
 
     def test_prepared_fill_and_path_surfaces_are_reused(self):
         fills = prepare_replay_fills([

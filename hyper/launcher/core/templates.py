@@ -46,6 +46,7 @@ Wants=network-online.target
 
 [Service]
 Environment=PYTHONUNBUFFERED=1
+Environment=HL_LIVE_ACCOUNT_MONITOR_MODE=ws_primary
 LoadCredential=hl-credential-wrap-private.pem:{app_dir}/secret/credential-wrap-private.pem
 Environment=HL_CREDENTIAL_PRIVATE_KEY_FILE=%d/hl-credential-wrap-private.pem
 WorkingDirectory={app_dir}

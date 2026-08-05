@@ -686,6 +686,14 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     generation  TEXT,
     api_requests INTEGER DEFAULT 0,
     api_weight  INTEGER DEFAULT 0,
+    rest_wait_s REAL DEFAULT 0,
+    local_compute_s REAL DEFAULT 0,
+    avg_weight_budget REAL DEFAULT 0,
+    min_weight_budget REAL DEFAULT 0,
+    accelerated_s REAL DEFAULT 0,
+    budget_paused_s REAL DEFAULT 0,
+    observer_peak_weight REAL DEFAULT 0,
+    rate_limit_count INTEGER DEFAULT 0,
     outcome_reason TEXT,
     core_added INTEGER DEFAULT 0,
     core_removed INTEGER DEFAULT 0,
@@ -1296,6 +1304,9 @@ CREATE TABLE IF NOT EXISTS execution_order_intent (
     oid                  INTEGER,
     filled_size          REAL NOT NULL DEFAULT 0,
     average_px           REAL,
+    exchange_status      TEXT,
+    status_timestamp_ms  INTEGER,
+    ws_confirmed_at      TEXT,
     error_code           TEXT,
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL
@@ -1304,6 +1315,21 @@ CREATE INDEX IF NOT EXISTS idx_execution_intent_session_state
     ON execution_order_intent(session_id, state, created_at);
 CREATE INDEX IF NOT EXISTS idx_execution_intent_oid
     ON execution_order_intent(oid);
+
+CREATE TABLE IF NOT EXISTS execution_order_event (
+    event_hash          TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL,
+    cloid               TEXT,
+    oid                 INTEGER,
+    exchange_status     TEXT NOT NULL,
+    status_timestamp_ms INTEGER,
+    raw_json            TEXT NOT NULL,
+    received_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_order_event_session_time
+    ON execution_order_event(session_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_execution_order_event_oid
+    ON execution_order_event(session_id, oid);
 
 CREATE TABLE IF NOT EXISTS execution_order_attempt (
     attempt_id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1341,6 +1367,8 @@ CREATE INDEX IF NOT EXISTS idx_execution_fill_session_time
     ON execution_fill(session_id, fill_time_ms);
 CREATE INDEX IF NOT EXISTS idx_execution_fill_cloid
     ON execution_fill(cloid);
+CREATE INDEX IF NOT EXISTS idx_execution_fill_session_oid
+    ON execution_fill(session_id, oid);
 
 -- The exchange is authoritative. This is a replaceable projection used for reconciliation and UI only.
 CREATE TABLE IF NOT EXISTS execution_position_projection (
@@ -1490,6 +1518,14 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN generation TEXT",
     "ALTER TABLE scan_runs ADD COLUMN api_requests INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN api_weight INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN rest_wait_s REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN local_compute_s REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN avg_weight_budget REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN min_weight_budget REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN accelerated_s REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN budget_paused_s REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN observer_peak_weight REAL DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN rate_limit_count INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN outcome_reason TEXT",
     "ALTER TABLE scan_runs ADD COLUMN core_added INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN core_removed INTEGER DEFAULT 0",
@@ -1498,6 +1534,9 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN core_confirmed_demotion INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN core_safety_exit INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN replacement_blocked INTEGER DEFAULT 0",
+    "ALTER TABLE execution_order_intent ADD COLUMN exchange_status TEXT",
+    "ALTER TABLE execution_order_intent ADD COLUMN status_timestamp_ms INTEGER",
+    "ALTER TABLE execution_order_intent ADD COLUMN ws_confirmed_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_generation TEXT",
     "ALTER TABLE follow_history ADD COLUMN last_followed_generation TEXT",

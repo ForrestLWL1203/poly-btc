@@ -69,8 +69,15 @@ available cash stays usable by existing-position adds and risk management. Disco
 and its immutable strategy revision are shared across modes; switching
 Paper/Live never triggers a rescan or rebuilds Core. Every valid target opening signal is considered regardless
 of the target's notional; our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
-Every Live startup reconciles current exchange equity/available collateral, and each exposure increase refreshes
-them again before sizing. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
+Live startup now opens an independent self-account WebSocket before the REST baseline. `orderUpdates` establishes
+CLOID/OID identity, `userFills` is the only execution-booking evidence, and account/spot/open-order subscriptions
+maintain the exchange projection. A healthy stream confirms normal orders without the former pre/post full REST
+reconciles; a full nine-call REST audit still runs at startup and every five minutes. Disconnect, queue overflow,
+stale account state or ambiguous evidence immediately restores the 15-second REST fallback, including pre-order
+and post-order reconciliation plus a `latest_fill_ms - 1ms` gap fill. The account stream is rebuilt from the
+account address of the newly activated Live session: wallet rotation ends the old Observer/session first and a
+new Observer subscribes every user channel to the new credential address; an address/session mismatch fails
+startup instead of silently continuing on the old wallet. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
 prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
 Live reconciliation/order work owns a separate WAL database connection from Observer signal processing. A
 temporary transport or SQLite lock failure is reported and retried instead of leaving the engine invisibly
@@ -607,9 +614,13 @@ the local mock dashboard and inspect the rendered result.
 - Newly-added targets start forward-only. Active Mainnet sessions persist polling cursors and a terminal-state
   signal inbox, so a worker/SQLite interruption cannot silently consume a received target fill. Observer has
   priority for Hyperliquid REST weight.
-- With no executable Observer work, Scanner switches from a fixed request interval to a 95%-budget weighted
-  token bucket and backs off automatically on HTTP 429. Once Observer has a Core target or open position, Scanner
-  immediately returns to its configured slow interval.
+- Observer publishes rolling one-minute REST request/weight telemetry by category. Scanner reads it every 20
+  seconds and preserves a 100-weight safety headroom plus a 160-weight account-audit burst reserve. With Observer
+  stopped it may use 1140 weight/min; with Observer running it stays at or below 150 unless the account WS has
+  remained healthy for five minutes and the latest REST audit, queue latency, target polling and 429 checks all
+  pass, in which case it may use at most 200 weight/min (one weight-20 request per six seconds on average).
+  Available headroom below 40 pauses only Scanner network requests. A 429 pauses them for five minutes and caps
+  the following 25 minutes at 80 weight/min; local replay/SQLite work and Observer target polling continue.
 - Complete-scan and daily-refresh Profile workers use independent short-lived query-only SQLite connections
   and return cache/profile/Episode artifacts; the scanner parent alone commits them in bounded batches. Strict
   per-wallet replay and independent tune candidates use CPU-affinity-aware process workers

@@ -5,6 +5,8 @@
   python3 -m hyper.cli.discover --db data/hl.db watchlist
   python3 -m hyper.cli.discover --db data/hl.db harvest
 """
+from __future__ import annotations
+
 import argparse
 import calendar
 import json
@@ -20,77 +22,164 @@ import threading
 from hyper import config, params, storage
 from hyper.discovery import collection_blacklist, frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
-from hyper.execution.mode import selected_book
 from hyper.market import rest
+from hyper.market.rate_usage import USAGE
 from hyper.ops import paper_reset, procman, scan_lock, storage_guard
 from hyper.ops import resource_guard
 from hyper.util import now_iso
 
 
 def _scan_post_weight_budget(observer_busy: bool, slow_interval: float) -> float:
-    """Preserve the old heavy-request allowance while letting light state reads use their real weight."""
+    """Compatibility helper for callers/tests that do not have Observer telemetry."""
     if not observer_busy:
         return config.INFO_WEIGHT_BUDGET_PER_MIN * config.SCAN_IDLE_WEIGHT_BUDGET_FRACTION
-    # The legacy active-scan pacer allowed one weight-20 fill/Portfolio request per slow interval. Expressing
-    # the same allowance as weight/min keeps live Observer headroom unchanged while a weight-2 clearinghouse
-    # snapshot waits roughly one tenth as long.
     return 20.0 * 60.0 / max(0.1, float(slow_interval))
 
 
-def _start_adaptive_pace(db_path, slow_interval):
-    """Adapt the scanner's weighted REST budget to whether copy-trading has work.
+def _scanner_budget_from_observer(*, observer_running: bool, detail: dict | None,
+                                  scanner_last_429_at: float | None = None,
+                                  now: float | None = None) -> dict:
+    """Choose one conservative Scanner budget from the Observer's rolling telemetry."""
+    now = float(time.time() if now is None else now)
+    detail = detail if isinstance(detail, dict) else {}
+    if not observer_running:
+        age_429 = (
+            now - float(scanner_last_429_at)
+            if isinstance(scanner_last_429_at, (int, float)) and float(scanner_last_429_at) > 0
+            else None
+        )
+        if age_429 is not None and age_429 < config.SCANNER_429_PAUSE_S:
+            return {
+                "budget": 0.0, "paused": True, "mode": "rate_limit_pause",
+                "reason": "recent_429_pause", "observerPeak": 0.0,
+                "last429At": float(scanner_last_429_at), "accelerated": False,
+            }
+        if age_429 is not None and age_429 < config.SCANNER_429_COOLDOWN_S:
+            return {
+                "budget": config.SCANNER_429_MAX_WEIGHT_PER_MIN,
+                "paused": False, "mode": "rate_limit_cooldown",
+                "reason": "recent_429_cooldown", "observerPeak": 0.0,
+                "last429At": float(scanner_last_429_at), "accelerated": False,
+            }
+        return {
+            "budget": config.INFO_WEIGHT_BUDGET_PER_MIN * config.SCAN_IDLE_WEIGHT_BUDGET_FRACTION,
+            "paused": False,
+            "mode": "observer_idle",
+            "reason": None,
+            "observerPeak": 0.0,
+            "last429At": scanner_last_429_at,
+            "accelerated": False,
+        }
 
-    Observer RUNNING preserves the old one-heavy-request-per-``slow_interval`` allowance but lets cheap
-    account-state requests consume only their real weight. Observer STOPPED receives the larger idle budget.
-    Re-poll every 20 seconds so starting/stopping Observer changes the allowance during a long scan.
-    """
-    def _observer_has_work():
-        if not procman.observer_running(db_path):
-            return False
+    usage = detail.get("restUsage") if isinstance(detail.get("restUsage"), dict) else {}
+    monitor = detail.get("accountMonitor") if isinstance(detail.get("accountMonitor"), dict) else {}
+    observed_at = float(usage.get("observedAt") or 0.0)
+    telemetry_fresh = bool(observed_at and now - observed_at <= config.SCANNER_TELEMETRY_STALE_S)
+    observer_peak = max(0.0, float(
+        usage.get("nonAuditWeightPeak1mOver5m", usage.get("weightPeak1mOver5m")) or 0.0
+    ))
+    available = (
+        config.INFO_WEIGHT_BUDGET_PER_MIN
+        - config.SCANNER_GLOBAL_HEADROOM_WEIGHT
+        - config.SCANNER_ACCOUNT_AUDIT_RESERVE_WEIGHT
+        - observer_peak
+    )
+    last_429_candidates = [
+        value for value in (usage.get("last429At"), scanner_last_429_at)
+        if isinstance(value, (int, float)) and float(value) > 0
+    ]
+    last_429_at = max((float(value) for value in last_429_candidates), default=None)
+    age_429 = now - last_429_at if last_429_at is not None else None
+
+    if age_429 is not None and age_429 < config.SCANNER_429_PAUSE_S:
+        return {
+            "budget": 0.0, "paused": True, "mode": "rate_limit_pause",
+            "reason": "recent_429_pause", "observerPeak": observer_peak,
+            "last429At": last_429_at, "accelerated": False,
+        }
+    if available < 40.0:
+        return {
+            "budget": 0.0, "paused": True, "mode": "observer_budget_paused",
+            "reason": "insufficient_observer_headroom", "observerPeak": observer_peak,
+            "last429At": last_429_at, "accelerated": False,
+        }
+
+    eligible = bool(
+        telemetry_fresh
+        and monitor.get("state") == "healthy"
+        and monitor.get("accelerationEligible") is True
+        and not detail.get("targetPollDegraded")
+        and not monitor.get("unmatchedFillCount")
+        and not monitor.get("pendingConfirmationCount")
+    )
+    cap = config.SCANNER_WS_MAX_WEIGHT_PER_MIN if eligible else 150.0
+    mode = "ws_released" if eligible else "observer_protected"
+    reason = None if eligible else (
+        "observer_telemetry_stale" if not telemetry_fresh
+        else "account_ws_not_acceleration_eligible"
+    )
+    if age_429 is not None and age_429 < config.SCANNER_429_COOLDOWN_S:
+        cap = min(cap, config.SCANNER_429_MAX_WEIGHT_PER_MIN)
+        mode = "rate_limit_cooldown"
+        reason = "recent_429_cooldown"
+        eligible = False
+    return {
+        "budget": max(0.0, min(float(cap), float(available))),
+        "paused": False,
+        "mode": mode,
+        "reason": reason,
+        "observerPeak": observer_peak,
+        "last429At": last_429_at,
+        "accelerated": bool(eligible),
+    }
+
+
+def _start_adaptive_pace(db_path, slow_interval):
+    """Apply Observer-first weighted REST budgets throughout a long scan."""
+    rest.set_default_request_category("scanner")
+
+    def _observer_detail():
+        running = procman.observer_running(db_path)
+        if not running:
+            return False, {}
         try:
             con = sqlite3.connect(db_path, timeout=2)
-            generation = con.execute(
-                "SELECT generation FROM scan_generation WHERE status='published' AND complete=1 "
-                "AND is_current=1 ORDER BY id DESC LIMIT 1"
+            row = con.execute(
+                "SELECT detail_json FROM process_status WHERE name='observer'"
             ).fetchone()
-            position_table = selected_book(con).position
-            open_n = con.execute(
-                f"SELECT COUNT(*) FROM {position_table} WHERE status='open'"
-            ).fetchone()[0]
-            if generation:
-                target_n = con.execute(
-                    "SELECT COUNT(*) FROM follow_selection fs LEFT JOIN target_controls tc ON tc.addr=fs.addr "
-                    "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
-                    (generation[0],),
-                ).fetchone()[0]
-            else:
-                target_n = con.execute(
-                    "SELECT COUNT(*) FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-                    "WHERE COALESCE(tc.enabled,1)=1"
-                ).fetchone()[0]
             con.close()
-            return bool(open_n or target_n)
+            return True, json.loads(row[0] or "{}") if row else {}
         except Exception:  # old/in-flight DB: preserve observer priority conservatively
-            return True
+            return True, {}
 
-    applied = {"mode": None, "budget": None}
+    applied = {"signature": None}
 
     def _apply_pace():
-        observer_busy = _observer_has_work()
-        config.MIN_POST_INTERVAL = slow_interval if observer_busy else config.SCAN_IDLE_INTERVAL
-        budget = _scan_post_weight_budget(observer_busy, slow_interval)
-        mode = "observer_busy" if observer_busy else "observer_idle"
-        # Reconfiguring the token bucket refills its burst. The 20-second monitor must only switch it when
-        # Observer state actually changes, otherwise a long scan would accidentally mint a new heavy-request
-        # burst every tick.
-        if applied["mode"] == mode and applied["budget"] == budget:
+        observer_running, detail = _observer_detail()
+        decision = _scanner_budget_from_observer(
+            observer_running=observer_running,
+            detail=detail,
+            scanner_last_429_at=USAGE.snapshot().get("last429At"),
+        )
+        config.MIN_POST_INTERVAL = slow_interval if observer_running else config.SCAN_IDLE_INTERVAL
+        signature = (
+            round(float(decision["budget"]), 3), bool(decision["paused"]),
+            decision["mode"], decision["reason"], round(float(decision["observerPeak"]), 3),
+        )
+        # Avoid needless wakeups; configure_post_budget also preserves token
+        # balance/debt across legitimate live budget changes.
+        if applied["signature"] == signature:
             return
         rest.configure_post_budget(
-            weight_per_min=budget,
+            weight_per_min=decision["budget"],
             burst_weight=config.SCAN_IDLE_WEIGHT_BURST,
             min_interval=config.SCAN_IDLE_MIN_REQUEST_INTERVAL,
+            paused=decision["paused"],
+            mode=decision["mode"],
+            reason=decision["reason"],
+            observer_peak_weight=decision["observerPeak"],
         )
-        applied.update(mode=mode, budget=budget)
+        applied["signature"] = signature
 
     _apply_pace()
     def _tick():

@@ -133,6 +133,16 @@ function Dashboard({ onLogout }) {
     }
   }, [scanning]);
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
+  const accountMonitor = ov?.system?.accountMonitor || {};
+  const accountMonitorView = (() => {
+    const state = accountMonitor.state || "stopped";
+    if (state === "healthy") return ["账户 WS 正常", "tint-green", "var(--green)"];
+    if (state === "connecting" || state === "syncing") return ["账户 WS 同步中", "tint-amber", "var(--amber)"];
+    if (state === "degraded") return ["账户 WS 降级", "tint-amber", "var(--amber)"];
+    if (state === "reconcile_required") return ["需要人工核对", "tint-red", "var(--red)"];
+    if (state === "rest_fallback") return ["REST 保底中", "tint-amber", "var(--amber)"];
+    return ["账户监控未运行", "", "var(--gray)"];
+  })();
   const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
   const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
   const pausing = !!obsPending || liveStarting;
@@ -244,6 +254,11 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: liveMode ? "pulse 1.6s infinite" : "none" }} />
               {liveMode ? "LIVE" : "PAPER · 模拟盘"}
             </span>
+            {liveMode && obs !== "stopped" && <span className={"pill " + accountMonitorView[1]}
+              title={accountMonitor.lastError || `队列 ${accountMonitor.queueDepth || 0} · 延迟 ${accountMonitor.queueLagMs || 0}ms`}>
+              <span className="dot" style={{ background: accountMonitorView[2], animation: accountMonitor.state === "healthy" ? "none" : "pulse 1.6s infinite" }} />
+              {accountMonitorView[0]}
+            </span>}
             {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
               title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
               <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />

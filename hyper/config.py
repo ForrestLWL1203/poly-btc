@@ -1,5 +1,7 @@
 """Shared constants — endpoints, hard limits, sim parameters. No logic here."""
 
+import os
+
 # Hyperliquid endpoints
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -22,6 +24,27 @@ INFO_WEIGHT_BUDGET_PER_MIN = 1200.0
 SCAN_IDLE_WEIGHT_BUDGET_FRACTION = 0.95  # leave a small cushion for dashboard/ops reads on the same IP
 SCAN_IDLE_WEIGHT_BURST = 20.0            # at most one heavy wallet-history request may burst immediately
 SCAN_IDLE_MIN_REQUEST_INTERVAL = 0.02    # low-weight metadata calls need not inherit the weight-20 cadence
+LIVE_ACCOUNT_MONITOR_MODE = os.environ.get(
+    "HL_LIVE_ACCOUNT_MONITOR_MODE", "rest_only",
+).strip().lower()
+ACCOUNT_WS_ORDER_WAIT_S = float(os.environ.get("HL_ACCOUNT_WS_ORDER_WAIT_S", "2"))
+ACCOUNT_WS_POST_TIMEOUT_S = float(os.environ.get("HL_ACCOUNT_WS_POST_TIMEOUT_S", "3"))
+ACCOUNT_WS_POSITION_WAIT_S = float(os.environ.get("HL_ACCOUNT_WS_POSITION_WAIT_S", "5"))
+ACCOUNT_REST_AUDIT_INTERVAL_S = float(os.environ.get("HL_ACCOUNT_REST_AUDIT_INTERVAL_S", "300"))
+ACCOUNT_REST_FALLBACK_INTERVAL_S = float(os.environ.get("HL_ACCOUNT_REST_FALLBACK_INTERVAL_S", "15"))
+ACCOUNT_WS_QUEUE_MAX = 4096
+ACCOUNT_WS_ACK_TIMEOUT_S = 10.0
+ACCOUNT_WS_PING_INTERVAL_S = 30.0
+ACCOUNT_WS_STALE_S = 45.0
+ACCOUNT_WS_STATE_STALE_S = 90.0
+SCANNER_WS_MAX_WEIGHT_PER_MIN = float(os.environ.get("HL_SCANNER_WS_MAX_WEIGHT_PER_MIN", "200"))
+SCANNER_429_MAX_WEIGHT_PER_MIN = float(os.environ.get("HL_SCANNER_429_MAX_WEIGHT_PER_MIN", "80"))
+SCANNER_GLOBAL_HEADROOM_WEIGHT = 100.0
+SCANNER_ACCOUNT_AUDIT_RESERVE_WEIGHT = 160.0
+SCANNER_TELEMETRY_STALE_S = 30.0
+SCANNER_WS_HEALTHY_MIN_S = 300.0
+SCANNER_429_PAUSE_S = 300.0
+SCANNER_429_COOLDOWN_S = 1800.0
 REPLAY_PROCESS_MAX_WORKERS = 4           # auto-scales 1→1, 2→2, 4+→4; replay stays bounded on small VPSes
 REPLAY_LOW_MEMORY_SERIAL_BYTES = 2 * 1024 * 1024 * 1024
 SCANNER_MIN_AVAILABLE_MEMORY_BYTES = 192 * 1024 * 1024

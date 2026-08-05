@@ -1,0 +1,233 @@
+import asyncio
+import unittest
+
+from hyper import storage
+from hyper.execution.account_monitor import LiveAccountMonitor
+from hyper.execution.live_executor import LiveExecutor
+from hyper.execution.orders import OrderOutcome
+from hyper.tests.test_live_executor import ACCOUNT, AGENT, FakeLiveBroker
+from hyper.util import now_iso, now_ms
+
+
+class _HealthyMonitor:
+    def is_healthy(self):
+        return True
+
+    def recover_order(self, _cloid, _start_ms):
+        return None
+
+
+class _WsPublishingBroker(FakeLiveBroker):
+    def __init__(self):
+        super().__init__([(OrderOutcome.FILLED, 1.0, None)])
+        self.venue.ws_url = "wss://example.invalid/ws"
+        self.account_address = ACCOUNT
+        self.supported_dexes = ("", "xyz")
+        self.account_snapshot_calls = 0
+        self.executor = None
+
+    def account_snapshot(self):
+        self.account_snapshot_calls += 1
+        return super().account_snapshot()
+
+    def submit_ioc(self, intent):
+        result = super().submit_ioc(intent)
+        # Deliver official facts before the synchronous HTTP call returns. The
+        # fill intentionally has no CLOID, matching the documented WsFill.
+        fill = dict(self.fills[-1])
+        fill.pop("cloid", None)
+        self.executor.apply_ws_message({
+            "channel": "userFills",
+            "data": {"isSnapshot": False, "user": ACCOUNT, "fills": [fill]},
+        })
+        self.executor.apply_ws_message({
+            "channel": "orderUpdates",
+            "data": [{
+                "order": {
+                    "coin": intent.coin, "oid": result.oid, "cloid": intent.cloid,
+                    "origSz": str(intent.size), "sz": "0",
+                },
+                "status": "filled", "statusTimestamp": now_ms(),
+            }],
+        })
+        return result
+
+
+class AccountWsMonitorTests(unittest.TestCase):
+    def setUp(self):
+        self.db = storage.connect(":memory:", storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+        stamp = now_iso()
+        self.session = {
+            "session_id": "live-ws-test", "state": "live_running", "account_address": ACCOUNT,
+            "agent_address": AGENT, "strategy_revision": "revision-ws", "sizing_anchor": 8000.0,
+            "margin_equity_pct": 0.8, "sizing_equity": 6400.0, "canary": False,
+            "canary_margin_cap": 0.0, "network": "mainnet", "started_at": stamp,
+        }
+        self.db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,sizing_anchor,"
+            "margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES (?,'live','mainnet','live_running',?,?,?,?,?,?,0,?,?,?)",
+            ("live-ws-test", ACCOUNT, AGENT, "revision-ws", 8000.0, 0.8, 6400.0, 0.0, stamp, stamp),
+        )
+        self.db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running','live-ws-test',?)", (stamp,),
+        )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _executor(self, broker=None):
+        broker = broker or _WsPublishingBroker()
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+        executor.available = executor.equity = 8000.0
+        return executor
+
+    def _insert_intent(self, *, cloid="0x" + "1" * 32, oid=None, requested=0.2):
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_order_intent "
+            "(cloid,session_id,strategy_revision,action_seq,action,coin,side,reduce_only,leverage,"
+            "requested_size,requested_limit_px,state,oid,created_at,updated_at) "
+            "VALUES (?,'live-ws-test','revision-ws',1,'open','BTC','buy',0,10,?,100,'submitting',?,?,?)",
+            (cloid, requested, oid, stamp, stamp),
+        )
+        self.db.commit()
+        return cloid
+
+    def test_subscription_set_matches_official_account_streams(self):
+        broker = _WsPublishingBroker()
+        executor = self._executor(broker)
+        async def build_monitor():
+            return LiveAccountMonitor(executor, mode="ws_primary")
+
+        monitor = asyncio.run(build_monitor())
+        subscriptions = monitor._build_subscriptions()
+
+        self.assertEqual(
+            {row["type"] for row in subscriptions},
+            {
+                "orderUpdates", "userFills", "allDexsClearinghouseState",
+                "openOrders", "spotState", "userNonFundingLedgerUpdates",
+            },
+        )
+        self.assertEqual(
+            {row.get("dex") for row in subscriptions if row["type"] == "openOrders"},
+            {"", "xyz"},
+        )
+        self.assertIn("openOrders:xyz", monitor._required_snapshots)
+
+    def test_new_live_session_wallet_rebuilds_every_user_subscription(self):
+        new_account = "0x" + "c" * 40
+        broker = _WsPublishingBroker()
+        broker.account_address = new_account
+        new_session = self.session.copy()
+        new_session["session_id"] = "live-ws-new-wallet"
+        new_session["account_address"] = new_account
+        executor = LiveExecutor(self.db, new_session, broker)
+
+        async def build_monitor():
+            return LiveAccountMonitor(executor, mode="ws_primary")
+
+        monitor = asyncio.run(build_monitor())
+
+        self.assertEqual(monitor.address, new_account)
+        for subscription in monitor._build_subscriptions():
+            self.assertEqual(subscription["user"], new_account)
+
+    def test_fill_before_order_update_is_backfilled_and_deduplicated(self):
+        executor = self._executor()
+        cloid = self._insert_intent()
+        fill = {
+            "tid": "ws-tid-1", "oid": 77, "coin": "BTC", "side": "B", "sz": "0.2",
+            "px": "100", "fee": "0.01", "closedPnl": "0", "time": now_ms(),
+        }
+        fill_message = {"channel": "userFills", "data": {"fills": [fill], "isSnapshot": False}}
+
+        executor.apply_ws_message(fill_message)
+        self.assertIsNone(self.db.execute(
+            "SELECT cloid FROM execution_fill WHERE tid='ws-tid-1'"
+        ).fetchone()[0])
+        executor.apply_ws_message({
+            "channel": "orderUpdates",
+            "data": [{
+                "order": {"coin": "BTC", "oid": 77, "cloid": cloid, "origSz": "0.2"},
+                "status": "filled", "statusTimestamp": 123,
+            }],
+        })
+        executor.apply_ws_message(fill_message)
+        executor.apply_ws_message({
+            "channel": "orderUpdates",
+            "data": [{
+                "order": {"coin": "BTC", "oid": 77, "cloid": cloid, "origSz": "0.2"},
+                "status": "filled", "statusTimestamp": 123,
+            }],
+        })
+
+        intent = self.db.execute(
+            "SELECT state,oid,filled_size,exchange_status FROM execution_order_intent WHERE cloid=?",
+            (cloid,),
+        ).fetchone()
+        self.assertEqual(intent, ("filled", 77, 0.2, "filled"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_order_event").fetchone()[0], 1)
+        self.assertEqual(self.db.execute(
+            "SELECT cloid FROM execution_fill WHERE tid='ws-tid-1'"
+        ).fetchone()[0], cloid)
+
+    def test_filled_order_status_without_complete_fill_rows_is_not_business_filled(self):
+        executor = self._executor()
+        cloid = self._insert_intent(requested=0.2)
+
+        executor.apply_ws_message({
+            "channel": "orderUpdates",
+            "data": [{
+                "order": {"coin": "BTC", "oid": 88, "cloid": cloid, "origSz": "0.2"},
+                "status": "filled", "statusTimestamp": 456,
+            }],
+        })
+
+        self.assertEqual(self.db.execute(
+            "SELECT state FROM execution_order_intent WHERE cloid=?", (cloid,),
+        ).fetchone()[0], "submitting")
+
+    def test_ws_confirmed_order_avoids_account_rest_reconcile(self):
+        broker = _WsPublishingBroker()
+        executor = self._executor(broker)
+        broker.executor = executor
+        executor.attach_account_monitor(_HealthyMonitor())
+
+        result = executor.execute(
+            coin="BTC", is_buy=True, size=0.2, leverage=10, reduce_only=False,
+            action="open", source_address="0xsource", source_fill_id="source-ws-1",
+            source_order_id="7", source_time_ms=123456789, action_seq=1,
+        )
+
+        self.assertEqual(result.outcome, "filled")
+        self.assertAlmostEqual(result.filled_size, 0.2)
+        self.assertEqual(broker.account_snapshot_calls, 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
+
+    def test_account_snapshots_update_projection_without_touching_copy_ledger(self):
+        executor = self._executor()
+        executor.apply_ws_message({
+            "channel": "allDexsClearinghouseState",
+            "data": {"user": ACCOUNT, "clearinghouseStates": {
+                "": {"assetPositions": []}, "xyz": {"assetPositions": []},
+            }},
+        })
+        executor.apply_ws_message({
+            "channel": "spotState",
+            "data": {"user": ACCOUNT, "spotState": {
+                "balances": [{"coin": "USDC", "total": "1234", "hold": "34"}],
+            }},
+        })
+
+        self.assertEqual((executor.equity, executor.available), (1234.0, 1200.0))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_position").fetchone()[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

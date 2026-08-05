@@ -6,8 +6,12 @@ require the explicit capability created only by the activated Live execution bou
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
+
+from hyper.market.rate_usage import USAGE
 
 from .orders import (
     ActionResult,
@@ -80,6 +84,52 @@ class HyperliquidBroker:
         requested_dexes = tuple(dict.fromkeys(str(dex or "") for dex in supported_dexes))
         self.supported_dexes = ("", *(dex for dex in requested_dexes if dex))
         self._market_specs: Dict[str, MarketSpec] = {}
+        self._usage_category = contextvars.ContextVar(
+            f"broker_usage_category_{id(self)}", default="market_safety",
+        )
+
+    @contextmanager
+    def request_category(self, category: str):
+        token = self._usage_category.set(str(category or "other"))
+        try:
+            yield
+        finally:
+            self._usage_category.reset(token)
+
+    @staticmethod
+    def _info_weight(request_type: str) -> int:
+        if request_type in {
+            "l2Book", "allMids", "clearinghouseState", "orderStatus",
+            "spotClearinghouseState", "exchangeStatus",
+        }:
+            return 2
+        if request_type == "userRole":
+            return 60
+        return 20
+
+    def _info_call(self, request_type: str, fn):
+        category = str(self._usage_category.get() or "other")
+        weight = self._info_weight(request_type)
+        USAGE.record(category=category, weight=weight, requests=1)
+        try:
+            result = fn()
+        except Exception as exc:
+            if "429" in str(exc):
+                USAGE.record(
+                    category=category, weight=0, requests=0, rate_limited=True,
+                )
+            raise BrokerError(
+                f"info_transport_error:{request_type}:{type(exc).__name__}"
+            ) from None
+        divisors = {
+            "userFills": 20, "userFillsByTime": 20,
+            "frontendOpenOrders": 20, "historicalOrders": 20,
+        }
+        divisor = divisors.get(request_type)
+        if divisor and isinstance(result, list) and result:
+            extra = (len(result) + divisor - 1) // divisor
+            USAGE.record(category=category, weight=extra, requests=0)
+        return result
 
     @staticmethod
     def _normalize_address(address: str) -> str:
@@ -109,7 +159,7 @@ class HyperliquidBroker:
 
         dex_offsets = {"": 0}
         if len(self.supported_dexes) > 1:
-            rows = self.info.perp_dexs()
+            rows = self._info_call("perpDexs", self.info.perp_dexs)
             if not isinstance(rows, list):
                 raise BrokerProtocolError("invalid_perp_dexs_response")
             for index, row in enumerate(rows[1:]):
@@ -120,7 +170,7 @@ class HyperliquidBroker:
         for dex in self.supported_dexes:
             if dex not in dex_offsets:
                 raise BrokerProtocolError(f"supported_dex_missing:{dex}")
-            meta = self.info.meta(dex=dex)
+            meta = self._info_call("meta", lambda d=dex: self.info.meta(dex=d))
             universe = meta.get("universe") if isinstance(meta, dict) else None
             if not isinstance(universe, list) or not universe:
                 raise BrokerProtocolError(f"invalid_meta_response:{dex or 'standard'}")
@@ -157,7 +207,7 @@ class HyperliquidBroker:
     def l2_book(self, coin: str):
         self._require_info()
         self.market_spec(coin)
-        book = self.info.l2_snapshot(coin)
+        book = self._info_call("l2Book", lambda: self.info.l2_snapshot(coin))
         if not isinstance(book, dict) or not isinstance(book.get("levels"), list):
             raise BrokerProtocolError(f"invalid_l2_book:{coin}")
         return book
@@ -167,7 +217,7 @@ class HyperliquidBroker:
         normalized_dex = str(dex or "")
         if normalized_dex not in self.supported_dexes:
             raise BrokerProtocolError(f"unsupported_dex:{normalized_dex}")
-        mids = self.info.all_mids(dex=normalized_dex)
+        mids = self._info_call("allMids", lambda: self.info.all_mids(dex=normalized_dex))
         if not isinstance(mids, dict):
             raise BrokerProtocolError(f"invalid_all_mids:{normalized_dex or 'standard'}")
         return mids
@@ -183,11 +233,14 @@ class HyperliquidBroker:
         if normalized_dex not in self.supported_dexes:
             raise BrokerProtocolError(f"unsupported_dex:{normalized_dex}")
         if normalized_dex:
-            contexts = self.info.post(
-                "/info", {"type": "metaAndAssetCtxs", "dex": normalized_dex}
+            contexts = self._info_call(
+                "metaAndAssetCtxs",
+                lambda: self.info.post(
+                    "/info", {"type": "metaAndAssetCtxs", "dex": normalized_dex}
+                ),
             )
         else:
-            contexts = self.info.meta_and_asset_ctxs()
+            contexts = self._info_call("metaAndAssetCtxs", self.info.meta_and_asset_ctxs)
         if not isinstance(contexts, list) or len(contexts) != 2:
             raise BrokerProtocolError(f"invalid_market_contexts:{normalized_dex or 'standard'}")
         return contexts
@@ -197,9 +250,14 @@ class HyperliquidBroker:
         normalized_agent = self._normalize_address(agent_address) if agent_address else None
         return IdentitySnapshot(
             account_address=self.account_address,
-            account_role=self.info.user_role(self.account_address),
+            account_role=self._info_call(
+                "userRole", lambda: self.info.user_role(self.account_address),
+            ),
             agent_address=normalized_agent,
-            agent_role=self.info.user_role(normalized_agent) if normalized_agent else None,
+            agent_role=(
+                self._info_call("userRole", lambda: self.info.user_role(normalized_agent))
+                if normalized_agent else None
+            ),
         )
 
     def agent_authorization(self, agent_address: str) -> Optional[dict]:
@@ -213,10 +271,13 @@ class HyperliquidBroker:
         normalized_agent = self._normalize_address(agent_address)
         fetch = getattr(self.info, "extra_agents", None)
         rows = (
-            fetch(self.account_address)
+            self._info_call("extraAgents", lambda: fetch(self.account_address))
             if callable(fetch)
-            else self.info.post(
-                "/info", {"type": "extraAgents", "user": self.account_address}
+            else self._info_call(
+                "extraAgents",
+                lambda: self.info.post(
+                    "/info", {"type": "extraAgents", "user": self.account_address}
+                ),
             )
         )
         if not isinstance(rows, list):
@@ -242,15 +303,24 @@ class HyperliquidBroker:
     def account_snapshot(self) -> AccountSnapshot:
         self._require_info()
         perp_states = {
-            dex: self.info.user_state(self.account_address, dex=dex)
+            dex: self._info_call(
+                "clearinghouseState",
+                lambda d=dex: self.info.user_state(self.account_address, dex=d),
+            )
             for dex in self.supported_dexes
         }
         open_orders = {
-            dex: self.info.open_orders(self.account_address, dex=dex)
+            dex: self._info_call(
+                "openOrders",
+                lambda d=dex: self.info.open_orders(self.account_address, dex=d),
+            )
             for dex in self.supported_dexes
         }
         frontend_open_orders = {
-            dex: self.info.frontend_open_orders(self.account_address, dex=dex)
+            dex: self._info_call(
+                "frontendOpenOrders",
+                lambda d=dex: self.info.frontend_open_orders(self.account_address, dex=d),
+            )
             for dex in self.supported_dexes
         }
         for dex, orders in open_orders.items():
@@ -262,8 +332,12 @@ class HyperliquidBroker:
         return AccountSnapshot(
             network=self.venue.network,
             account_address=self.account_address,
-            abstraction=self.info.query_user_abstraction_state(self.account_address),
-            collateral_state=self.info.spot_user_state(self.account_address),
+            abstraction=self._info_call(
+                "userAbstraction", lambda: self.info.query_user_abstraction_state(self.account_address),
+            ),
+            collateral_state=self._info_call(
+                "spotClearinghouseState", lambda: self.info.spot_user_state(self.account_address),
+            ),
             perp_states=perp_states,
             open_orders=open_orders,
             frontend_open_orders=frontend_open_orders,
@@ -271,7 +345,7 @@ class HyperliquidBroker:
 
     def recent_fills(self):
         self._require_info()
-        fills = self.info.user_fills(self.account_address)
+        fills = self._info_call("userFills", lambda: self.info.user_fills(self.account_address))
         if not isinstance(fills, list):
             raise BrokerProtocolError("invalid_user_fills")
         return fills
@@ -282,11 +356,14 @@ class HyperliquidBroker:
         end = int(end_time_ms) if end_time_ms is not None else None
         if start < 0 or (end is not None and end < start):
             raise ValueError("invalid_fill_time_range")
-        fills = self.info.user_fills_by_time(
-            self.account_address,
-            start,
-            end_time=end,
-            aggregate_by_time=False,
+        fills = self._info_call(
+            "userFillsByTime",
+            lambda: self.info.user_fills_by_time(
+                self.account_address,
+                start,
+                end_time=end,
+                aggregate_by_time=False,
+            ),
         )
         if not isinstance(fills, list):
             raise BrokerProtocolError("invalid_user_fills_by_time")
@@ -294,7 +371,9 @@ class HyperliquidBroker:
 
     def historical_orders(self):
         self._require_info()
-        orders = self.info.historical_orders(self.account_address)
+        orders = self._info_call(
+            "historicalOrders", lambda: self.info.historical_orders(self.account_address),
+        )
         if not isinstance(orders, list):
             raise BrokerProtocolError("invalid_historical_orders")
         return orders
@@ -360,11 +439,16 @@ class HyperliquidBroker:
 
     def order_status(self, cloid: str):
         self._require_info()
-        return self.info.query_order_by_cloid(self.account_address, ClientOrderId(cloid))
+        return self._info_call(
+            "orderStatus",
+            lambda: self.info.query_order_by_cloid(self.account_address, ClientOrderId(cloid)),
+        )
 
     def order_status_by_oid(self, oid: int):
         self._require_info()
         normalized_oid = int(oid)
         if normalized_oid <= 0:
             raise ValueError("invalid_order_id")
-        return self.info.query_order_by_oid(self.account_address, normalized_oid)
+        return self._info_call(
+            "orderStatus", lambda: self.info.query_order_by_oid(self.account_address, normalized_oid),
+        )

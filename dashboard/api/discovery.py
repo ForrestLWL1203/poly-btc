@@ -195,6 +195,13 @@ def ep_scan_runs(db, limit):
                     "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"
                     "COALESCE(kind,'complete') AS kind,COALESCE(api_requests,0) AS api_requests,"
                     "COALESCE(api_weight,0) AS api_weight,outcome_reason,"
+                    "COALESCE(rest_wait_s,0) AS rest_wait_s,COALESCE(local_compute_s,0) AS local_compute_s,"
+                    "COALESCE(avg_weight_budget,0) AS avg_weight_budget,"
+                    "COALESCE(min_weight_budget,0) AS min_weight_budget,"
+                    "COALESCE(accelerated_s,0) AS accelerated_s,"
+                    "COALESCE(budget_paused_s,0) AS budget_paused_s,"
+                    "COALESCE(observer_peak_weight,0) AS observer_peak_weight,"
+                    "COALESCE(rate_limit_count,0) AS rate_limit_count,"
                     "COALESCE(core_added,0) AS core_added,COALESCE(core_removed,0) AS core_removed,"
                     "COALESCE(core_probation,0) AS core_probation,"
                     "COALESCE(core_recovered,0) AS core_recovered,"
@@ -212,13 +219,21 @@ def ep_scan_runs(db, limit):
                       "apiRequests": _col(r, "api_requests", 13) or 0,
                       "apiWeight": _col(r, "api_weight", 14) or 0,
                       "reason": _col(r, "outcome_reason", 15),
-                      "coreAdded": _col(r, "core_added", 16) or 0,
-                      "coreRemoved": _col(r, "core_removed", 17) or 0,
-                      "coreProbation": _col(r, "core_probation", 18) or 0,
-                      "coreRecovered": _col(r, "core_recovered", 19) or 0,
-                      "coreConfirmedDemotion": _col(r, "core_confirmed_demotion", 20) or 0,
-                      "coreSafetyExit": _col(r, "core_safety_exit", 21) or 0,
-                      "replacementBlocked": bool(_col(r, "replacement_blocked", 22))}
+                      "restWaitSec": _col(r, "rest_wait_s", 16) or 0,
+                      "localComputeSec": _col(r, "local_compute_s", 17) or 0,
+                      "avgWeightBudget": _col(r, "avg_weight_budget", 18) or 0,
+                      "minWeightBudget": _col(r, "min_weight_budget", 19) or 0,
+                      "acceleratedSec": _col(r, "accelerated_s", 20) or 0,
+                      "budgetPausedSec": _col(r, "budget_paused_s", 21) or 0,
+                      "observerPeakWeight": _col(r, "observer_peak_weight", 22) or 0,
+                      "rateLimitCount": _col(r, "rate_limit_count", 23) or 0,
+                      "coreAdded": _col(r, "core_added", 24) or 0,
+                      "coreRemoved": _col(r, "core_removed", 25) or 0,
+                      "coreProbation": _col(r, "core_probation", 26) or 0,
+                      "coreRecovered": _col(r, "core_recovered", 27) or 0,
+                      "coreConfirmedDemotion": _col(r, "core_confirmed_demotion", 28) or 0,
+                      "coreSafetyExit": _col(r, "core_safety_exit", 29) or 0,
+                      "replacementBlocked": bool(_col(r, "replacement_blocked", 30))}
                      for r in rows]}
 
 

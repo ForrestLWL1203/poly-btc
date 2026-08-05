@@ -37,6 +37,10 @@ class LauncherTests(unittest.TestCase):
             " -m hyper.cli.discover --db /root/poly-btc/data/hl.db storage-maintenance",
             rendered["/etc/systemd/system/hl-challenger-refresh.service"],
         )
+        self.assertIn(
+            "Environment=HL_LIVE_ACCOUNT_MONITOR_MODE=ws_primary",
+            rendered["/etc/systemd/system/hl-observe.service"],
+        )
 
     def test_timer_install_touches_persistent_stamps_before_enable(self):
         commands = []

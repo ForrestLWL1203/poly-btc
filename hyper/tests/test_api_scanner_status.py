@@ -207,8 +207,11 @@ class ApiScannerStatusTests(unittest.TestCase):
                 "INSERT INTO scan_runs "
                 "(started_at,finished_at,duration_s,candidates,probed_new,profiled,added,retired,kept,"
                 "rejected,n_active,api_requests,api_weight,outcome_reason,core_added,core_removed,"
-                "core_probation,core_recovered,core_confirmed_demotion,core_safety_exit,replacement_blocked) "
-                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8,19,54,'example',2,1,1,1,0,1,1)"
+                "core_probation,core_recovered,core_confirmed_demotion,core_safety_exit,replacement_blocked,"
+                "rest_wait_s,local_compute_s,avg_weight_budget,min_weight_budget,accelerated_s,"
+                "budget_paused_s,observer_peak_weight,rate_limit_count) "
+                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8,19,54,'example',2,1,1,1,0,1,1,"
+                "12.5,40.0,188.0,80.0,22.0,5.0,620.0,1)"
             )
             db.commit()
 
@@ -226,6 +229,10 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertEqual(res["runs"][0]["coreRecovered"], 1)
         self.assertEqual(res["runs"][0]["coreSafetyExit"], 1)
         self.assertTrue(res["runs"][0]["replacementBlocked"])
+        self.assertEqual(res["runs"][0]["restWaitSec"], 12.5)
+        self.assertEqual(res["runs"][0]["avgWeightBudget"], 188.0)
+        self.assertEqual(res["runs"][0]["observerPeakWeight"], 620.0)
+        self.assertEqual(res["runs"][0]["rateLimitCount"], 1)
 
     def test_scan_runs_api_never_returns_more_than_five_rows(self):
         with tempfile.TemporaryDirectory() as td:
