@@ -714,6 +714,86 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_live_sizing_uses_only_lightweight_rest_equity_refresh(self):
+        async def run():
+            db = self._db()
+            self._activate_live(db)
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+
+            class WsExecutor:
+                session = {"sizing_anchor": 200.0}
+                equity = 200.0
+                available = 180.0
+
+                def __init__(self):
+                    self.refresh_calls = 0
+                    self.reconcile_calls = 0
+                    self.heartbeat_calls = 0
+
+                def account_ws_healthy(self):
+                    return True
+
+                def refresh_authoritative_equity(self, *, usage_category):
+                    self.refresh_calls += 1
+                    self.equity = 207.0
+                    self.available = 191.0
+                    self.usage_category = usage_category
+
+                def heartbeat_lease(self):
+                    self.heartbeat_calls += 1
+
+                def reconcile(self, **_kwargs):
+                    self.reconcile_calls += 1
+                    raise AssertionError("full reconcile must not run on healthy WS sizing")
+
+            executor = WsExecutor()
+            obs.live_executor = executor
+            obs._load_account()
+
+            await obs._refresh_live_sizing_state()
+
+            self.assertEqual(executor.refresh_calls, 1)
+            self.assertEqual(executor.reconcile_calls, 0)
+            self.assertEqual(executor.heartbeat_calls, 1)
+            self.assertEqual(executor.usage_category, "market_safety")
+            self.assertEqual(obs.taker.balance, 207.0)
+            self.assertEqual(obs._risk_available(), 191.0)
+
+        asyncio.run(run())
+
+    def test_ws_equity_rest_failure_blocks_increase_without_full_reconcile(self):
+        async def run():
+            db = self._db()
+            self._activate_live(db)
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+
+            class FailingWsExecutor:
+                equity = 200.0
+                available = 180.0
+                reconcile_calls = 0
+
+                def account_ws_healthy(self):
+                    return True
+
+                def refresh_authoritative_equity(self, **_kwargs):
+                    raise RuntimeError("spot_equity_unavailable")
+
+                def reconcile(self, **_kwargs):
+                    self.reconcile_calls += 1
+
+            executor = FailingWsExecutor()
+            obs.live_executor = executor
+
+            with self.assertRaisesRegex(RuntimeError, "spot_equity_unavailable"):
+                await obs._refresh_live_sizing_state()
+
+            self.assertEqual(executor.reconcile_calls, 0)
+            self.assertFalse(obs.paused)
+
+        asyncio.run(run())
+
     def test_live_executor_database_connection_is_not_shared_with_observer(self):
         db = self._db()
         obs = Observer(db, [], {})

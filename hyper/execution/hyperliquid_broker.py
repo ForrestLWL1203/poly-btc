@@ -335,13 +335,22 @@ class HyperliquidBroker:
             abstraction=self._info_call(
                 "userAbstraction", lambda: self.info.query_user_abstraction_state(self.account_address),
             ),
-            collateral_state=self._info_call(
-                "spotClearinghouseState", lambda: self.info.spot_user_state(self.account_address),
-            ),
+            collateral_state=self.collateral_state(),
             perp_states=perp_states,
             open_orders=open_orders,
             frontend_open_orders=frontend_open_orders,
         )
+
+    def collateral_state(self) -> dict:
+        """Fetch the lightweight authoritative Unified collateral state."""
+        self._require_info()
+        state = self._info_call(
+            "spotClearinghouseState", lambda: self.info.spot_user_state(self.account_address),
+        )
+        balances = state.get("balances") if isinstance(state, dict) else None
+        if not isinstance(balances, list):
+            raise BrokerProtocolError("invalid_spot_clearinghouse_state")
+        return state
 
     def recent_fills(self):
         self._require_info()

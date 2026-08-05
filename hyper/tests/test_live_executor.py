@@ -129,6 +129,11 @@ class FakeLiveBroker:
             frontend_open_orders={"": list(self.orders), "xyz": []},
         )
 
+    def collateral_state(self):
+        return {
+            "balances": [{"coin": "USDC", "total": str(self.total_equity), "hold": "0"}],
+        }
+
 
 class LiveExecutorTests(unittest.TestCase):
     def setUp(self):

@@ -265,8 +265,10 @@ together. The current broad contract is:
 - Account WS handlers never launch a full REST reconcile. They may only degrade health; the Observer's single
   reconciliation loop owns REST baseline, audit, fallback, and recovery so one WS delay cannot fan out into
   concurrent account pulls.
-- Every exposure increase reads fresh exchange equity/available balance, reconciles exchange positions/orders
-  against the Live ledger, then sizes and executes. Dashboard equity/available values come from the real account.
+- Every exposure increase reads fresh exchange equity/available balance from the lightweight REST
+  `spotClearinghouseState`, verifies the current WS position projection against the Live ledger, then sizes and
+  executes. Dashboard equity/available values stream from WS `spotState`; the five-minute full REST audit remains
+  the independent account-wide backstop.
 - LiveExecutor uses a dedicated WAL connection. Observer must commit its signal transition before LiveExecutor
   writes, and no coroutine/thread may borrow another owner's connection.
 - Market execution is a bounded marketable IOC/taker flow, not an unbounded “market” assumption. Validate current

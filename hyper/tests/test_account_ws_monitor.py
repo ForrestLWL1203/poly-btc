@@ -28,11 +28,16 @@ class _WsPublishingBroker(FakeLiveBroker):
         self.account_address = ACCOUNT
         self.supported_dexes = ("", "xyz")
         self.account_snapshot_calls = 0
+        self.collateral_state_calls = 0
         self.executor = None
 
     def account_snapshot(self):
         self.account_snapshot_calls += 1
         return super().account_snapshot()
+
+    def collateral_state(self):
+        self.collateral_state_calls += 1
+        return super().collateral_state()
 
     def submit_ioc(self, intent):
         result = super().submit_ioc(intent)
@@ -377,6 +382,87 @@ class AccountWsMonitorTests(unittest.TestCase):
 
         self.assertEqual((executor.equity, executor.available), (1234.0, 1200.0))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_position").fetchone()[0], 0)
+
+    def test_mainnet_list_pair_perp_snapshot_updates_realtime_equity(self):
+        executor = self._executor()
+        applied = executor.apply_ws_messages([{
+            "channel": "allDexsClearinghouseState",
+            "data": {"user": ACCOUNT, "clearinghouseStates": [
+                ["", {"assetPositions": []}],
+                ["xyz", {"assetPositions": []}],
+            ]},
+        }, {
+            "channel": "spotState",
+            "data": {"user": ACCOUNT, "spotState": {
+                "balances": [{"coin": "USDC", "total": "2268.48", "hold": "1018.60"}],
+            }},
+        }])
+
+        self.assertEqual(
+            applied, frozenset({"allDexsClearinghouseState", "spotState"}),
+        )
+        self.assertAlmostEqual(executor.equity, 2268.48)
+        self.assertAlmostEqual(executor.available, 1249.88)
+        account = self.db.execute(
+            "SELECT balance,available FROM live_copy_account WHERE id=1",
+        ).fetchone()
+        self.assertAlmostEqual(account[0], 2268.48)
+        self.assertAlmostEqual(account[1], 1249.88)
+
+        executor.apply_ws_message({
+            "channel": "spotState",
+            "data": {"spotState": {
+                "balances": [{"coin": "USDC", "total": "2271.25", "hold": "1015"}],
+            }},
+        })
+        self.assertEqual(
+            self.db.execute("SELECT balance FROM live_copy_account WHERE id=1").fetchone()[0],
+            2271.25,
+        )
+
+    def test_malformed_perp_snapshot_is_not_silently_accepted(self):
+        executor = self._executor()
+
+        with self.assertRaisesRegex(RuntimeError, "invalid_all_dexs_clearinghouse_state"):
+            executor.apply_ws_message({
+                "channel": "allDexsClearinghouseState",
+                "data": {"clearinghouseStates": [["", {"unexpected": []}]]},
+            })
+
+        self.assertEqual(executor._ws_perp_states, {})
+        self.assertEqual(executor._ws_position_version, 0)
+
+    def test_lightweight_rest_equity_refresh_does_not_run_full_reconcile(self):
+        broker = _WsPublishingBroker()
+        broker.total_equity = 1777.0
+        executor = self._executor(broker)
+
+        equity, available = executor.refresh_authoritative_equity()
+
+        self.assertEqual((equity, available), (1777.0, 1777.0))
+        self.assertEqual(broker.collateral_state_calls, 1)
+        self.assertEqual(broker.account_snapshot_calls, 0)
+        self.assertEqual(
+            self.db.execute("SELECT balance FROM live_copy_account WHERE id=1").fetchone()[0],
+            1777.0,
+        )
+
+    def test_reduce_only_ws_order_does_not_require_rest_equity_refresh(self):
+        broker = _WsPublishingBroker()
+        broker.positions["BTC"] = 0.2
+        executor = self._executor(broker)
+        broker.executor = executor
+        executor.attach_account_monitor(_HealthyMonitor())
+
+        result = executor.execute(
+            coin="BTC", is_buy=False, size=0.2, leverage=10, reduce_only=True,
+            action="close", source_address="0xsource", source_fill_id="source-close-1",
+            source_order_id="8", source_time_ms=123456790, action_seq=2,
+        )
+
+        self.assertEqual(result.outcome, "filled")
+        self.assertEqual(broker.collateral_state_calls, 0)
+        self.assertEqual(broker.account_snapshot_calls, 0)
 
     def test_isolated_slow_event_does_not_leave_monitor_degraded(self):
         async def run():

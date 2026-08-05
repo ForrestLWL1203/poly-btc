@@ -576,9 +576,39 @@ class LiveExecutor:
             )
         self._refresh_intent_from_exchange(cloid=intent_cloid, oid=intent_oid)
 
-    def _persist_ws_account_projection(self, *, append_history: bool) -> None:
+    @staticmethod
+    def _normalize_ws_perp_states(states: Any) -> dict[str, dict]:
+        """Accept both documented maps and Mainnet's observed ``[dex, state]`` pairs."""
+        if isinstance(states, dict):
+            items = list(states.items())
+        elif isinstance(states, list):
+            items = []
+            for item in states:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    raise RuntimeError("invalid_all_dexs_clearinghouse_state")
+                items.append((item[0], item[1]))
+        else:
+            raise RuntimeError("invalid_all_dexs_clearinghouse_state")
+        normalized: dict[str, dict] = {}
+        for dex, state in items:
+            key = str(dex or "")
+            if key in normalized or not isinstance(state, dict) \
+                    or not isinstance(state.get("assetPositions"), list):
+                raise RuntimeError("invalid_all_dexs_clearinghouse_state")
+            normalized[key] = state
+        if not normalized:
+            raise RuntimeError("invalid_all_dexs_clearinghouse_state")
+        return normalized
+
+    @staticmethod
+    def _validate_ws_spot_state(state: Any) -> dict:
+        if not isinstance(state, dict) or not isinstance(state.get("balances"), list):
+            raise RuntimeError("invalid_spot_state")
+        return state
+
+    def _persist_ws_account_projection(self, *, append_history: bool) -> bool:
         if not self._ws_perp_states or self._ws_spot_state is None:
-            return
+            return False
         snapshot = AccountSnapshot(
             network=self.network,
             account_address=self.broker.account_address,
@@ -621,12 +651,48 @@ class LiveExecutor:
             "equity_projection_version=2,updated_at=excluded.updated_at",
             (self.session["sizing_anchor"], self.equity, self.available, 2, observed_at),
         )
+        return True
 
-    def apply_ws_message(self, message: dict) -> None:
+    def refresh_authoritative_equity(self, *, usage_category: str = "market_safety") -> tuple[float, float]:
+        """Refresh only Unified USDC equity/available via REST before an exposure increase.
+
+        This deliberately does not run the nine-call account reconcile and does not affect
+        reductions.  Position, order and fill truth remains on the account WS plus the periodic
+        full REST audit.
+        """
+        with self._broker_request_category(usage_category):
+            state = self.broker.collateral_state()
+        snapshot = AccountSnapshot(
+            network=self.network,
+            account_address=self.broker.account_address,
+            abstraction="unifiedAccount",
+            collateral_state=state,
+            perp_states={},
+            open_orders={},
+            frontend_open_orders={},
+        )
+        equity, available = self._account_values(snapshot, [])
+        observed_at = now_iso()
+        with self._lock:
+            self._ws_spot_state = state
+            self.equity = equity
+            self.available = available
+            self.db.execute(
+                "INSERT INTO live_copy_account "
+                "(id,initial_balance,balance,available,equity_projection_version,updated_at) "
+                "VALUES (1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "balance=excluded.balance,available=excluded.available,"
+                "equity_projection_version=2,updated_at=excluded.updated_at",
+                (self.session["sizing_anchor"], equity, available, 2, observed_at),
+            )
+            self.db.commit()
+        return equity, available
+
+    def apply_ws_message(self, message: dict) -> frozenset[str]:
         """Compatibility wrapper for one already-ordered account message."""
-        self.apply_ws_messages([message])
+        return self.apply_ws_messages([message])
 
-    def apply_ws_messages(self, messages: list[dict]) -> None:
+    def apply_ws_messages(self, messages: list[dict]) -> frozenset[str]:
         """Persist one critical event or one coalesced account-state batch.
 
         The monitor never batches immutable order/fill facts.  Replaceable
@@ -635,7 +701,9 @@ class LiveExecutor:
         insert cycle for every component message.
         """
         projection_dirty = False
+        projection_persisted = False
         history_due = False
+        applied_channels: set[str] = set()
         with self._lock:
             try:
                 for message in messages:
@@ -643,6 +711,8 @@ class LiveExecutor:
                     data = message.get("data")
                     if channel == "userFills":
                         fills = data.get("fills") if isinstance(data, dict) else data
+                        if not isinstance(fills, list):
+                            raise RuntimeError("invalid_user_fills_event")
                         for fill in fills or []:
                             if not isinstance(fill, dict):
                                 continue
@@ -656,6 +726,7 @@ class LiveExecutor:
                             self._refresh_intent_from_exchange(
                                 cloid=str(fill.get("cloid") or "").lower() or None, oid=oid,
                             )
+                        applied_channels.add(channel)
                     elif channel == "orderUpdates":
                         events = data if isinstance(data, list) else (
                             data.get("orders")
@@ -665,40 +736,45 @@ class LiveExecutor:
                         for event in events or []:
                             if isinstance(event, dict):
                                 self._apply_ws_order_update(event)
+                        applied_channels.add(channel)
                     elif channel == "allDexsClearinghouseState" and isinstance(data, dict):
-                        states = data.get("clearinghouseStates")
-                        if isinstance(states, dict):
-                            self._ws_perp_states = {
-                                str(dex or ""): state
-                                for dex, state in states.items() if isinstance(state, dict)
-                            }
-                            projection_dirty = True
+                        self._ws_perp_states = self._normalize_ws_perp_states(
+                            data.get("clearinghouseStates")
+                        )
+                        projection_dirty = True
+                        applied_channels.add(channel)
                     elif channel == "openOrders" and isinstance(data, dict):
                         dex = str(data.get("dex") or "")
                         orders = data.get("orders")
-                        if isinstance(orders, list):
-                            self._ws_open_orders[dex] = orders
+                        if not isinstance(orders, list):
+                            raise RuntimeError("invalid_open_orders_event")
+                        self._ws_open_orders[dex] = orders
+                        applied_channels.add(channel)
                     elif channel == "spotState" and isinstance(data, dict):
-                        state = data.get("spotState")
-                        if isinstance(state, dict):
-                            self._ws_spot_state = state
-                            projection_dirty = True
+                        self._ws_spot_state = self._validate_ws_spot_state(data.get("spotState"))
+                        projection_dirty = True
+                        applied_channels.add(channel)
+                    elif channel in {"allDexsClearinghouseState", "openOrders", "spotState"}:
+                        raise RuntimeError(f"invalid_{channel}_event")
                 if projection_dirty:
                     history_due = (
                         not self._last_ws_account_history_at
                         or time.monotonic() - self._last_ws_account_history_at
                         >= float(config.ACCOUNT_WS_HISTORY_INTERVAL_S)
                     )
-                    self._persist_ws_account_projection(append_history=history_due)
+                    projection_persisted = self._persist_ws_account_projection(
+                        append_history=history_due,
+                    )
                 self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
-            if projection_dirty:
+            if projection_persisted:
                 self._ws_position_version += 1
                 if history_due:
                     self._last_ws_account_history_at = time.monotonic()
         self._notify_order_event()
+        return frozenset(applied_channels)
 
     def rollback_ws_transaction(self) -> None:
         """Release a failed WS SQLite transaction before REST recovery."""

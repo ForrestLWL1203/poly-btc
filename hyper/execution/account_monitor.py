@@ -491,18 +491,24 @@ class LiveAccountMonitor:
             finally:
                 raise
 
-    async def _apply_batch(self, messages: list[dict]) -> None:
+    async def _apply_batch(self, messages: list[dict]) -> frozenset[str]:
         """Finish an in-flight SQLite writer before honoring cancellation."""
         apply_many = getattr(self.executor, "apply_ws_messages", None)
 
-        def apply() -> None:
+        def apply() -> frozenset[str]:
             if callable(apply_many):
-                apply_many(messages)
-            else:
-                for message in messages:
-                    self.executor.apply_ws_message(message)
+                result = apply_many(messages)
+                if result is not None:
+                    return frozenset(str(channel) for channel in result)
+                return frozenset(str(message.get("channel") or "") for message in messages)
+            applied = set()
+            for message in messages:
+                result = self.executor.apply_ws_message(message)
+                if result is not None:
+                    applied.update(str(channel) for channel in result)
+            return frozenset(applied)
 
-        await self._complete_thread(apply)
+        return await self._complete_thread(apply)
 
     @staticmethod
     def _snapshot_key(channel: str, data: Any) -> str | None:
@@ -567,11 +573,13 @@ class LiveAccountMonitor:
                     else:
                         self.snapshot_lag_ms = lag_ms
                 messages = [message for _, message in items]
-                await self._apply_batch(messages)
+                applied_channels = await self._apply_batch(messages)
                 now = time.time()
                 with self._meta_lock:
                     for message in messages:
                         channel = str(message.get("channel") or "")
+                        if channel not in applied_channels:
+                            continue
                         if channel == "orderUpdates":
                             self.last_order_update_at = now
                         elif channel == "userFills":

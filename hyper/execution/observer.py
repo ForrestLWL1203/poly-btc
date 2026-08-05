@@ -537,11 +537,16 @@ class Observer:
             return
         self.taker.balance = max(0.0, float(self.live_executor.equity))
         self.taker.available_balance = max(0.0, float(self.live_executor.available))
-        self.db.execute(
-            "UPDATE live_copy_account SET balance=?,available=?,equity_projection_version=2,"
-            "updated_at=? WHERE id=1",
-            (self.taker.balance, self.taker.available_balance, now_iso()),
-        )
+        row = self.db.execute(
+            "SELECT balance,available FROM live_copy_account WHERE id=1",
+        ).fetchone()
+        if row is None or abs(float(row[0] or 0.0) - self.taker.balance) > 1e-12 \
+                or abs(float(row[1] or 0.0) - self.taker.available_balance) > 1e-12:
+            self.db.execute(
+                "UPDATE live_copy_account SET balance=?,available=?,equity_projection_version=2,"
+                "updated_at=? WHERE id=1",
+                (self.taker.balance, self.taker.available_balance, now_iso()),
+            )
         self.db.commit()
 
     def _verify_live_ledger_projection(self) -> bool:
@@ -641,7 +646,16 @@ class Observer:
             return
         ws_health = getattr(type(self.live_executor), "account_ws_healthy", None)
         if callable(ws_health) and bool(ws_health(self.live_executor)):
-            await asyncio.to_thread(self.live_executor.heartbeat_lease)
+            try:
+                await asyncio.to_thread(
+                    self.live_executor.refresh_authoritative_equity,
+                    usage_category="market_safety",
+                )
+                await asyncio.to_thread(self.live_executor.heartbeat_lease)
+            except Exception as exc:
+                self.live_reconcile_error = str(exc)[:120]
+                self.live_reconcile_error_at = now_iso()
+                raise
             self._sync_live_account()
             if not self._verify_live_ledger_projection():
                 raise RuntimeError("live_ledger_projection_drift")
