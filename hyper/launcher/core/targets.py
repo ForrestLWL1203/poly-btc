@@ -65,7 +65,8 @@ def _write(items):
 
 
 _SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "key_path", "host_fingerprint",
-                "app_dir", "branch", "port", "domain", "dash_user", "keyInstalled")
+                "app_dir", "branch", "port", "domain", "dash_user", "keyInstalled",
+                "account_monitor_mode")
 
 
 def save(t):

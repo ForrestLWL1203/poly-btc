@@ -4,6 +4,15 @@ from __future__ import annotations
 import dataclasses
 
 REPO_URL = "https://github.com/ForrestLWL1203/poly-btc.git"   # public → HTTPS clone, no credentials
+ACCOUNT_MONITOR_MODES = frozenset({"rest_only", "ws_primary"})
+
+
+def account_monitor_mode(value):
+    """Return a validated account monitor mode, defaulting old configs to REST."""
+    mode = str(value or "rest_only").strip()
+    if mode not in ACCOUNT_MONITOR_MODES:
+        raise ValueError("account_monitor_mode must be rest_only or ws_primary")
+    return mode
 
 
 @dataclasses.dataclass
@@ -37,6 +46,10 @@ class DeployConfig:
     # alternating 3/4-day evidence refresh while live Observer risk controls remain continuous.
     scan_calendar: str = "Mon,Thu *-*-* 04:00:00 Asia/Shanghai"
     challenger_calendar: str = "Tue,Wed,Fri,Sat,Sun *-*-* 04:00:00 Asia/Shanghai"
+
+    # Live-account monitoring is deliberately opt-in.  Old saved targets omit this field and must
+    # therefore continue rendering the established REST-only observer service after an update.
+    account_monitor_mode: str = "rest_only"
 
     @property
     def py(self):

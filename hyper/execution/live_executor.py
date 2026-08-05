@@ -103,6 +103,7 @@ class LiveExecutor:
         self._ws_open_orders: dict[str, list] = {}
         self._ws_spot_state: dict | None = None
         self._ws_position_version = 0
+        self._last_ws_account_history_at = 0.0
         self.available = 0.0
         self.equity = 0.0
         self._acquire_lease()
@@ -476,7 +477,7 @@ class LiveExecutor:
             )
         self._refresh_intent_from_exchange(cloid=cloid, oid=oid)
 
-    def _persist_ws_account_projection(self) -> None:
+    def _persist_ws_account_projection(self, *, append_history: bool) -> None:
         if not self._ws_perp_states or self._ws_spot_state is None:
             return
         snapshot = AccountSnapshot(
@@ -491,6 +492,7 @@ class LiveExecutor:
         positions = self._positions(snapshot)
         self.equity, self.available = self._account_values(snapshot, positions)
         session_id = self.session["session_id"]
+        observed_at = now_iso()
         self.db.execute("DELETE FROM execution_position_projection WHERE session_id=?", (session_id,))
         self.db.executemany(
             "INSERT INTO execution_position_projection "
@@ -499,73 +501,108 @@ class LiveExecutor:
             [(
                 session_id, p["dex"], p["coin"], p["signed_size"], p["entry_px"], p["position_value"],
                 p["margin_used"], p["leverage_type"], p["leverage_value"], p["unrealized_pnl"],
-                p["liquidation_px"], now_iso(),
+                p["liquidation_px"], observed_at,
             ) for p in positions],
         )
-        self.db.execute(
-            "INSERT INTO execution_account_snapshot "
-            "(session_id,equity,available,margin_used,unrealized_pnl,equity_projection_version,observed_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (
-                session_id, self.equity, self.available,
-                sum(max(0.0, _float(p.get("margin_used"))) for p in positions),
-                sum(_float(p.get("unrealized_pnl")) for p in positions), 2, now_iso(),
-            ),
-        )
+        if append_history:
+            self.db.execute(
+                "INSERT INTO execution_account_snapshot "
+                "(session_id,equity,available,margin_used,unrealized_pnl,equity_projection_version,observed_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    session_id, self.equity, self.available,
+                    sum(max(0.0, _float(p.get("margin_used"))) for p in positions),
+                    sum(_float(p.get("unrealized_pnl")) for p in positions), 2, observed_at,
+                ),
+            )
         self.db.execute(
             "INSERT INTO live_copy_account "
             "(id,initial_balance,balance,available,equity_projection_version,updated_at) VALUES (1,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET balance=excluded.balance,available=excluded.available,"
             "equity_projection_version=2,updated_at=excluded.updated_at",
-            (self.session["sizing_anchor"], self.equity, self.available, 2, now_iso()),
+            (self.session["sizing_anchor"], self.equity, self.available, 2, observed_at),
         )
-        self._ws_position_version += 1
 
     def apply_ws_message(self, message: dict) -> None:
-        """Persist one already-ordered account message and wake matching orders."""
-        channel = str(message.get("channel") or "")
-        data = message.get("data")
+        """Compatibility wrapper for one already-ordered account message."""
+        self.apply_ws_messages([message])
+
+    def apply_ws_messages(self, messages: list[dict]) -> None:
+        """Persist one critical event or one coalesced account-state batch.
+
+        The monitor never batches immutable order/fill facts.  Replaceable
+        perp/spot/open-order snapshots can arrive as one server burst; applying
+        them under one lock produces one projection commit instead of a delete/
+        insert cycle for every component message.
+        """
+        projection_dirty = False
+        history_due = False
         with self._lock:
-            if channel == "userFills":
-                fills = data.get("fills") if isinstance(data, dict) else data
-                for fill in fills or []:
-                    if not isinstance(fill, dict):
-                        continue
-                    self._insert_exchange_fill(fill)
-                    try:
-                        oid = int(fill.get("oid")) if fill.get("oid") is not None else None
-                    except (TypeError, ValueError):
-                        oid = None
-                    self._refresh_intent_from_exchange(
-                        cloid=str(fill.get("cloid") or "").lower() or None, oid=oid,
+            try:
+                for message in messages:
+                    channel = str(message.get("channel") or "")
+                    data = message.get("data")
+                    if channel == "userFills":
+                        fills = data.get("fills") if isinstance(data, dict) else data
+                        for fill in fills or []:
+                            if not isinstance(fill, dict):
+                                continue
+                            self._insert_exchange_fill(fill)
+                            try:
+                                oid = int(fill.get("oid")) if fill.get("oid") is not None else None
+                            except (TypeError, ValueError):
+                                oid = None
+                            self._refresh_intent_from_exchange(
+                                cloid=str(fill.get("cloid") or "").lower() or None, oid=oid,
+                            )
+                    elif channel == "orderUpdates":
+                        events = data if isinstance(data, list) else (
+                            data.get("orders")
+                            if isinstance(data, dict) and isinstance(data.get("orders"), list)
+                            else [data]
+                        )
+                        for event in events or []:
+                            if isinstance(event, dict):
+                                self._apply_ws_order_update(event)
+                    elif channel == "allDexsClearinghouseState" and isinstance(data, dict):
+                        states = data.get("clearinghouseStates")
+                        if isinstance(states, dict):
+                            self._ws_perp_states = {
+                                str(dex or ""): state
+                                for dex, state in states.items() if isinstance(state, dict)
+                            }
+                            projection_dirty = True
+                    elif channel == "openOrders" and isinstance(data, dict):
+                        dex = str(data.get("dex") or "")
+                        orders = data.get("orders")
+                        if isinstance(orders, list):
+                            self._ws_open_orders[dex] = orders
+                    elif channel == "spotState" and isinstance(data, dict):
+                        state = data.get("spotState")
+                        if isinstance(state, dict):
+                            self._ws_spot_state = state
+                            projection_dirty = True
+                if projection_dirty:
+                    history_due = (
+                        not self._last_ws_account_history_at
+                        or time.monotonic() - self._last_ws_account_history_at
+                        >= float(config.ACCOUNT_WS_HISTORY_INTERVAL_S)
                     )
-            elif channel == "orderUpdates":
-                events = data if isinstance(data, list) else (
-                    data.get("orders") if isinstance(data, dict) and isinstance(data.get("orders"), list)
-                    else [data]
-                )
-                for event in events or []:
-                    if isinstance(event, dict):
-                        self._apply_ws_order_update(event)
-            elif channel == "allDexsClearinghouseState" and isinstance(data, dict):
-                states = data.get("clearinghouseStates")
-                if isinstance(states, dict):
-                    self._ws_perp_states = {
-                        str(dex or ""): state for dex, state in states.items() if isinstance(state, dict)
-                    }
-                    self._persist_ws_account_projection()
-            elif channel == "openOrders" and isinstance(data, dict):
-                dex = str(data.get("dex") or "")
-                orders = data.get("orders")
-                if isinstance(orders, list):
-                    self._ws_open_orders[dex] = orders
-            elif channel == "spotState" and isinstance(data, dict):
-                state = data.get("spotState")
-                if isinstance(state, dict):
-                    self._ws_spot_state = state
-                    self._persist_ws_account_projection()
-            self.db.commit()
+                    self._persist_ws_account_projection(append_history=history_due)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            if projection_dirty:
+                self._ws_position_version += 1
+                if history_due:
+                    self._last_ws_account_history_at = time.monotonic()
         self._notify_order_event()
+
+    def rollback_ws_transaction(self) -> None:
+        """Release a failed WS SQLite transaction before REST recovery."""
+        with self._lock:
+            self.db.rollback()
 
     def _fill_sync_start_ms(self) -> int:
         session_start_ms = _iso_ms(self.session.get("started_at"))
@@ -815,6 +852,7 @@ class LiveExecutor:
                     control.set_control_state(self.db, running_state)
                     self.session["state"] = running_state
                 self.db.commit()
+                self._last_ws_account_history_at = time.monotonic()
                 return {
                     "ok": status == "ok", "status": status, "equity": self.equity,
                     "available": self.available, "positions": positions, "orders": orders,

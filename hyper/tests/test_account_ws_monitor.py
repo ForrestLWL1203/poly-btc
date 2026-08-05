@@ -1,6 +1,9 @@
 import asyncio
+import sqlite3
+import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from hyper import storage
 from hyper.execution.account_monitor import LiveAccountMonitor
@@ -111,7 +114,7 @@ class AccountWsMonitorTests(unittest.TestCase):
             {row["type"] for row in subscriptions},
             {
                 "orderUpdates", "userFills", "allDexsClearinghouseState",
-                "openOrders", "spotState", "userNonFundingLedgerUpdates",
+                "openOrders", "spotState",
             },
         )
         self.assertEqual(
@@ -234,12 +237,12 @@ class AccountWsMonitorTests(unittest.TestCase):
             monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
             monitor._ready.set()
             monitor._set_state("healthy")
-            monitor.queue.put_nowait((
+            await monitor._enqueue_message(
                 time.monotonic() - 3.0,
-                {"channel": "userNonFundingLedgerUpdates", "data": {}},
-            ))
+                {"channel": "userFills", "data": {"fills": []}},
+            )
             consumer = asyncio.create_task(monitor._consume())
-            await monitor.queue.join()
+            await monitor._drained.wait()
             consumer.cancel()
             await asyncio.gather(consumer, return_exceptions=True)
             self.assertEqual(monitor.state, "healthy")
@@ -252,11 +255,11 @@ class AccountWsMonitorTests(unittest.TestCase):
             monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
             monitor._ready.set()
             monitor._set_state("healthy")
-            message = {"channel": "userNonFundingLedgerUpdates", "data": {}}
-            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
-            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+            message = {"channel": "userFills", "data": {"fills": []}}
+            await monitor._enqueue_message(time.monotonic() - 3.0, message)
+            await monitor._enqueue_message(time.monotonic() - 3.0, message)
             consumer = asyncio.create_task(monitor._consume())
-            await monitor.queue.join()
+            await monitor._drained.wait()
             consumer.cancel()
             await asyncio.gather(consumer, return_exceptions=True)
             self.assertEqual(monitor.state, "degraded")
@@ -271,13 +274,13 @@ class AccountWsMonitorTests(unittest.TestCase):
             monitor._conn = object()
             monitor.last_message_at = time.time()
             monitor.mark_degraded("account_ws_queue_lag")
-            message = {"channel": "userNonFundingLedgerUpdates", "data": {}}
-            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
-            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+            message = {"channel": "userFills", "data": {"fills": []}}
+            await monitor._enqueue_message(time.monotonic() - 3.0, message)
+            await monitor._enqueue_message(time.monotonic() - 3.0, message)
 
             monitor.restore_after_rest({"ok": True})
             consumer = asyncio.create_task(monitor._consume())
-            await monitor.queue.join()
+            await monitor._drained.wait()
             consumer.cancel()
             await asyncio.gather(consumer, return_exceptions=True)
 
@@ -287,6 +290,216 @@ class AccountWsMonitorTests(unittest.TestCase):
             self.assertEqual(monitor.queue_lag_ms, 0)
 
         asyncio.run(run())
+
+    def test_replaceable_account_snapshots_are_coalesced_and_batched(self):
+        async def run():
+            executor = self._executor()
+            applied = []
+            monitor = LiveAccountMonitor(executor, mode="ws_primary")
+            monitor._ready.set()
+            monitor._set_state("healthy")
+            base = time.monotonic() - 5.0
+            messages = [
+                {"channel": "spotState", "data": {"spotState": {"version": 1}}},
+                {"channel": "spotState", "data": {"spotState": {"version": 2}}},
+                {"channel": "allDexsClearinghouseState", "data": {
+                    "clearinghouseStates": {"": {"version": 1}},
+                }},
+                {"channel": "allDexsClearinghouseState", "data": {
+                    "clearinghouseStates": {"": {"version": 2}},
+                }},
+                {"channel": "openOrders", "data": {"dex": "", "orders": [{"oid": 1}]}},
+                {"channel": "openOrders", "data": {"dex": "", "orders": []}},
+                {"channel": "openOrders", "data": {"dex": "xyz", "orders": []}},
+            ]
+            for offset, message in enumerate(messages):
+                await monitor._enqueue_message(base + offset / 1000.0, message)
+
+            before = monitor.snapshot()
+            self.assertEqual(before["eventQueueDepth"], 0)
+            self.assertEqual(before["snapshotSlotDepth"], 4)
+            self.assertEqual(before["snapshotCoalescedCount"], 3)
+
+            with patch.object(executor, "apply_ws_messages", side_effect=lambda rows: applied.append(rows)):
+                consumer = asyncio.create_task(monitor._consume())
+                await monitor._drained.wait()
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+            self.assertEqual(len(applied), 1)
+            self.assertEqual(len(applied[0]), 4)
+            by_channel = {row["channel"]: row for row in applied[0] if row["channel"] != "openOrders"}
+            self.assertEqual(by_channel["spotState"]["data"]["spotState"]["version"], 2)
+            self.assertEqual(
+                by_channel["allDexsClearinghouseState"]["data"]["clearinghouseStates"][""]["version"],
+                2,
+            )
+            standard = [
+                row for row in applied[0]
+                if row["channel"] == "openOrders" and row["data"]["dex"] == ""
+            ]
+            self.assertEqual(standard[0]["data"]["orders"], [])
+            self.assertEqual(monitor.state, "healthy")
+            self.assertEqual(monitor.snapshot()["queueDepth"], 0)
+
+        asyncio.run(run())
+
+    def test_critical_order_events_preserve_fifo_ahead_of_snapshots(self):
+        async def run():
+            executor = self._executor()
+            applied = []
+            monitor = LiveAccountMonitor(executor, mode="ws_primary")
+            monitor._ready.set()
+            monitor._set_state("healthy")
+            await monitor._enqueue_message(
+                time.monotonic(), {"channel": "spotState", "data": {"spotState": {}}},
+            )
+            for sequence in (1, 2):
+                await monitor._enqueue_message(
+                    time.monotonic(),
+                    {"channel": "orderUpdates", "data": {"sequence": sequence}},
+                )
+
+            with patch.object(
+                executor, "apply_ws_messages",
+                side_effect=lambda rows: applied.append([row["channel"] for row in rows]
+                                                        + [rows[0].get("data", {}).get("sequence")]),
+            ):
+                consumer = asyncio.create_task(monitor._consume())
+                await monitor._drained.wait()
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+            self.assertEqual(applied[0], ["orderUpdates", 1])
+            self.assertEqual(applied[1], ["orderUpdates", 2])
+            self.assertEqual(applied[2][0], "spotState")
+
+        asyncio.run(run())
+
+    def test_database_busy_degrades_without_freezing_exchange_state(self):
+        async def run():
+            executor = self._executor()
+            monitor = LiveAccountMonitor(executor, mode="ws_primary")
+            monitor._ready.set()
+            monitor._set_state("healthy")
+            await monitor._enqueue_message(
+                time.monotonic(), {"channel": "userFills", "data": {"fills": []}},
+            )
+
+            with patch.object(
+                executor, "apply_ws_messages", side_effect=sqlite3.OperationalError("database is locked"),
+            ), patch.object(executor, "rollback_ws_transaction") as rollback, patch.object(
+                executor, "freeze_from_monitor",
+            ) as freeze:
+                consumer = asyncio.create_task(monitor._consume())
+                await monitor._drained.wait()
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+            self.assertEqual(monitor.state, "degraded")
+            self.assertEqual(monitor.last_error, "account_ws_database_busy")
+            rollback.assert_called_once_with()
+            freeze.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_monitor_cancellation_waits_for_sqlite_worker_to_finish(self):
+        async def run():
+            started = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+
+            def writer():
+                started.set()
+                release.wait(timeout=2)
+                finished.set()
+
+            task = asyncio.create_task(LiveAccountMonitor._complete_thread(writer))
+            while not started.is_set():
+                await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0.01)
+            self.assertFalse(task.done())
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            self.assertTrue(finished.is_set())
+
+        asyncio.run(run())
+
+    def test_successful_rest_recovery_refreshes_stream_state_clocks(self):
+        async def run():
+            monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
+            monitor._ready.set()
+            monitor._conn = object()
+            monitor.last_message_at = time.time()
+            monitor.last_position_at = time.time() - 500
+            monitor._last_spot_at = time.time() - 500
+            monitor.mark_degraded("account_state_snapshot_stale")
+
+            before = time.time()
+            monitor.restore_after_rest({"ok": True})
+
+            self.assertEqual(monitor.state, "healthy")
+            self.assertGreaterEqual(monitor.last_position_at, before)
+            self.assertGreaterEqual(monitor._last_spot_at, before)
+
+        asyncio.run(run())
+
+    def test_account_state_batch_limits_history_rows_but_keeps_projection_fresh(self):
+        executor = self._executor()
+        perp = {
+            "channel": "allDexsClearinghouseState",
+            "data": {"clearinghouseStates": {
+                "": {"assetPositions": []}, "xyz": {"assetPositions": []},
+            }},
+        }
+        spot = {
+            "channel": "spotState",
+            "data": {"spotState": {
+                "balances": [{"coin": "USDC", "total": "1234", "hold": "34"}],
+            }},
+        }
+        executor.apply_ws_messages([perp, spot])
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM execution_account_snapshot").fetchone()[0], 1,
+        )
+
+        newer_spot = {
+            "channel": "spotState",
+            "data": {"spotState": {
+                "balances": [{"coin": "USDC", "total": "1300", "hold": "20"}],
+            }},
+        }
+        executor.apply_ws_messages([newer_spot])
+        self.assertEqual((executor.equity, executor.available), (1300.0, 1280.0))
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM execution_account_snapshot").fetchone()[0], 1,
+        )
+        with patch("hyper.execution.live_executor.config.ACCOUNT_WS_HISTORY_INTERVAL_S", 0):
+            executor.apply_ws_messages([newer_spot])
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM execution_account_snapshot").fetchone()[0], 2,
+        )
+
+    def test_failed_ws_batch_rolls_back_partial_audit_writes(self):
+        executor = self._executor()
+
+        def partially_write_then_fail(_event):
+            self.db.execute(
+                "INSERT INTO execution_order_event "
+                "(event_hash,session_id,exchange_status,raw_json,received_at) "
+                "VALUES ('partial','live-ws-test','open','{}',?)",
+                (now_iso(),),
+            )
+            raise ValueError("invalid_order_event")
+
+        with patch.object(executor, "_apply_ws_order_update", side_effect=partially_write_then_fail):
+            with self.assertRaisesRegex(ValueError, "invalid_order_event"):
+                executor.apply_ws_messages([{"channel": "orderUpdates", "data": [{}]}])
+
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM execution_order_event").fetchone()[0], 0,
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import sqlite3
 import threading
 import time
 from typing import Any
@@ -21,6 +22,14 @@ from hyper import config
 from hyper.market.rate_usage import USAGE
 
 
+_CRITICAL_CHANNELS = {
+    "orderUpdates", "userFills",
+}
+_REPLACEABLE_CHANNELS = {
+    "allDexsClearinghouseState", "openOrders", "spotState",
+}
+
+
 def _subscription_key(subscription: dict) -> str:
     kind = str(subscription.get("type") or "")
     if kind == "openOrders":
@@ -29,7 +38,7 @@ def _subscription_key(subscription: dict) -> str:
 
 
 class LiveAccountMonitor:
-    """One-user WS stream, ordered persistence queue and WS info RPC."""
+    """One-user WS stream, durable event queue, coalesced state and info RPC."""
 
     def __init__(self, executor, *, ws_url: str | None = None, mode: str | None = None):
         self.executor = executor
@@ -37,7 +46,16 @@ class LiveAccountMonitor:
         self.supported_dexes = tuple(executor.broker.supported_dexes)
         self.ws_url = str(ws_url or executor.broker.venue.ws_url)
         self.mode = str(mode or config.LIVE_ACCOUNT_MONITOR_MODE or "rest_only").lower()
+        # Orders and fills are immutable facts and must retain
+        # their receive order.  Account/open-order messages are complete,
+        # replaceable snapshots; keeping more than the newest value per key
+        # only creates stale SQLite work and can never improve reconciliation.
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=int(config.ACCOUNT_WS_QUEUE_MAX))
+        self._overflow_event: tuple[float, dict] | None = None
+        self._snapshot_slots: dict[str, tuple[float, dict]] = {}
+        self._work_available = asyncio.Event()
+        self._drained = asyncio.Event()
+        self._drained.set()
         self.state = "connecting" if self.mode == "ws_primary" else "rest_fallback"
         self.connected_at = None
         self.healthy_since = None
@@ -52,6 +70,9 @@ class LiveAccountMonitor:
         self.fallback_count = 0
         self.last_error = None
         self.queue_lag_ms = 0
+        self.snapshot_lag_ms = 0
+        self.snapshot_coalesced_count = 0
+        self.unexpected_message_count = 0
         self._conn = None
         self._loop = None
         self._stop = False
@@ -75,13 +96,31 @@ class LiveAccountMonitor:
         }
         self.executor.attach_account_monitor(self)
 
+    def _snapshot_slot_key(self, message: dict) -> str | None:
+        channel = str(message.get("channel") or "")
+        if channel == "openOrders":
+            data = message.get("data")
+            dex = str(data.get("dex") or "") if isinstance(data, dict) else ""
+            if dex not in self.supported_dexes:
+                return None
+            return f"openOrders:{dex}"
+        if channel in {"allDexsClearinghouseState", "spotState"}:
+            return channel
+        return None
+
+    def _pending_depth(self) -> int:
+        with self._meta_lock:
+            return self.queue.qsize() + len(self._snapshot_slots) + int(self._overflow_event is not None)
+
+    def _has_pending_work(self) -> bool:
+        return self._pending_depth() > 0
+
     def _build_subscriptions(self) -> list[dict]:
         rows = [
             {"type": "orderUpdates", "user": self.address},
             {"type": "userFills", "user": self.address, "aggregateByTime": False},
             {"type": "allDexsClearinghouseState", "user": self.address},
             {"type": "spotState", "user": self.address},
-            {"type": "userNonFundingLedgerUpdates", "user": self.address},
         ]
         rows.extend(
             {"type": "openOrders", "user": self.address, "dex": dex}
@@ -118,7 +157,8 @@ class LiveAccountMonitor:
     def acceleration_eligible(self) -> bool:
         with self._meta_lock:
             return bool(
-                self.is_healthy()
+                config.SCANNER_WS_ACCELERATION_ENABLED
+                and self.is_healthy()
                 and self.healthy_since
                 and time.time() - float(self.healthy_since) >= float(config.SCANNER_WS_HEALTHY_MIN_S)
                 and self.last_rest_audit_at
@@ -153,7 +193,7 @@ class LiveAccountMonitor:
                 self.last_message_at
                 and time.time() - float(self.last_message_at) <= float(config.ACCOUNT_WS_STALE_S)
             )
-            replaying = self._consumer_busy or not self.queue.empty()
+            replaying = self._consumer_busy or self._has_pending_work()
         if result and result.get("ok") and connected and recent and self._ready.is_set():
             # Messages received while the authoritative REST pull was in flight
             # are a recovery replay, not evidence that the live queue is still
@@ -161,6 +201,11 @@ class LiveAccountMonitor:
             # backlog before queue-lag alarms become eligible again.
             with self._meta_lock:
                 self._lag_recovery_until_drained = bool(replaying)
+                # A successful full REST pull is authoritative account-state
+                # evidence.  Refresh both clocks here so every fallback owner
+                # (not only the watchdog) gets the same anti-feedback behavior.
+                self.last_position_at = time.time()
+                self._last_spot_at = self.last_position_at
             self._set_state("healthy")
 
     def mark_degraded(self, error: str) -> None:
@@ -176,6 +221,8 @@ class LiveAccountMonitor:
         pending_age = self.executor.oldest_pending_confirmation_age_s()
         with self._meta_lock:
             now = time.time()
+            event_depth = self.queue.qsize() + int(self._overflow_event is not None)
+            snapshot_depth = len(self._snapshot_slots)
             alerts = []
             if self.mode == "ws_primary" and self.state != "healthy" and self.last_message_at \
                     and now - float(self.last_message_at) > 60.0:
@@ -205,8 +252,13 @@ class LiveAccountMonitor:
                 "lastPositionAt": self.last_position_at,
                 "lastRestAuditAt": self.last_rest_audit_at,
                 "lastFallbackAt": self.last_fallback_at,
-                "queueDepth": self.queue.qsize(),
+                "queueDepth": event_depth + snapshot_depth,
+                "eventQueueDepth": event_depth,
+                "snapshotSlotDepth": snapshot_depth,
                 "queueLagMs": int(self.queue_lag_ms),
+                "snapshotLagMs": int(self.snapshot_lag_ms),
+                "snapshotCoalescedCount": int(self.snapshot_coalesced_count),
+                "unexpectedMessageCount": int(self.unexpected_message_count),
                 "reconnectCount": int(self.reconnect_count),
                 "fallbackCount": int(self.fallback_count),
                 "unmatchedFillCount": int(unmatched),
@@ -309,18 +361,25 @@ class LiveAccountMonitor:
                         if isinstance(subscription, dict):
                             acks.add(_subscription_key(subscription))
                         continue
+                    if channel not in _CRITICAL_CHANNELS and channel not in _REPLACEABLE_CHANNELS:
+                        with self._meta_lock:
+                            self.unexpected_message_count += 1
+                        continue
                     key = self._snapshot_key(channel, message.get("data"))
                     if key:
                         snapshots.add(key)
+                    received = time.monotonic()
                     try:
-                        self.queue.put_nowait((time.monotonic(), message))
+                        await self._enqueue_message(received, message)
                     except asyncio.QueueFull:
                         self._set_state("rest_fallback", error="account_ws_queue_overflow")
-                        # Preserve the event at the overflow boundary.  The
-                        # consumer keeps draining the ordered queue and the
-                        # subsequent REST gap fill proves the complete range.
-                        await self.queue.put((time.monotonic(), message))
                         await conn.close(code=1011, reason="account queue overflow")
+                        # Preserve the boundary event after stopping ingress.
+                        # The consumer will drain it in order; reconnect REST
+                        # gap fill remains the proof that nothing was missed.
+                        with self._meta_lock:
+                            self._overflow_event = (received, message)
+                        self._work_available.set()
                         raise RuntimeError("account_ws_queue_overflow") from None
                     if (
                         sync_task is None
@@ -350,6 +409,101 @@ class LiveAccountMonitor:
         if not self._stop:
             raise RuntimeError("account_ws_disconnected")
 
+    async def _enqueue_message(self, received: float, message: dict) -> None:
+        """Queue immutable facts or replace the pending full-state snapshot.
+
+        Critical overflow is fail-closed and recovered through the REST fill
+        gap plus order-status reconciliation.  Replaceable state has a fixed
+        upper bound of two account slots plus one slot per supported DEX.
+        """
+        slot = self._snapshot_slot_key(message)
+        self._drained.clear()
+        if slot is not None:
+            with self._meta_lock:
+                if slot in self._snapshot_slots:
+                    self.snapshot_coalesced_count += 1
+                self._snapshot_slots[slot] = (float(received), message)
+            self._work_available.set()
+            return
+        if str(message.get("channel") or "") not in _CRITICAL_CHANNELS:
+            with self._meta_lock:
+                self.unexpected_message_count += 1
+            if not self._has_pending_work() and not self._consumer_busy:
+                self._drained.set()
+            return
+        try:
+            self.queue.put_nowait((float(received), message))
+        except asyncio.QueueFull:
+            # Never wait behind a full immutable-event queue while the socket
+            # keeps receiving.  Disconnect immediately; reconnect snapshots
+            # and the mandatory REST gap fill are the recovery boundary.
+            self._work_available.set()
+            raise
+        self._work_available.set()
+
+    async def _next_work(self) -> tuple[bool, bool, list[tuple[float, dict]]] | None:
+        """Return one ordered critical event or one coalesced state batch."""
+        await self._work_available.wait()
+        try:
+            item = self.queue.get_nowait()
+            return True, True, [item]
+        except asyncio.QueueEmpty:
+            pass
+        with self._meta_lock:
+            if self._overflow_event is not None:
+                item = self._overflow_event
+                self._overflow_event = None
+                return True, False, [item]
+
+        # The server commonly emits perp, spot and per-DEX order snapshots as
+        # one burst.  A tiny debounce lets one SQLite transaction consume that
+        # logically atomic state surface without delaying order/fill facts.
+        await asyncio.sleep(float(config.ACCOUNT_WS_SNAPSHOT_DEBOUNCE_S))
+        try:
+            item = self.queue.get_nowait()
+            return True, True, [item]
+        except asyncio.QueueEmpty:
+            pass
+        with self._meta_lock:
+            if self._overflow_event is not None:
+                item = self._overflow_event
+                self._overflow_event = None
+                return True, False, [item]
+        with self._meta_lock:
+            if self._snapshot_slots:
+                batch = sorted(self._snapshot_slots.values(), key=lambda item: item[0])
+                self._snapshot_slots.clear()
+                return False, False, batch
+        self._work_available.clear()
+        if not self._consumer_busy:
+            self._drained.set()
+        return None
+
+    @staticmethod
+    async def _complete_thread(func, /, *args, **kwargs):
+        """Never close/reuse a resource while its worker thread is still running."""
+        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            finally:
+                raise
+
+    async def _apply_batch(self, messages: list[dict]) -> None:
+        """Finish an in-flight SQLite writer before honoring cancellation."""
+        apply_many = getattr(self.executor, "apply_ws_messages", None)
+
+        def apply() -> None:
+            if callable(apply_many):
+                apply_many(messages)
+            else:
+                for message in messages:
+                    self.executor.apply_ws_message(message)
+
+        await self._complete_thread(apply)
+
     @staticmethod
     def _snapshot_key(channel: str, data: Any) -> str | None:
         if channel == "openOrders" and isinstance(data, dict):
@@ -360,7 +514,7 @@ class LiveAccountMonitor:
 
     async def _synchronize(self) -> None:
         try:
-            result = await asyncio.to_thread(
+            result = await self._complete_thread(
                 self.executor.reconcile, usage_category="account_audit",
             )
             self.note_rest_audit(result)
@@ -374,7 +528,7 @@ class LiveAccountMonitor:
                 self._initial_done.set()
                 return
             self._ready.set()
-            await self.queue.join()
+            await self._drained.wait()
             if self.state == "reconcile_required":
                 failed = dict(result)
                 failed.update(ok=False, status="reconcile_required", wsEventInvalid=True)
@@ -394,49 +548,81 @@ class LiveAccountMonitor:
 
     async def _consume(self) -> None:
         while not self._stop:
-            received, message = await self.queue.get()
+            work = await self._next_work()
+            if work is None:
+                continue
+            critical, queue_task, items = work
             with self._meta_lock:
                 self._consumer_busy = True
             try:
                 await self._ready.wait()
-                lag_ms = max(0.0, (time.monotonic() - float(received)) * 1000.0)
+                now_mono = time.monotonic()
+                lag_ms = max(
+                    (max(0.0, now_mono - float(received)) * 1000.0 for received, _ in items),
+                    default=0.0,
+                )
                 with self._meta_lock:
-                    self.queue_lag_ms = lag_ms
-                await asyncio.to_thread(self.executor.apply_ws_message, message)
-                channel = str(message.get("channel") or "")
+                    if critical:
+                        self.queue_lag_ms = lag_ms
+                    else:
+                        self.snapshot_lag_ms = lag_ms
+                messages = [message for _, message in items]
+                await self._apply_batch(messages)
                 now = time.time()
                 with self._meta_lock:
-                    if channel == "orderUpdates":
-                        self.last_order_update_at = now
-                    elif channel == "userFills":
-                        self.last_fill_at = now
-                    elif channel == "allDexsClearinghouseState":
-                        self.last_position_at = now
-                    elif channel == "openOrders":
-                        self._last_open_orders_at = now
-                    elif channel == "spotState":
-                        self._last_spot_at = now
+                    for message in messages:
+                        channel = str(message.get("channel") or "")
+                        if channel == "orderUpdates":
+                            self.last_order_update_at = now
+                        elif channel == "userFills":
+                            self.last_fill_at = now
+                        elif channel == "allDexsClearinghouseState":
+                            self.last_position_at = now
+                        elif channel == "openOrders":
+                            self._last_open_orders_at = now
+                        elif channel == "spotState":
+                            self._last_spot_at = now
                     lag_alarm_suppressed = self._lag_recovery_until_drained
                     healthy = self.state == "healthy"
                 # A completed isolated event is no longer a queue backlog.  In
                 # production SQLite writer contention can make that one event
                 # take >2s; escalating after it has committed caused a REST
                 # audit loop and 429s even though the queue was already empty.
-                if lag_ms > 2000 and healthy and not lag_alarm_suppressed \
+                if critical and lag_ms > 2000 and healthy and not lag_alarm_suppressed \
                         and not self.queue.empty():
                     self.mark_degraded("account_ws_queue_lag")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    self._set_state(
+                        "reconcile_required", error=f"event:OperationalError:{str(exc)[:80]}",
+                    )
+                    self.executor.freeze_from_monitor("ACCOUNT_WS_EVENT_INVALID")
+                else:
+                    rollback = getattr(self.executor, "rollback_ws_transaction", None)
+                    if callable(rollback):
+                        rollback()
+                    # SQLite contention is transport/storage availability, not
+                    # contradictory exchange evidence.  Freeze new exposure by
+                    # degrading, then let the single Observer REST loop recover.
+                    self.mark_degraded("account_ws_database_busy")
             except Exception as exc:  # noqa: BLE001 - a corrupt account event is fail closed
                 self._set_state(
                     "reconcile_required", error=f"event:{type(exc).__name__}:{str(exc)[:80]}",
                 )
                 self.executor.freeze_from_monitor("ACCOUNT_WS_EVENT_INVALID")
             finally:
-                self.queue.task_done()
+                if queue_task:
+                    self.queue.task_done()
                 with self._meta_lock:
                     self._consumer_busy = False
-                    if self.queue.empty():
+                    if not self._has_pending_work():
                         self.queue_lag_ms = 0
+                        self.snapshot_lag_ms = 0
                         self._lag_recovery_until_drained = False
+                        self._work_available.clear()
+                        self._drained.set()
+                    else:
+                        self._work_available.set()
 
     async def _ping_loop(self, conn) -> None:
         while not self._stop:
@@ -497,24 +683,9 @@ class LiveAccountMonitor:
                     "account_position_after_fill_timeout" if fill_position_timeout
                     else "account_state_snapshot_stale"
                 )
-                try:
-                    result = await asyncio.to_thread(
-                        self.executor.reconcile, usage_category="account_fallback",
-                    )
-                except Exception as exc:  # noqa: BLE001 - reconnect enters REST fallback
-                    self._set_state("rest_fallback", error=f"state_pull:{type(exc).__name__}")
-                    await conn.close(code=1011, reason="account state pull failed")
-                    return
-                self.note_rest_audit(result)
-                if not result.get("ok"):
-                    self.executor.freeze_from_monitor("ACCOUNT_STATE_DRIFT")
-                    return
-                with self._meta_lock:
-                    # The active REST pull is authoritative for freshness until
-                    # the next streaming clearinghouse snapshot arrives.
-                    self.last_position_at = time.time()
-                    self._last_spot_at = time.time()
-                self.restore_after_rest(result)
+                # The Observer live_reconcile_loop is the sole REST fallback
+                # owner.  Starting another full pull here can serialize two
+                # nine-request reconciles and amplify a transient WS delay.
 
     def _resolve_post(self, message: dict) -> None:
         data = message.get("data") or {}

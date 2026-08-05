@@ -83,7 +83,8 @@ function Home({ meta, onDeploy, onOps, onReload, say }) {
                 {t.keyInstalled && <span className="mono" title="已装 launcher 公钥,运维免密"
                   style={{ marginLeft: 8, fontSize: 11, color: "var(--green-l)", fontWeight: 500 }}>🔑 免密</span>}</div>
               <div className="meta">{t.mode === "local" ? "本地 · " + (t.app_dir || "") : `${t.user}@${t.host}:${t.ssh_port || 22}`}
-                {t.domain ? " · " + t.domain : ""}</div>
+                {t.domain ? " · " + t.domain : ""}
+                {` · 账户${(t.account_monitor_mode || "rest_only") === "ws_primary" ? " WS" : " REST"}`}</div>
             </div>
             <div className="spacer" />
             <button className="btn btn-sm" onClick={() => onOps(t)}>运维</button>
@@ -111,7 +112,7 @@ function Home({ meta, onDeploy, onOps, onReload, say }) {
 function Deploy({ meta, onDone, say }) {
   const [mode, setMode] = useState(null);         // local | vps
   const [f, setF] = useState({ user: "root", ssh_port: 22, port: 8810, dash_user: "admin",
-    app_dir: "/root/poly-btc" });
+    app_dir: "/root/poly-btc", account_monitor_mode: "rest_only" });
   const [deployId, setDeployId] = useState(null);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
@@ -174,6 +175,27 @@ function Deploy({ meta, onDone, say }) {
         <div className="grid2">
           {F("dash_user", "监控台用户名", { note: "默认 admin" })}
           {F("dash_password", "监控台密码 *", { pw: true, note: "登录 dashboard 用" })}
+        </div>
+        <div className="account-mode-block">
+          <div className="account-mode-title">自有账户对账通道</div>
+          <div className="hint">只改变自有账户监控；不改变策略、下单方式、目标钱包轮询或 Scanner 预算。</div>
+          <div className="modes account-modes">
+            <button type="button" aria-pressed={f.account_monitor_mode === "rest_only"}
+              className={"mode-c" + (f.account_monitor_mode === "rest_only" ? " on" : "")}
+              onClick={() => setF({ ...f, account_monitor_mode: "rest_only" })}>
+              <div className="t">REST 保底 <span className="mode-tag">默认</span></div>
+              <div className="d">15 秒完整对账，行为与现有实盘一致。</div>
+            </button>
+            <button type="button" aria-pressed={f.account_monitor_mode === "ws_primary"}
+              className={"mode-c" + (f.account_monitor_mode === "ws_primary" ? " on" : "")}
+              onClick={() => setF({ ...f, account_monitor_mode: "ws_primary" })}>
+              <div className="t">WS 主模式 <span className="mode-tag warn">主动选择</span></div>
+              <div className="d">账户事件实时监听，REST 仍负责启动基线、周期审计和断线补洞。</div>
+            </button>
+          </div>
+          {f.account_monitor_mode === "ws_primary" && <div className="mode-warning">
+            ⚠ 启用 WS 不会自动开启 Scanner 加速；任何异常仍可切回 REST 保底。
+          </div>}
         </div>
         {mode === "local" && F("app_dir", "代码目录", { note: "默认当前仓库" })}
         {mode === "vps" && <details style={{ marginTop: 4 }}>
@@ -272,6 +294,7 @@ function Ops({ target, onBack, say }) {
   const [logUnit, setLogUnit] = useState(null);
   const [logText, setLogText] = useState("");
   const [fingerprint, setFingerprint] = useState(target.host_fingerprint || "");
+  const [accountMode, setAccountMode] = useState(target.account_monitor_mode || "rest_only");
 
   const refresh = async () => { setSt(await api.post("/api/ops/status", { id: target.id })); };
   useEffect(() => { refresh(); }, [target.id]);
@@ -305,6 +328,19 @@ function Ops({ target, onBack, say }) {
     } else {
       say("保存失败: " + (r.error || "?"));
     }
+  };
+  const saveAccountMode = async () => {
+    if (accountMode === "ws_primary" && !confirm(
+      "确认把下次 Observer 启动模式设为 WS 主模式?\n\n本次只写入服务配置，不会自动重启正在跟单的 Observer。"
+    )) return;
+    setBusy("account-mode");
+    const r = await api.post("/api/ops/account-monitor-mode", {
+      id: target.id, account_monitor_mode: accountMode,
+    });
+    setBusy(null);
+    if (!r.ok) { say("保存失败: " + (r.error || "?")); return; }
+    target.account_monitor_mode = accountMode;
+    say(r.restartRequired ? "已保存；需手动重启 Observer 后生效" : "已保存；下次启动 Observer 生效");
   };
 
   const units = target.mode === "local" ? ["dashboard", "observe", "scan"]
@@ -357,6 +393,33 @@ function Ops({ target, onBack, say }) {
         })}
         {!st && <div className="muted" style={{ fontSize: 13 }}>连接中…(远程首次可能几秒)</div>}
       </div>
+
+      {target.mode === "vps" && <div className="card">
+        <h2>账户对账通道</h2>
+        <div className="hint">保存只同步 Observer 服务配置，不会暗中重启正在运行的实盘进程。</div>
+        <div className="modes account-modes">
+          <button type="button" aria-pressed={accountMode === "rest_only"}
+            className={"mode-c" + (accountMode === "rest_only" ? " on" : "")}
+            onClick={() => setAccountMode("rest_only")}>
+            <div className="t">REST 保底 <span className="mode-tag">默认</span></div>
+            <div className="d">每 15 秒完整对账。</div>
+          </button>
+          <button type="button" aria-pressed={accountMode === "ws_primary"}
+            className={"mode-c" + (accountMode === "ws_primary" ? " on" : "")}
+            onClick={() => setAccountMode("ws_primary")}>
+            <div className="t">WS 主模式 <span className="mode-tag warn">主动选择</span></div>
+            <div className="d">实时事件为主，REST 永久保底。</div>
+          </button>
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            已保存：{(target.account_monitor_mode || "rest_only") === "ws_primary" ? "WS 主模式" : "REST 保底"}
+          </div>
+          <div className="spacer" />
+          <button className="btn" disabled={busy || accountMode === (target.account_monitor_mode || "rest_only")}
+            onClick={saveAccountMode}>保存到 Observer 服务配置</button>
+        </div>
+      </div>}
 
       <div className="card">
         <h2>维护操作</h2>

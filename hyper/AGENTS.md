@@ -257,6 +257,14 @@ together. The current broad contract is:
 ### Live execution and reconciliation
 
 - Live is Paper strategy plus a real execution adapter; it is not a separate strategy engine.
+- The self-account WebSocket is opt-in. Service templates default to `rest_only`; enabling `ws_primary` requires
+  a separate explicit production decision. Scanner WS acceleration has its own default-off gate.
+- When account WS is enabled, immutable order/fill facts retain FIFO order. Full account, spot, and open-order
+  snapshots are replaceable state and keep only the newest pending value per channel/DEX; they must not create an
+  unbounded FIFO or append one historical account row per server push.
+- Account WS handlers never launch a full REST reconcile. They may only degrade health; the Observer's single
+  reconciliation loop owns REST baseline, audit, fallback, and recovery so one WS delay cannot fan out into
+  concurrent account pulls.
 - Every exposure increase reads fresh exchange equity/available balance, reconciles exchange positions/orders
   against the Live ledger, then sizes and executes. Dashboard equity/available values come from the real account.
 - LiveExecutor uses a dedicated WAL connection. Observer must commit its signal transition before LiveExecutor

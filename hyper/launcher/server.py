@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from .core import ops, targets
-from .core.model import DeployConfig
+from .core.model import DeployConfig, account_monitor_mode
 from .core.pipeline import DeployRunner
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -67,6 +67,7 @@ def _validate_cfg(d, require_dashboard_password=False):
         raise ValueError("invalid dashboard user")
     if require_dashboard_password and not str(d.get("dash_password") or ""):
         raise ValueError("dashboard password is required")
+    account_monitor_mode(d.get("account_monitor_mode"))
 
 
 def _cfg_from_target(t, extra=None, require_dashboard_password=False):
@@ -84,6 +85,7 @@ def _cfg_from_target(t, extra=None, require_dashboard_password=False):
         app_dir=d.get("app_dir") or "/root/poly-btc", branch=d.get("branch") or "main",
         port=int(d.get("port", 8810) or 8810), domain=(d.get("domain") or None),
         dash_user=d.get("dash_user") or "admin", dash_password=d.get("dash_password") or "",
+        account_monitor_mode=account_monitor_mode(d.get("account_monitor_mode")),
     )
 
 
@@ -212,7 +214,15 @@ class H(BaseHTTPRequestHandler):
             # ── day-2 ops (authenticate with the keypair; no password needed) ──
             if path.startswith("/api/ops/"):
                 op = path.split("/")[3]
-                cfg = _cfg_from_target(targets.get(body.get("id")) or body)
+                target = targets.get(body.get("id")) or body
+                if op == "account-monitor-mode":
+                    selected = account_monitor_mode(body.get("account_monitor_mode"))
+                    cfg = _cfg_from_target(target, {"account_monitor_mode": selected})
+                    result = ops.configure_account_monitor(cfg)
+                    if result.get("ok"):
+                        targets.save({"id": body.get("id"), "account_monitor_mode": selected})
+                    return self._json(200, result)
+                cfg = _cfg_from_target(target)
                 if op == "status":
                     return self._json(200, ops.status(cfg))
                 if op == "action":

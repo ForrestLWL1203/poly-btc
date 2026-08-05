@@ -106,13 +106,35 @@ class RuntimeAccelerationTests(unittest.TestCase):
             "targetPollDegraded": False,
         }
 
-        decision = discover._scanner_budget_from_observer(
-            observer_running=True, detail=detail, now=now,
-        )
+        with patch.object(discover.config, "SCANNER_WS_ACCELERATION_ENABLED", True):
+            decision = discover._scanner_budget_from_observer(
+                observer_running=True, detail=detail, now=now,
+            )
 
         self.assertEqual(decision["budget"], 200.0)
         self.assertEqual(decision["mode"], "ws_released")
         self.assertTrue(decision["accelerated"])
+
+    def test_scanner_ws_acceleration_is_disabled_by_default_gate(self):
+        now = 2_000_000_000.0
+        detail = {
+            "accountMonitor": {
+                "state": "healthy", "accelerationEligible": True,
+                "unmatchedFillCount": 0, "pendingConfirmationCount": 0,
+            },
+            "restUsage": {"observedAt": now - 5, "weightPeak1mOver5m": 620},
+            "targetPollDegraded": False,
+        }
+
+        with patch.object(discover.config, "SCANNER_WS_ACCELERATION_ENABLED", False):
+            decision = discover._scanner_budget_from_observer(
+                observer_running=True, detail=detail, now=now,
+            )
+
+        self.assertEqual(decision["budget"], 150.0)
+        self.assertEqual(decision["mode"], "observer_protected")
+        self.assertEqual(decision["reason"], "ws_acceleration_disabled")
+        self.assertFalse(decision["accelerated"])
 
     def test_scanner_budget_degrades_and_pauses_when_observer_needs_headroom(self):
         now = 2_000_000_000.0

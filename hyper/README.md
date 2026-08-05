@@ -69,16 +69,22 @@ available cash stays usable by existing-position adds and risk management. Disco
 and its immutable strategy revision are shared across modes; switching
 Paper/Live never triggers a rescan or rebuilds Core. Every valid target opening signal is considered regardless
 of the target's notional; our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
-Live startup now opens an independent self-account WebSocket before the REST baseline. `orderUpdates` establishes
-CLOID/OID identity, `userFills` is the only execution-booking evidence, and account/spot/open-order subscriptions
-maintain the exchange projection. A healthy stream confirms normal orders without the former pre/post full REST
-reconciles; a full nine-call REST audit still runs at startup and every five minutes. Disconnect, queue overflow,
-stale account state or ambiguous evidence immediately restores the 15-second REST fallback, including pre-order
-and post-order reconciliation plus a `latest_fill_ms - 1ms` gap fill. The account stream is rebuilt from the
-account address of the newly activated Live session: wallet rotation ends the old Observer/session first and a
-new Observer subscribes every user channel to the new credential address; an address/session mismatch fails
-startup instead of silently continuing on the old wallet. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
+The independent self-account WebSocket is opt-in; service templates and production-safe defaults remain
+`rest_only` until an operator explicitly authorizes `ws_primary`. In REST-only mode the established 15-second
+account reconciliation and pre/post-order checks remain authoritative. When enabled, `orderUpdates` establishes
+CLOID/OID identity and `userFills` is the only execution-booking evidence. Those immutable events retain FIFO
+ordering, while repeated account/spot/open-order state messages are coalesced to the newest per-channel snapshot
+and committed as one bounded projection update. WS handlers never start a full REST pull themselves: they may
+only mark health degraded, after which the single Observer reconciliation loop owns startup baseline, five-minute
+audit, 15-second fallback and `latest_fill_ms - 1ms` gap fill. Scanner acceleration is independently disabled by
+default. The account stream is rebuilt from the account address of the newly activated Live session: wallet
+rotation ends the old Observer/session first and a new Observer subscribes every user channel to the new credential
+address; an address/session mismatch fails startup instead of silently continuing on the old wallet. The
+session-start equity is only the same drawdown-smoothing anchor used by Paper; a
 prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
+Launcher exposes the choice as `REST 保底` (default) or `WS 主模式` (explicit opt-in), persists it per
+target, and only synchronizes the Observer service definition when changed from the operations page. It never
+restarts a running live Observer as a side effect of saving this setting.
 Live reconciliation/order work owns a separate WAL database connection from Observer signal processing. A
 temporary transport or SQLite lock failure is reported and retried instead of leaving the engine invisibly
 paused; only a completed reconciliation that proves exchange/ledger drift requires operator recovery. Threaded

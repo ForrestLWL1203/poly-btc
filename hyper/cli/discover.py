@@ -105,7 +105,8 @@ def _scanner_budget_from_observer(*, observer_running: bool, detail: dict | None
         }
 
     eligible = bool(
-        telemetry_fresh
+        config.SCANNER_WS_ACCELERATION_ENABLED
+        and telemetry_fresh
         and monitor.get("state") == "healthy"
         and monitor.get("accelerationEligible") is True
         and not detail.get("targetPollDegraded")
@@ -115,7 +116,8 @@ def _scanner_budget_from_observer(*, observer_running: bool, detail: dict | None
     cap = config.SCANNER_WS_MAX_WEIGHT_PER_MIN if eligible else 150.0
     mode = "ws_released" if eligible else "observer_protected"
     reason = None if eligible else (
-        "observer_telemetry_stale" if not telemetry_fresh
+        "ws_acceleration_disabled" if not config.SCANNER_WS_ACCELERATION_ENABLED
+        else "observer_telemetry_stale" if not telemetry_fresh
         else "account_ws_not_acceleration_eligible"
     )
     if age_429 is not None and age_429 < config.SCANNER_429_COOLDOWN_S:
