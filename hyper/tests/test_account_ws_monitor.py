@@ -197,6 +197,152 @@ class AccountWsMonitorTests(unittest.TestCase):
             "SELECT state FROM execution_order_intent WHERE cloid=?", (cloid,),
         ).fetchone()[0], "submitting")
 
+        executor.apply_ws_message({
+            "channel": "userFills", "data": {"isSnapshot": False, "fills": [{
+                "tid": "incomplete-filled-status", "oid": 88, "coin": "BTC", "side": "B",
+                "sz": "0.1", "px": "100", "fee": "0.01", "closedPnl": "0",
+                "time": now_ms(),
+            }]},
+        })
+        self.assertEqual(self.db.execute(
+            "SELECT state,filled_size FROM execution_order_intent WHERE cloid=?", (cloid,),
+        ).fetchone(), ("submitting", 0.1))
+
+    def test_historical_fill_snapshot_cannot_reopen_terminal_partial_intent(self):
+        broker = _WsPublishingBroker()
+        executor = self._executor(broker)
+        cloid = self._insert_intent(oid=91, requested=0.2)
+        fill = {
+            "tid": "historical-terminal-tid", "oid": 91, "coin": "BTC", "side": "A",
+            "sz": "0.1", "px": "100", "fee": "0.01", "closedPnl": "0",
+            "time": now_ms(),
+        }
+        executor.apply_ws_message({
+            "channel": "userFills",
+            "data": {"fills": [fill], "isSnapshot": False},
+        })
+        self.db.execute(
+            "UPDATE execution_order_intent SET state='partial',exchange_status=NULL,"
+            "filled_size=0.1,average_px=100 WHERE cloid=?",
+            (cloid,),
+        )
+        self.db.commit()
+        snapshot = {
+            "channel": "userFills",
+            "data": {"fills": [fill], "isSnapshot": True},
+        }
+
+        executor.apply_ws_message(snapshot)
+        executor.apply_ws_message(snapshot)
+
+        self.assertEqual(self.db.execute(
+            "SELECT state,filled_size,average_px FROM execution_order_intent WHERE cloid=?",
+            (cloid,),
+        ).fetchone(), ("partial", 0.1, 100.0))
+        self.assertEqual(executor.pending_confirmation_count(), 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_position").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_action").fetchone()[0], 0)
+        self.assertEqual(broker.submit_calls, 0)
+
+    def test_late_new_fills_only_advance_terminal_partial_to_filled(self):
+        executor = self._executor()
+        cloid = self._insert_intent(oid=92, requested=0.2)
+        self.db.execute(
+            "UPDATE execution_order_intent SET state='partial',filled_size=0.1,average_px=100 "
+            "WHERE cloid=?",
+            (cloid,),
+        )
+        self.db.commit()
+
+        for tid, size in (("late-partial", "0.15"), ("late-complete", "0.05")):
+            executor.apply_ws_message({
+                "channel": "userFills",
+                "data": {"isSnapshot": tid == "late-partial", "fills": [{
+                    "tid": tid, "oid": 92, "coin": "BTC", "side": "A", "sz": size,
+                    "px": "100", "fee": "0.01", "closedPnl": "0", "time": now_ms(),
+                }]},
+            })
+            state = self.db.execute(
+                "SELECT state FROM execution_order_intent WHERE cloid=?", (cloid,),
+            ).fetchone()[0]
+            self.assertEqual(state, "partial" if tid == "late-partial" else "filled")
+
+    def test_stale_or_nonterminal_order_update_cannot_regress_terminal_intent(self):
+        executor = self._executor()
+        cloid = self._insert_intent(oid=93, requested=0.2)
+        self.db.execute(
+            "UPDATE execution_order_intent SET state='partial',filled_size=0.1,average_px=100,"
+            "exchange_status='canceled',status_timestamp_ms=200 WHERE cloid=?",
+            (cloid,),
+        )
+        self.db.commit()
+        open_event = {
+            "order": {"coin": "BTC", "oid": 93, "cloid": cloid, "origSz": "0.2"},
+            "status": "open", "statusTimestamp": 300,
+        }
+        stale_filled_event = {
+            "order": {"coin": "BTC", "oid": 93, "cloid": cloid, "origSz": "0.2"},
+            "status": "filled", "statusTimestamp": 100,
+        }
+
+        executor.apply_ws_message({"channel": "orderUpdates", "data": [open_event]})
+        executor.apply_ws_message({"channel": "orderUpdates", "data": [open_event]})
+        executor.apply_ws_message({"channel": "orderUpdates", "data": [stale_filled_event]})
+
+        self.assertEqual(self.db.execute(
+            "SELECT state,filled_size,exchange_status,status_timestamp_ms "
+            "FROM execution_order_intent WHERE cloid=?",
+            (cloid,),
+        ).fetchone(), ("partial", 0.1, "canceled", 200))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM execution_order_event",
+        ).fetchone()[0], 2)
+        self.assertEqual(executor.pending_confirmation_count(), 0)
+
+    def test_every_business_terminal_state_is_monotonic_under_replay(self):
+        cases = {
+            ("filled", 0.0): "filled",
+            ("filled", 0.1): "filled",
+            ("partial", 0.0): "partial",
+            ("partial", 0.1): "partial",
+            ("canceled", 0.0): "canceled",
+            ("canceled", 0.1): "partial",
+            ("rejected", 0.0): "rejected",
+            ("rejected", 0.1): "partial",
+        }
+        for (current, filled), expected in cases.items():
+            for status in ("", "open", "triggered", "filled", "canceled"):
+                with self.subTest(current=current, filled=filled, status=status):
+                    self.assertEqual(LiveExecutor._next_intent_state(
+                        current=current, filled=filled, requested=0.2,
+                        exchange_status=status,
+                    ), expected)
+
+    def test_unknown_self_account_events_are_audit_only(self):
+        broker = _WsPublishingBroker()
+        executor = self._executor(broker)
+        unknown_cloid = "0x" + "9" * 32
+        executor.apply_ws_messages([
+            {"channel": "orderUpdates", "data": [{
+                "order": {"coin": "BTC", "oid": 94, "cloid": unknown_cloid},
+                "status": "filled", "statusTimestamp": 400,
+            }]},
+            {"channel": "userFills", "data": {"isSnapshot": True, "fills": [{
+                "tid": "unknown-self-fill", "oid": 94, "cloid": unknown_cloid,
+                "coin": "BTC", "side": "B", "sz": "0.2", "px": "100",
+                "fee": "0.01", "closedPnl": "0", "time": now_ms(),
+            }]}},
+        ])
+
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_order_intent").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_order_event").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
+        self.assertEqual(executor.unmatched_ws_fill_count(), 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_position").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_action").fetchone()[0], 0)
+        self.assertEqual(broker.submit_calls, 0)
+
     def test_ws_confirmed_order_avoids_account_rest_reconcile(self):
         broker = _WsPublishingBroker()
         executor = self._executor(broker)

@@ -123,9 +123,11 @@ class LiveExecutor:
     def unmatched_ws_fill_count(self) -> int:
         with self._lock:
             row = self.db.execute(
-                "SELECT COUNT(*) FROM execution_fill f WHERE f.session_id=? AND f.cloid IS NULL "
+                "SELECT COUNT(*) FROM execution_fill f WHERE f.session_id=? "
                 "AND NOT EXISTS (SELECT 1 FROM execution_order_intent i "
-                "WHERE i.session_id=f.session_id AND i.oid=f.oid)",
+                "WHERE i.session_id=f.session_id AND ("
+                "(f.cloid IS NOT NULL AND lower(i.cloid)=lower(f.cloid)) "
+                "OR (f.oid IS NOT NULL AND i.oid=f.oid)))",
                 (self.session["session_id"],),
             ).fetchone()
             return int(row[0] or 0) if row else 0
@@ -332,6 +334,12 @@ class LiveExecutor:
         return snapshot_orders(snapshot)
 
     def _insert_exchange_fill(self, fill: dict) -> bool:
+        """Persist one official fill and report whether durable facts changed.
+
+        Initial WS snapshots and REST gap fills deliberately overlap.  An
+        already-known TID is a no-op unless an OID-to-CLOID mapping can now be
+        backfilled; callers must not reinterpret an intent for a pure replay.
+        """
         if not isinstance(fill, dict):
             return False
         tid = str(fill.get("tid") or "")
@@ -363,30 +371,99 @@ class LiveExecutor:
                 fill_time_ms, json.dumps(fill, sort_keys=True, separators=(",", ":")), now_iso(),
             ),
         )
+        mapping_changed = False
         if cloid and oid is not None:
-            self.db.execute(
+            mapping = self.db.execute(
                 "UPDATE execution_fill SET cloid=? WHERE session_id=? AND oid=? AND cloid IS NULL",
                 (cloid, self.session["session_id"], oid),
             )
-        return cur.rowcount > 0
+            mapping_changed = mapping.rowcount > 0
+        return cur.rowcount > 0 or mapping_changed
 
     @staticmethod
     def _terminal_exchange_status(status: str | None) -> bool:
         value = str(status or "").lower()
         return bool(value and value not in {"open", "triggered", "unknown", "unknownoid"})
 
+    @classmethod
+    def _next_intent_state(
+        cls, *, current: str, filled: float, requested: float, exchange_status: str,
+    ) -> str:
+        """Project exchange facts without ever regressing a business terminal state."""
+        current = str(current or "submitting").lower()
+        exchange_status = str(exchange_status or "").lower()
+        if filled > 0:
+            if current == "filled" or filled + 1e-12 >= requested:
+                return "filled"
+            if current in TERMINAL_INTENT_STATES:
+                # A late official fill strengthens canceled/rejected into a
+                # terminal partial; it never makes completed work pending.
+                return "partial" if current in {"canceled", "rejected"} else current
+            if exchange_status == "filled":
+                # Status is not the fill ledger.  Wait for all requested size
+                # to arrive through userFills before declaring a business
+                # terminal result.
+                return current if current == "ambiguous" else "submitting"
+            if cls._terminal_exchange_status(exchange_status):
+                return "partial"
+            if current == "ambiguous":
+                return current
+            # A filled order status may race ahead of the final userFills
+            # rows.  Keep waiting, but only for an already non-terminal intent.
+            return current if current in {"submitting", "resting"} else "submitting"
+
+        if current in TERMINAL_INTENT_STATES:
+            return current
+        if cls._terminal_exchange_status(exchange_status):
+            if exchange_status == "filled":
+                return current if current == "ambiguous" else "submitting"
+            return "rejected" if "reject" in exchange_status else "canceled"
+        if current == "ambiguous":
+            return current
+        if exchange_status in {"open", "triggered"}:
+            return "resting"
+        return current
+
+    @classmethod
+    def _accept_exchange_status(
+        cls,
+        *,
+        current: str | None,
+        current_ms: int | None,
+        incoming: str,
+        incoming_ms: int | None,
+    ) -> bool:
+        """Reject duplicate, stale and terminal-to-nonterminal order updates."""
+        current_value = str(current or "").lower()
+        incoming_value = str(incoming or "unknown").lower()
+        if not current_value:
+            return True
+        if current_ms is not None and incoming_ms is not None and incoming_ms < current_ms:
+            return False
+        current_terminal = cls._terminal_exchange_status(current_value)
+        incoming_terminal = cls._terminal_exchange_status(incoming_value)
+        if current_terminal and not incoming_terminal:
+            return False
+        if current_ms is not None and incoming_ms is None:
+            return incoming_terminal and not current_terminal
+        if current_terminal and incoming_terminal and incoming_ms is None:
+            return incoming_value == current_value
+        return True
+
     def _refresh_intent_from_exchange(self, *, cloid: str | None = None, oid: int | None = None) -> None:
         if not cloid and oid is None:
             return
         if cloid:
             row = self.db.execute(
-                "SELECT cloid,oid,requested_size,state,exchange_status FROM execution_order_intent "
+                "SELECT cloid,oid,requested_size,state,exchange_status,filled_size,average_px "
+                "FROM execution_order_intent "
                 "WHERE session_id=? AND lower(cloid)=lower(?)",
                 (self.session["session_id"], cloid),
             ).fetchone()
         else:
             row = self.db.execute(
-                "SELECT cloid,oid,requested_size,state,exchange_status FROM execution_order_intent "
+                "SELECT cloid,oid,requested_size,state,exchange_status,filled_size,average_px "
+                "FROM execution_order_intent "
                 "WHERE session_id=? AND oid=? LIMIT 1",
                 (self.session["session_id"], int(oid)),
             ).fetchone()
@@ -407,33 +484,22 @@ class LiveExecutor:
                 intent_oid, intent_oid,
             ),
         ).fetchone()
-        filled = max(0.0, _float(fill[0])) if fill else 0.0
+        durable_filled = max(0.0, _float(fill[0])) if fill else 0.0
         weighted = _float(fill[1]) if fill else 0.0
+        prior_filled = max(0.0, _float(row[5]))
+        filled = max(durable_filled, prior_filled)
         requested = max(0.0, _float(row[2]))
         current_state = str(row[3] or "submitting")
         exchange_status = str(row[4] or "").lower()
-        if filled > 0:
-            if filled + 1e-12 >= requested:
-                state = "filled"
-            elif exchange_status == "filled":
-                # Order status may race ahead of one or more userFills
-                # messages. A claimed full fill without complete official fill
-                # rows is not yet a business-terminal result.
-                state = "submitting"
-            elif self._terminal_exchange_status(exchange_status):
-                state = "partial"
-            else:
-                state = current_state if current_state in {"submitting", "resting"} else "submitting"
-            average = weighted / filled
-        elif exchange_status in {"open", "triggered"}:
-            state, average = "resting", None
-        elif exchange_status == "filled":
-            state, average = "submitting", None
-        elif self._terminal_exchange_status(exchange_status):
-            state = "rejected" if "reject" in exchange_status else "canceled"
-            average = None
-        else:
-            state, average = current_state, None
+        state = self._next_intent_state(
+            current=current_state, filled=filled, requested=requested,
+            exchange_status=exchange_status,
+        )
+        average = (
+            weighted / durable_filled
+            if durable_filled > 0 and durable_filled + 1e-12 >= prior_filled
+            else row[6]
+        )
         self.db.execute(
             "UPDATE execution_order_intent SET state=?,filled_size=?,average_px=?,updated_at=? WHERE cloid=?",
             (state, filled, average, now_iso(), intent_cloid),
@@ -455,27 +521,60 @@ class LiveExecutor:
         event_hash = hashlib.sha256(
             f"{self.session['session_id']}:{oid}:{cloid}:{status}:{status_ms}:{raw}".encode()
         ).hexdigest()
-        self.db.execute(
+        inserted = self.db.execute(
             "INSERT OR IGNORE INTO execution_order_event "
             "(event_hash,session_id,cloid,oid,exchange_status,status_timestamp_ms,raw_json,received_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (event_hash, self.session["session_id"], cloid, oid, status, status_ms, raw, now_iso()),
         )
+        if inserted.rowcount <= 0:
+            return
+
         if cloid:
+            intent = self.db.execute(
+                "SELECT cloid,oid,exchange_status,status_timestamp_ms FROM execution_order_intent "
+                "WHERE session_id=? AND lower(cloid)=lower(?) LIMIT 1",
+                (self.session["session_id"], cloid),
+            ).fetchone()
+        elif oid is not None:
+            intent = self.db.execute(
+                "SELECT cloid,oid,exchange_status,status_timestamp_ms FROM execution_order_intent "
+                "WHERE session_id=? AND oid=? LIMIT 1",
+                (self.session["session_id"], oid),
+            ).fetchone()
+        else:
+            intent = None
+        if not intent:
+            # External/manual activity is retained as an official audit fact.
+            # The self-account stream must never invent a copy-trade intent.
+            return
+
+        intent_cloid = str(intent[0])
+        intent_oid = int(intent[1]) if intent[1] is not None else oid
+        accept_status = self._accept_exchange_status(
+            current=intent[2], current_ms=int(intent[3]) if intent[3] is not None else None,
+            incoming=status, incoming_ms=status_ms,
+        )
+        stamp = now_iso()
+        if accept_status:
             self.db.execute(
                 "UPDATE execution_order_intent SET oid=COALESCE(oid,?),exchange_status=?,"
                 "status_timestamp_ms=COALESCE(?,status_timestamp_ms),ws_confirmed_at=?,updated_at=? "
-                "WHERE session_id=? AND lower(cloid)=lower(?)",
-                (oid, status, status_ms, now_iso(), now_iso(), self.session["session_id"], cloid),
+                "WHERE cloid=?",
+                (oid, status, status_ms, stamp, stamp, intent_cloid),
             )
-        elif oid is not None:
+        else:
             self.db.execute(
-                "UPDATE execution_order_intent SET exchange_status=?,"
-                "status_timestamp_ms=COALESCE(?,status_timestamp_ms),ws_confirmed_at=?,updated_at=? "
-                "WHERE session_id=? AND oid=?",
-                (status, status_ms, now_iso(), now_iso(), self.session["session_id"], oid),
+                "UPDATE execution_order_intent SET oid=COALESCE(oid,?),ws_confirmed_at=? "
+                "WHERE cloid=?",
+                (oid, stamp, intent_cloid),
             )
-        self._refresh_intent_from_exchange(cloid=cloid, oid=oid)
+        if intent_oid is not None:
+            self.db.execute(
+                "UPDATE execution_fill SET cloid=? WHERE session_id=? AND oid=? AND cloid IS NULL",
+                (intent_cloid, self.session["session_id"], intent_oid),
+            )
+        self._refresh_intent_from_exchange(cloid=intent_cloid, oid=intent_oid)
 
     def _persist_ws_account_projection(self, *, append_history: bool) -> None:
         if not self._ws_perp_states or self._ws_spot_state is None:
@@ -547,7 +646,9 @@ class LiveExecutor:
                         for fill in fills or []:
                             if not isinstance(fill, dict):
                                 continue
-                            self._insert_exchange_fill(fill)
+                            changed = self._insert_exchange_fill(fill)
+                            if not changed:
+                                continue
                             try:
                                 oid = int(fill.get("oid")) if fill.get("oid") is not None else None
                             except (TypeError, ValueError):
@@ -1195,7 +1296,9 @@ class LiveExecutor:
                     (type(exc).__name__, now_iso(), cloid),
                 )
                 self.db.execute(
-                    "UPDATE execution_order_intent SET state='submitting',error_code=?,updated_at=? WHERE cloid=?",
+                    "UPDATE execution_order_intent SET state=CASE "
+                    "WHEN state IN ('filled','partial','canceled','rejected') THEN state ELSE 'submitting' END,"
+                    "error_code=?,updated_at=? WHERE cloid=?",
                     ("transport_ambiguous", now_iso(), cloid),
                 )
                 self.db.commit()
@@ -1238,7 +1341,9 @@ class LiveExecutor:
                     ),
                 )
                 self.db.execute(
-                    "UPDATE execution_order_intent SET state='submitting',oid=COALESCE(?,oid),"
+                    "UPDATE execution_order_intent SET state=CASE "
+                    "WHEN state IN ('filled','partial','canceled','rejected') THEN state ELSE 'submitting' END,"
+                    "oid=COALESCE(?,oid),"
                     "error_code=?,updated_at=? WHERE cloid=?",
                     (result.oid, result.error_code, now_iso(), cloid),
                 )
