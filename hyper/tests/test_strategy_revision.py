@@ -186,6 +186,154 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(observer.live_executor.session["strategy_revision"], active["revision"])
         self.assertEqual(observer.live_executor.session["margin_equity_pct"], 0.8)
         self.assertEqual(result["revision"], active["revision"])
+        self.assertFalse(observer.paused)
+        self.assertEqual(observer.execution_state, "live_running")
+        self.assertEqual(db.execute(
+            "SELECT state FROM execution_session WHERE session_id='live-current'"
+        ).fetchone()[0], "live_running")
+        self.assertEqual(db.execute(
+            "SELECT state FROM execution_control WHERE id=1"
+        ).fetchone()[0], "live_running")
+
+    def test_daily_core_revision_hot_switch_keeps_live_entries_running(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','live_running',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running','live-current',?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+            "active_session_id='live-current',updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        daily = strategy_revision.create_revision(
+            db, "g1", source="challenger_daily", enqueue_reload=False,
+        )
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current",
+            "state": "live_running",
+            "strategy_revision": first["revision"],
+            "margin_equity_pct": 1.0,
+        })
+
+        observer._reload_strategy()
+        self.assertTrue(observer._bind_live_strategy_revision())
+
+        self.assertEqual(daily["parentRevision"], first["revision"])
+        self.assertEqual(observer.strategy_revision_id, daily["revision"])
+        self.assertEqual(observer.execution_state, "live_running")
+        self.assertFalse(observer.paused)
+        self.assertEqual(tuple(db.execute(
+            "SELECT state,strategy_revision FROM execution_session WHERE session_id='live-current'"
+        ).fetchone()), ("live_running", daily["revision"]))
+
+    def test_lineage_only_reconcile_failure_auto_resumes_after_full_repair(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        legacy = strategy_revision.create_revision(
+            db, "g1", source="challenger_daily", parent_revision=None,
+            enqueue_reload=False, allow_lineage_repair=True,
+        )
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','reconcile_required',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control "
+            "(id,selected_mode,state,active_session_id,last_error_code,last_error_at,updated_at) "
+            "VALUES (1,'live','reconcile_required','live-current','STRATEGY_REVISION_MISMATCH',?,?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='reconcile_required',"
+            "active_session_id='live-current',last_error_code='STRATEGY_REVISION_MISMATCH',"
+            "last_error_at=excluded.last_error_at,updated_at=excluded.updated_at",
+            (stamp, stamp),
+        )
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current",
+            "state": "reconcile_required",
+            "strategy_revision": first["revision"],
+            "margin_equity_pct": 1.0,
+        })
+
+        self.assertTrue(observer._strategy_revision_recovery_requested())
+        # Successful venue reconciliation intentionally lands in paused first.
+        db.execute("UPDATE execution_session SET state='paused' WHERE session_id='live-current'")
+        db.execute(
+            "UPDATE execution_control SET state='paused',last_error_code=NULL,last_error_at=NULL WHERE id=1"
+        )
+        observer.live_executor.session["state"] = "paused"
+        db.commit()
+        observer._reload_strategy()
+        self.assertTrue(observer._bind_live_strategy_revision())
+        self.assertNotEqual(observer.strategy_revision_id, legacy["revision"])
+
+        resumed = observer._resume_after_strategy_revision_recovery(
+            requested=True,
+            reconcile_result={
+                "ok": True, "unknownPositions": 0, "unknownOrders": 0, "ambiguousIntents": 0,
+            },
+            ledger_projection_ok=True,
+        )
+
+        self.assertTrue(resumed)
+        self.assertFalse(observer.paused)
+        self.assertEqual(observer.execution_state, "live_running")
+        self.assertEqual(observer.live_executor.session["state"], "live_running")
+        self.assertEqual(tuple(db.execute(
+            "SELECT state,last_error_code FROM execution_control WHERE id=1"
+        ).fetchone()), ("live_running", None))
+
+    def test_lineage_recovery_never_resumes_exchange_ambiguity(self):
+        db = self._db()
+        revision = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','paused',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, revision["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','paused','live-current',?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='paused',"
+            "active_session_id='live-current',updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.strategy_revision_id = revision["revision"]
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current", "state": "paused",
+            "strategy_revision": revision["revision"],
+        })
+
+        resumed = observer._resume_after_strategy_revision_recovery(
+            requested=True,
+            reconcile_result={"ok": False, "unknownPositions": 1},
+            ledger_projection_ok=True,
+        )
+
+        self.assertFalse(resumed)
+        self.assertTrue(observer.paused)
+        self.assertEqual(db.execute(
+            "SELECT state FROM execution_control WHERE id=1"
+        ).fetchone()[0], "paused")
 
     def test_live_session_revision_rejects_lateral_active_revision(self):
         db = self._db()

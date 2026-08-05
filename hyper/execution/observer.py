@@ -1548,6 +1548,106 @@ class Observer:
         self.live_executor.session["margin_equity_pct"] = margin_pct
         return previous != revision
 
+    def _strategy_revision_recovery_requested(self) -> bool:
+        """Recognise only the restart state caused by a strategy-lineage mismatch.
+
+        A real exchange ambiguity, ledger drift, or operator pause must never be
+        auto-resumed.  Capture this before ``LiveExecutor.reconcile`` converts a
+        successfully reconciled ``reconcile_required`` session to ``paused`` and
+        clears the original error code.
+        """
+        if self.execution_mode != "live" or not self.execution_session_id:
+            return False
+        row = self.db.execute(
+            "SELECT ec.selected_mode,ec.state,ec.active_session_id,ec.last_error_code,es.state "
+            "FROM execution_control ec LEFT JOIN execution_session es "
+            "ON es.session_id=ec.active_session_id WHERE ec.id=1"
+        ).fetchone()
+        return bool(
+            row
+            and str(row[0] or "") == "live"
+            and str(row[1] or "") == "reconcile_required"
+            and str(row[2] or "") == self.execution_session_id
+            and str(row[3] or "") == "STRATEGY_REVISION_MISMATCH"
+            and str(row[4] or "") == "reconcile_required"
+        )
+
+    def _resume_after_strategy_revision_recovery(
+        self,
+        *,
+        requested: bool,
+        reconcile_result: dict,
+        ledger_projection_ok: bool,
+    ) -> bool:
+        """Resume Live only after a lineage-only failure is completely repaired.
+
+        This is deliberately narrower than the operator ``resume`` command.  It
+        prevents a harmless Core/parameter publication from permanently freezing
+        new entries, while preserving fail-closed behaviour for every trading or
+        reconciliation uncertainty.
+        """
+        if not requested or self.execution_mode != "live" or self.live_executor is None:
+            return False
+        if not reconcile_result.get("ok") or not ledger_projection_ok:
+            return False
+        if any(int(reconcile_result.get(key) or 0) for key in (
+            "unknownPositions", "unknownOrders", "ambiguousIntents",
+        )):
+            return False
+
+        session_id = self.live_executor.session["session_id"]
+        if self.db.in_transaction:
+            self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            active_revision = strategy_revision.active_revision_id(self.db)
+            if not active_revision or active_revision != self.strategy_revision_id:
+                raise RuntimeError("strategy_recovery_active_revision_changed")
+            session = self.db.execute(
+                "SELECT state,canary,strategy_revision FROM execution_session WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            control_row = self.db.execute(
+                "SELECT selected_mode,state,active_session_id FROM execution_control WHERE id=1"
+            ).fetchone()
+            if not session or not control_row:
+                raise RuntimeError("strategy_recovery_state_missing")
+            if (
+                str(session[0] or "") != "paused"
+                or str(session[2] or "") != active_revision
+                or str(control_row[0] or "") != "live"
+                or str(control_row[1] or "") != "paused"
+                or str(control_row[2] or "") != session_id
+            ):
+                raise RuntimeError("strategy_recovery_state_changed")
+            next_state = "live_canary" if bool(session[1]) else "live_running"
+            stamp = now_iso()
+            session_updated = self.db.execute(
+                "UPDATE execution_session SET state=?,updated_at=? "
+                "WHERE session_id=? AND state='paused' AND strategy_revision=?",
+                (next_state, stamp, session_id, active_revision),
+            ).rowcount
+            control_updated = self.db.execute(
+                "UPDATE execution_control SET state=?,last_error_code=NULL,last_error_at=NULL,updated_at=? "
+                "WHERE id=1 AND selected_mode='live' AND state='paused' AND active_session_id=?",
+                (next_state, stamp, session_id),
+            ).rowcount
+            if session_updated != 1 or control_updated != 1:
+                raise RuntimeError("strategy_recovery_compare_and_swap_failed")
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+        self.live_executor.session["state"] = next_state
+        self.execution_state = next_state
+        self.paused = False
+        self._proc_state = "running"
+        self.live_reconcile_error = None
+        self.live_reconcile_error_at = None
+        _log("strategy revision lineage repaired and fully reconciled; Live entries resumed")
+        return True
+
     # -- WS bbo (pricing only; no user subscriptions) ------------------------
     async def _sub(self, subscription: dict):
         await self.ws.send(ws.sub_msg(subscription))
@@ -2741,7 +2841,9 @@ class Observer:
     # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
+        strategy_recovery_requested = False
         if self.execution_mode == "live":
+            strategy_recovery_requested = self._strategy_revision_recovery_requested()
             self._live_executor_db = self._open_live_executor_db()
             self.live_executor = LiveExecutor.from_db(self._live_executor_db)
             # Startup uses the same recoverable exchange+ledger boundary as steady-state Live. A harmless
@@ -2761,8 +2863,9 @@ class Observer:
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (unified WS pricing)")
         self._load_account(self.taker)
         self._reload_open(self.taker)
+        ledger_projection_ok = True
         if self.execution_mode == "live":
-            self._verify_live_ledger_projection()
+            ledger_projection_ok = self._verify_live_ledger_projection()
         self._resolve_all_draining_intents()
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
@@ -2782,6 +2885,19 @@ class Observer:
             )
             self.db.commit()
             raise RuntimeError("live_strategy_revision_mismatch")
+        if strategy_recovery_requested:
+            # Reconcile once more after startup close/recovery work and after the immutable
+            # revision binding has advanced.  Only this fresh, fully consistent state may
+            # reopen exposure after a lineage-only restart failure.
+            recovery_result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
+            ledger_projection_ok = (
+                bool(recovery_result.get("ok")) and self._verify_live_ledger_projection()
+            )
+            self._resume_after_strategy_revision_recovery(
+                requested=True,
+                reconcile_result=recovery_result,
+                ledger_projection_ok=ledger_projection_ok,
+            )
         try:
             if self._refresh_live_wallet_risks():
                 self._reload_strategy()
