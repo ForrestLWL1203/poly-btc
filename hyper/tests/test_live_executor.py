@@ -21,6 +21,8 @@ class FakeLiveBroker:
         self.venue = SimpleNamespace(network=ExecutionNetwork.MAINNET)
         self.outcomes = list(outcomes or [(OrderOutcome.FILLED, 1.0, None)])
         self.positions = {}
+        self.unrealized_pnl = {}
+        self.total_equity = 8000.0
         self.orders = []
         self.fills = []
         self.submit_calls = 0
@@ -114,12 +116,14 @@ class FakeLiveBroker:
                 "coin": coin, "szi": str(size), "entryPx": "100",
                 "positionValue": str(abs(size) * 100), "marginUsed": str(abs(size) * 10),
                 "leverage": {"type": "isolated", "value": 10},
-                "unrealizedPnl": "0", "liquidationPx": "50",
+                "unrealizedPnl": str(self.unrealized_pnl.get(coin, 0.0)), "liquidationPx": "50",
             }})
         return AccountSnapshot(
             network=ExecutionNetwork.MAINNET, account_address=ACCOUNT,
             abstraction="unifiedAccount",
-            collateral_state={"balances": [{"coin": "USDC", "total": "8000", "hold": "0"}]},
+            collateral_state={
+                "balances": [{"coin": "USDC", "total": str(self.total_equity), "hold": "0"}],
+            },
             perp_states={"": {"assetPositions": rows}, "xyz": {"assetPositions": []}},
             open_orders={"": list(self.orders), "xyz": []},
             frontend_open_orders={"": list(self.orders), "xyz": []},
@@ -371,6 +375,26 @@ class LiveExecutorTests(unittest.TestCase):
             self.db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()[0],
             "reconcile_required",
         )
+
+    def test_reconcile_does_not_add_unrealized_pnl_to_unified_total_equity(self):
+        broker = FakeLiveBroker()
+        broker.positions["BTC"] = 1.0
+        broker.unrealized_pnl["BTC"] = 125.0
+        broker.total_equity = 8125.0
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = executor.reconcile()
+
+        self.assertEqual(result["equity"], 8125.0)
+        snapshot = self.db.execute(
+            "SELECT equity,unrealized_pnl,equity_projection_version "
+            "FROM execution_account_snapshot ORDER BY snapshot_id DESC LIMIT 1"
+        ).fetchone()
+        account = self.db.execute(
+            "SELECT balance,equity_projection_version FROM live_copy_account WHERE id=1"
+        ).fetchone()
+        self.assertEqual(snapshot, (8125.0, 125.0, 2))
+        self.assertEqual(account, (8125.0, 2))
 
 
 if __name__ == "__main__":

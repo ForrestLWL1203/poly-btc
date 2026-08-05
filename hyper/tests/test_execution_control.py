@@ -24,9 +24,10 @@ ACCOUNT = "0x" + "2" * 40
 
 
 class FakeInfo:
-    def __init__(self, agent, *, total="8000"):
+    def __init__(self, agent, *, total="8000", position=None):
         self.agent = agent.lower()
         self.total = total
+        self.position = position
 
     def user_role(self, address):
         if str(address).lower() == self.agent:
@@ -40,7 +41,8 @@ class FakeInfo:
         return {"balances": [{"coin": "USDC", "total": self.total, "hold": "0"}]}
 
     def user_state(self, _account, dex=""):
-        return {"assetPositions": [], "marginSummary": {"accountValue": "0"}}
+        positions = [{"position": self.position}] if self.position and not dex else []
+        return {"assetPositions": positions, "marginSummary": {"accountValue": "0"}}
 
     def open_orders(self, _account, dex=""):
         return []
@@ -146,6 +148,31 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(status["accountPreview"]["positionCount"], 0)
         self.assertIsNone(self.db.execute("SELECT * FROM live_copy_account").fetchone())
         self.assertIsNone(self.db.execute("SELECT * FROM execution_session").fetchone())
+
+    def test_credential_preview_does_not_double_count_unified_unrealized_pnl(self):
+        position = {
+            "coin": "BTC", "szi": "1", "entryPx": "100", "positionValue": "110",
+            "marginUsed": "10", "leverage": {"type": "isolated", "value": 10},
+            "unrealizedPnl": "110", "liquidationPx": "50",
+        }
+        with patch(
+            "hyper.execution.command_worker.create_public_info_client",
+            return_value=FakeInfo(self.wallet.address, total="2270", position=position),
+        ):
+            result = execute_control_command(
+                self.db,
+                "credential_verify",
+                {"network": "mainnet"},
+                private_key_path=str(self.private),
+            )
+
+        self.assertEqual(result["accountPreview"]["equity"], 2270.0)
+        self.assertEqual(result["accountPreview"]["unrealizedPnl"], 110.0)
+        row = self.db.execute(
+            "SELECT equity,unrealized_pnl,equity_projection_version "
+            "FROM execution_account_preview WHERE network='mainnet'"
+        ).fetchone()
+        self.assertEqual(row, (2270.0, 110.0, 2))
 
     def test_legacy_canary_unlock_requires_only_clean_flat_reconcile(self):
         stamp = now_iso()

@@ -50,7 +50,11 @@ def snapshot_orders(snapshot: AccountSnapshot) -> list[dict]:
 
 
 def snapshot_account_values(snapshot: AccountSnapshot, positions: list[dict]) -> tuple[float, float]:
-    """Return Unified USDC collateral and conservative available-to-trade collateral."""
+    """Return Unified total equity and conservative available-to-trade collateral.
+
+    Hyperliquid's Unified spot USDC ``total`` is the single account balance and already includes position
+    unrealized PnL. Position marks remain useful as separate PnL telemetry but must not be added to ``total``.
+    """
     balances = snapshot.collateral_state.get("balances") if isinstance(snapshot.collateral_state, dict) else None
     for item in balances or []:
         if isinstance(item, dict) and item.get("coin") == "USDC":
@@ -67,22 +71,22 @@ def persist_account_preview(db, snapshot: AccountSnapshot) -> dict:
     """Persist a replaceable read-only snapshot without creating a Live session or ledger row."""
     positions = snapshot_positions(snapshot)
     orders = snapshot_orders(snapshot)
-    collateral, available = snapshot_account_values(snapshot, positions)
+    equity, available = snapshot_account_values(snapshot, positions)
     unrealized = sum(_float(position.get("unrealized_pnl")) for position in positions)
     margin_used = sum(max(0.0, _float(position.get("margin_used"))) for position in positions)
-    equity = max(0.0, collateral + unrealized)
     observed_at = now_iso()
     db.execute(
         "INSERT INTO execution_account_preview "
         "(network,account_address,equity,available,margin_used,unrealized_pnl,position_count,"
-        "open_order_count,observed_at) VALUES (?,?,?,?,?,?,?,?,?) "
+        "open_order_count,equity_projection_version,observed_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(network) DO UPDATE SET account_address=excluded.account_address,"
         "equity=excluded.equity,available=excluded.available,margin_used=excluded.margin_used,"
         "unrealized_pnl=excluded.unrealized_pnl,position_count=excluded.position_count,"
-        "open_order_count=excluded.open_order_count,observed_at=excluded.observed_at",
+        "open_order_count=excluded.open_order_count,equity_projection_version=2,"
+        "observed_at=excluded.observed_at",
         (
             snapshot.network.value, snapshot.account_address, equity, available, margin_used,
-            unrealized, len(positions), len(orders), observed_at,
+            unrealized, len(positions), len(orders), 2, observed_at,
         ),
     )
     return {

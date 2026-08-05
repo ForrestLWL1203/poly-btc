@@ -226,11 +226,11 @@ class LiveExecutor:
 
     @staticmethod
     def _account_values(snapshot, positions: list[dict]) -> tuple[float, float]:
-        """Unified equity collateral and conservative available USDC.
+        """Unified total equity and conservative available USDC.
 
-        Hyperliquid exposes the unified asset balance in spotClearinghouseState; isolated position margin
-        must still be removed from that total to derive available-to-trade collateral.  Spot holds are also
-        unavailable and are deducted here.
+        Hyperliquid exposes the unified total-equity balance in spotClearinghouseState; isolated position
+        margin must still be removed from that total to derive available-to-trade collateral. Spot holds are
+        also unavailable and are deducted here.
         """
         return snapshot_account_values(snapshot, positions)
 
@@ -368,8 +368,7 @@ class LiveExecutor:
             snapshot = self.broker.account_snapshot()
             positions = self._positions(snapshot)
             orders = self._orders(snapshot)
-            collateral, self.available = self._account_values(snapshot, positions)
-            self.equity = max(0.0, collateral + sum(_float(p.get("unrealized_pnl")) for p in positions))
+            self.equity, self.available = self._account_values(snapshot, positions)
             fills = self._sync_fills()
             self._reconcile_pending_intents()
 
@@ -387,11 +386,12 @@ class LiveExecutor:
             )
             self.db.execute(
                 "INSERT INTO execution_account_snapshot "
-                "(session_id,equity,available,margin_used,unrealized_pnl,observed_at) VALUES (?,?,?,?,?,?)",
+                "(session_id,equity,available,margin_used,unrealized_pnl,equity_projection_version,"
+                "observed_at) VALUES (?,?,?,?,?,?,?)",
                 (
                     session_id, self.equity, self.available,
                     sum(max(0.0, _float(p.get("margin_used"))) for p in positions),
-                    sum(_float(p.get("unrealized_pnl")) for p in positions), now_iso(),
+                    sum(_float(p.get("unrealized_pnl")) for p in positions), 2, now_iso(),
                 ),
             )
             expected_sizes = {
@@ -449,10 +449,12 @@ class LiveExecutor:
                 ),
             )
             self.db.execute(
-                "INSERT INTO live_copy_account (id,initial_balance,balance,available,updated_at) VALUES (1,?,?,?,?) "
+                "INSERT INTO live_copy_account "
+                "(id,initial_balance,balance,available,equity_projection_version,updated_at) "
+                "VALUES (1,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET balance=excluded.balance,available=excluded.available,"
-                "updated_at=excluded.updated_at",
-                (self.session["sizing_anchor"], self.equity, self.available, now_iso()),
+                "equity_projection_version=2,updated_at=excluded.updated_at",
+                (self.session["sizing_anchor"], self.equity, self.available, 2, now_iso()),
             )
             if status != "ok":
                 self._freeze_reconcile(

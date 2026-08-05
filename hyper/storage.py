@@ -991,6 +991,7 @@ CREATE TABLE IF NOT EXISTS live_copy_account (
     initial_balance REAL,
     balance         REAL,
     available       REAL,
+    equity_projection_version INTEGER NOT NULL DEFAULT 2,
     updated_at      TEXT
 );
 CREATE TABLE IF NOT EXISTS live_copy_position (
@@ -1227,6 +1228,7 @@ CREATE TABLE IF NOT EXISTS execution_account_preview (
     unrealized_pnl   REAL NOT NULL DEFAULT 0,
     position_count   INTEGER NOT NULL DEFAULT 0,
     open_order_count INTEGER NOT NULL DEFAULT 0,
+    equity_projection_version INTEGER NOT NULL DEFAULT 2,
     observed_at      TEXT NOT NULL
 );
 
@@ -1364,6 +1366,7 @@ CREATE TABLE IF NOT EXISTS execution_account_snapshot (
     available      REAL NOT NULL,
     margin_used    REAL NOT NULL DEFAULT 0,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
+    equity_projection_version INTEGER NOT NULL DEFAULT 2,
     observed_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_execution_account_session_time
@@ -1405,6 +1408,12 @@ _MIGRATIONS = (
     "ALTER TABLE copy_position ADD COLUMN unrealized_pnl REAL",
     "ALTER TABLE copy_position ADD COLUMN open_lag_sec REAL",
     "ALTER TABLE live_copy_account ADD COLUMN available REAL",
+    # Version 1 stored Unified spot USDC total plus position uPnL even though that total already includes
+    # uPnL. Existing rows are normalized once after these additive columns are installed; all new writes
+    # explicitly persist version 2.
+    "ALTER TABLE live_copy_account ADD COLUMN equity_projection_version INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE execution_account_preview ADD COLUMN equity_projection_version INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE execution_account_snapshot ADD COLUMN equity_projection_version INTEGER NOT NULL DEFAULT 1",
     # Dashboard: denormalized onto watchlist by the scanner rebuild (API COALESCEs with profile until
     # the next scan repopulates these).
     "ALTER TABLE watchlist ADD COLUMN worst_single_loss_pct REAL",
@@ -1697,6 +1706,7 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     db.execute("BEGIN IMMEDIATE")
     try:
         _apply_migrations(db)
+        _migrate_unified_equity_projection(db)
         _retire_maker_shadow(db)
         _retire_obsolete_selection_state(db)
         _migrate_episode_seq(db)
@@ -1749,6 +1759,39 @@ def _apply_migrations(db: sqlite3.Connection) -> None:
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_pipeline_audit_generation_stage_id "
             "ON pipeline_audit(generation, stage, id DESC)"
+        )
+
+
+def _migrate_unified_equity_projection(db: sqlite3.Connection) -> None:
+    """Normalize snapshots written before Unified USDC total was treated as total equity.
+
+    Version 1 added position uPnL to the Unified spot USDC total a second time. The version column makes
+    this correction idempotent and lets historical Dashboard curves stay continuous after the runtime fix.
+    """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    for table in ("execution_account_preview", "execution_account_snapshot"):
+        if table not in tables:
+            continue
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        required = {"equity", "unrealized_pnl", "equity_projection_version"}
+        if required.issubset(columns):
+            db.execute(
+                f"UPDATE {table} SET equity=MAX(0.0,equity-COALESCE(unrealized_pnl,0)),"
+                "equity_projection_version=2 WHERE equity_projection_version<2"
+            )
+
+    if "live_copy_account" not in tables or "execution_account_snapshot" not in tables:
+        return
+    account_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(live_copy_account)").fetchall()
+    }
+    if {"balance", "equity_projection_version"}.issubset(account_columns):
+        db.execute(
+            "UPDATE live_copy_account SET balance=COALESCE(("
+            "SELECT equity FROM execution_account_snapshot ORDER BY snapshot_id DESC LIMIT 1"
+            "),balance),equity_projection_version=2 WHERE equity_projection_version<2"
         )
 
 

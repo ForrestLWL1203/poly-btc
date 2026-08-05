@@ -60,6 +60,66 @@ class StorageIndexTests(unittest.TestCase):
             })
             db.close()
 
+    def test_legacy_unified_equity_rows_are_normalized_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "hl.db")
+            legacy = sqlite3.connect(path)
+            legacy.execute(
+                "CREATE TABLE live_copy_account ("
+                "id INTEGER PRIMARY KEY,initial_balance REAL,balance REAL,available REAL,updated_at TEXT)"
+            )
+            legacy.execute(
+                "CREATE TABLE execution_account_preview ("
+                "network TEXT PRIMARY KEY,account_address TEXT,equity REAL,available REAL,margin_used REAL,"
+                "unrealized_pnl REAL,position_count INTEGER,open_order_count INTEGER,observed_at TEXT)"
+            )
+            legacy.execute(
+                "CREATE TABLE execution_account_snapshot ("
+                "snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT,equity REAL,available REAL,"
+                "margin_used REAL,unrealized_pnl REAL,observed_at TEXT)"
+            )
+            legacy.execute(
+                "INSERT INTO execution_account_snapshot "
+                "(session_id,equity,available,margin_used,unrealized_pnl,observed_at) "
+                "VALUES ('live-old',2343.53,485.78,878.38,100.99,'2026-08-05T01:52:38Z')"
+            )
+            legacy.execute(
+                "INSERT INTO execution_account_preview "
+                "VALUES ('mainnet','0xaccount',2343.53,485.78,878.38,100.99,9,0,"
+                "'2026-08-05T01:52:38Z')"
+            )
+            legacy.execute(
+                "INSERT INTO live_copy_account VALUES (1,2162.49,2343.53,485.78,"
+                "'2026-08-05T01:52:38Z')"
+            )
+            legacy.commit()
+            legacy.close()
+
+            db = storage.connect(path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            snapshot = db.execute(
+                "SELECT equity,equity_projection_version FROM execution_account_snapshot"
+            ).fetchone()
+            preview = db.execute(
+                "SELECT equity,equity_projection_version FROM execution_account_preview"
+            ).fetchone()
+            account = db.execute(
+                "SELECT balance,equity_projection_version FROM live_copy_account"
+            ).fetchone()
+            self.assertAlmostEqual(snapshot[0], 2242.54)
+            self.assertEqual(snapshot[1], 2)
+            self.assertAlmostEqual(preview[0], 2242.54)
+            self.assertEqual(preview[1], 2)
+            self.assertAlmostEqual(account[0], 2242.54)
+            self.assertEqual(account[1], 2)
+            db.close()
+
+            db = storage.connect(path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            self.assertAlmostEqual(
+                db.execute("SELECT equity FROM execution_account_snapshot").fetchone()[0],
+                2242.54,
+            )
+            db.close()
+
     def test_hot_query_indexes_are_created(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

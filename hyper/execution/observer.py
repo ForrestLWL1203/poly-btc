@@ -533,7 +533,8 @@ class Observer:
         self.taker.balance = max(0.0, float(self.live_executor.equity))
         self.taker.available_balance = max(0.0, float(self.live_executor.available))
         self.db.execute(
-            "UPDATE live_copy_account SET balance=?,available=?,updated_at=? WHERE id=1",
+            "UPDATE live_copy_account SET balance=?,available=?,equity_projection_version=2,"
+            "updated_at=? WHERE id=1",
             (self.taker.balance, self.taker.available_balance, now_iso()),
         )
         self.db.commit()
