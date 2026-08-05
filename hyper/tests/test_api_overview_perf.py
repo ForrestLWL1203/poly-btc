@@ -152,8 +152,8 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertEqual(overview["closedCount"], 0)
         self.assertEqual(overview["unrealizedPnl"], 94.0)
         self.assertEqual(overview["availableBalance"], 9870.0)
-        self.assertEqual(overview["risk"]["gross"], 1300.0)
-        self.assertEqual(overview["risk"]["net"], -300.0)
+        self.assertEqual(overview["risk"]["gross"], 1310.0)
+        self.assertEqual(overview["risk"]["net"], -210.0)
 
     def test_overview_exposes_closed_position_count_for_navigation(self):
         with tempfile.TemporaryDirectory() as td:

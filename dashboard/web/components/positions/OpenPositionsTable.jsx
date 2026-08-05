@@ -26,7 +26,7 @@ export function OpenPositionsTable({
       <div className="tbl-wrap">
         <table>
           <thead><tr>
-            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th>
+            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num" title="当前剩余数量 × 标记价">当前名义额</th>
             <th className="num">现价</th>
             <th className="num sortable" onClick={cyclePnlSort} title="点击按浮动盈亏排序(浮亏在前 / 浮盈在前 / 默认新开在前)">
               浮动盈亏 <span className={"sort-ind" + (pnlSort ? " active" : "")}>{pnlSort === "asc" ? "▲" : pnlSort === "desc" ? "▼" : "⇅"}</span>

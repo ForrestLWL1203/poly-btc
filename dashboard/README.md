@@ -13,6 +13,8 @@ navigation belong here; Polymarket business logic belongs in `polymarket/`.
 Position fill details distinguish margin committed on entry from capital returned on reduce/close. Returned
 capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
 leverage.
+Open-position notional is current exchange-style position value (absolute remaining quantity times mark price),
+while closed-position history preserves entry-basis notional.
 
 The Hyperliquid Account tab exposes only Paper and Mainnet Live. Paper is a compact one-line state; selecting
 Live reveals encrypted Mainnet Agent setup. Testnet is intentionally absent from product UI. Agent expiry is

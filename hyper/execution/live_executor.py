@@ -226,11 +226,11 @@ class LiveExecutor:
 
     @staticmethod
     def _account_values(snapshot, positions: list[dict]) -> tuple[float, float]:
-        """Unified total equity and conservative available USDC.
+        """Unified total equity and exchange-authoritative available USDC.
 
-        Hyperliquid exposes the unified total-equity balance in spotClearinghouseState; isolated position
-        margin must still be removed from that total to derive available-to-trade collateral. Spot holds are
-        also unavailable and are deducted here.
+        Hyperliquid exposes both values in spotClearinghouseState. Unified USDC ``hold`` already includes
+        isolated-position and order collateral, so the shared projection must not subtract position margin
+        separately.
         """
         return snapshot_account_values(snapshot, positions)
 

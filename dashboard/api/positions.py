@@ -139,6 +139,8 @@ def ep_positions(db, qs):
         mark = r["mark_px"] if r["mark_px"] else entry
         held = (r["rem_size"] / r["size"]) if r["size"] else 1.0
         margin = (r["margin"] or 0.0) * held
+        entry_notional = (r["notional"] or 0.0) * held
+        current_notional = abs(r["rem_size"] or 0.0) * mark
         upnl = r["unrealized_pnl"] if r["unrealized_pnl"] is not None else 0.0
         float_total += upnl
         liq = r["liq_px"]
@@ -146,7 +148,7 @@ def ep_positions(db, qs):
         out.append({
             "id": f"pos_{r['pos_id']}", "coin": r["coin"], "marketType": r["mtype"] or "crypto",
             "side": r["side"], "entry": entry, "leverage": r["leverage"],
-            "notional": (r["notional"] or 0.0) * held, "mark": mark,
+            "notional": current_notional, "entryNotional": entry_notional, "mark": mark,
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": r["follow_pos"],

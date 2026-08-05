@@ -49,21 +49,18 @@ def snapshot_orders(snapshot: AccountSnapshot) -> list[dict]:
     ]
 
 
-def snapshot_account_values(snapshot: AccountSnapshot, positions: list[dict]) -> tuple[float, float]:
-    """Return Unified total equity and conservative available-to-trade collateral.
+def snapshot_account_values(snapshot: AccountSnapshot, _positions: list[dict]) -> tuple[float, float]:
+    """Return Unified total equity and exchange-authoritative available collateral.
 
     Hyperliquid's Unified spot USDC ``total`` is the single account balance and already includes position
-    unrealized PnL. Position marks remain useful as separate PnL telemetry but must not be added to ``total``.
+    unrealized PnL. Its ``hold`` already includes collateral reserved for isolated positions and open orders,
+    so subtracting ``marginUsed`` again would double-count the same collateral.
     """
     balances = snapshot.collateral_state.get("balances") if isinstance(snapshot.collateral_state, dict) else None
     for item in balances or []:
         if isinstance(item, dict) and item.get("coin") == "USDC":
             total = max(0.0, _float(item.get("total")))
-            isolated_margin = sum(
-                max(0.0, _float(position.get("margin_used"))) for position in positions
-                if str(position.get("leverage_type") or "").lower() == "isolated"
-            )
-            return total, max(0.0, total - _float(item.get("hold")) - isolated_margin)
+            return total, max(0.0, total - _float(item.get("hold")))
     return 0.0, 0.0
 
 

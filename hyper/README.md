@@ -107,7 +107,8 @@ The local signed verifier requires a Testnet-only Agent key in a regular, non-sy
 that the derived Agent address and authorized master account match before trading; secret values are never
 printed. Preflight requires the authoritative Info API account-abstraction value to be exactly
 `unifiedAccount` and derives available collateral from Unified spot USDC (`total - hold`). A UI label alone is
-not accepted. Use placeholders below rather than putting a private key on the command line:
+not accepted. Unified `hold` is authoritative reserved collateral and must not be reduced again by isolated
+`marginUsed`. Use placeholders below rather than putting a private key on the command line:
 
 ```bash
 python3 -m hyper.cli.execution_verify testnet-preflight \

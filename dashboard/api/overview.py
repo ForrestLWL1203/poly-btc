@@ -122,8 +122,10 @@ def ep_overview(db):
             "    (CASE WHEN side='long' THEN 1 ELSE -1 END) "
             "  END ELSE 0 END),0) upnl, "
             "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(margin,0)*COALESCE(rem_size,0)/size ELSE 0 END),0) locked, "
-            "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size ELSE 0 END),0) gross, "
-            "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size*"
+            "COALESCE(SUM(CASE WHEN size>0 THEN ABS(COALESCE(rem_size,0))*"
+            "  (CASE WHEN mark_px IS NOT NULL AND mark_px!=0 THEN mark_px ELSE COALESCE(entry_px,0) END) ELSE 0 END),0) gross, "
+            "COALESCE(SUM(CASE WHEN size>0 THEN ABS(COALESCE(rem_size,0))*"
+            "  (CASE WHEN mark_px IS NOT NULL AND mark_px!=0 THEN mark_px ELSE COALESCE(entry_px,0) END)*"
             "  (CASE WHEN side='long' THEN 1 ELSE -1 END) ELSE 0 END),0) net "
             f"FROM {position_table} WHERE status='open'")
         open_n = (open_risk["open_n"] if open_risk else 0) or 0
