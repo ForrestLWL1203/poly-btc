@@ -5899,6 +5899,8 @@ def _persist_wallet_risk_assessment(
         fallback_reason=decision.failure_reason,
         complete=complete,
         min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+        cumulative_low_loss_pct=config.ACTUAL_COPY_LOW_RISK_LOSS_PCT,
+        cumulative_medium_loss_pct=config.ACTUAL_COPY_MEDIUM_RISK_LOSS_PCT,
         cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
     )
     return assessment
@@ -8931,6 +8933,8 @@ def refresh_challengers(db, p) -> dict:
                 fallback_reason=(outcomes.get(addr) or {}).get("reason"),
                 complete=True,
                 min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+                cumulative_low_loss_pct=config.ACTUAL_COPY_LOW_RISK_LOSS_PCT,
+                cumulative_medium_loss_pct=config.ACTUAL_COPY_MEDIUM_RISK_LOSS_PCT,
                 cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
             )
             if assessment.level == wallet_risk.HIGH:

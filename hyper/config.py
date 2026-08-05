@@ -333,9 +333,13 @@ CORE_COPY_MAX_LIQUIDATIONS_30D = 3
 # Count alone is too coarse: one isolated liquidation that consumes a material share of the standardized
 # account is a wallet-level risk signature, not a sizing nuisance. The denominator is the floating Copy
 # equity recorded when that copied episode opened, so compounding and account scale cannot hide the loss.
+# Actual-Copy financial risk is scale-free: 30-day conservative loss is divided by the earliest recorded
+# opening account equity in the window. Dollar loss, trade count and a merely negative sign do not set
+# the risk level. Positive unrealized PnL remains excluded from the conservative numerator.
+ACTUAL_COPY_LOW_RISK_LOSS_PCT = 0.005
+ACTUAL_COPY_MEDIUM_RISK_LOSS_PCT = 0.02
 # One isolated Copy liquidation becomes a permanent wallet-level catastrophe only when it consumes at
-# least 8% of the episode-opening dynamic equity. Losses below this line remain fully charged to PnL/PF
-# and liquidation counts, but are not an admission veto by themselves.
+# least 8% of the episode-opening dynamic equity. Cumulative loss at this line is recoverable.
 COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT = 0.08
 # Rolling-deploy compatibility for older snapshots/readers. New policy code and UI use the explicit
 # catastrophic name above; this alias is intentionally hidden from the parameter surface.

@@ -140,22 +140,76 @@ class WalletRiskTest(unittest.TestCase):
             self.assertEqual(1, len(evidence["catastrophicPositionIds"]))
             db.close()
 
-    def test_open_actual_loss_without_closed_sample_is_low_risk(self):
-        reason = wallet_risk.actual_copy_reason({
-            "closedN30d": 0,
-            "closedPnl30d": 0.0,
-            "conservativePnl30d": -18.0,
-            "cumulativeLossPct30d": 0.0018,
-            "catastrophicPositionIds": [],
-            "openUnrealized": -18.0,
-        })
-        self.assertEqual("actual_copy_negative_insufficient_sample", reason)
+    def test_actual_copy_risk_uses_percentage_bands_only(self):
+        def reason(loss_pct):
+            return wallet_risk.actual_copy_reason({
+                "closedN30d": 1_000,
+                "closedPnl30d": 0.0,
+                "conservativePnl30d": -1_000_000.0,
+                "cumulativeLossPct30d": loss_pct,
+                "catastrophicPositionIds": [],
+                "openUnrealized": -1_000_000.0,
+            })
+
+        self.assertIsNone(reason(0.004999))
         self.assertEqual(
-            wallet_risk.LOW,
-            wallet_risk.advance(
-                assessed_at="2026-01-01T00:00:00Z", reason=reason,
-            ).level,
+            "actual_copy_cumulative_loss_over_0_5pct", reason(0.005),
         )
+        self.assertEqual(
+            "actual_copy_cumulative_loss_over_0_5pct", reason(0.019999),
+        )
+        self.assertEqual(
+            "actual_copy_cumulative_loss_over_2pct", reason(0.02),
+        )
+        self.assertEqual(
+            "actual_copy_cumulative_loss_over_2pct", reason(0.079999),
+        )
+        self.assertEqual(
+            "actual_copy_cumulative_loss_over_8pct", reason(0.08),
+        )
+
+    def test_percentage_low_does_not_escalate_after_72_hours(self):
+        reason = "actual_copy_cumulative_loss_over_0_5pct"
+        low = wallet_risk.advance(
+            assessed_at="2026-01-01T00:00:00Z", reason=reason,
+        )
+        repeated = wallet_risk.advance(
+            previous_level=low.level,
+            previous_count=low.confirmation_count,
+            previous_reasons=low.reasons,
+            previous_first_confirmed_at=low.first_confirmed_at,
+            assessed_at="2026-01-10T00:00:00Z",
+            reason=reason,
+        )
+        self.assertEqual(wallet_risk.LOW, repeated.level)
+        self.assertEqual(1, repeated.confirmation_count)
+
+    def test_same_loss_percentage_has_same_risk_at_different_account_sizes(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(
+                str(Path(td) / "test.db"),
+                storage.DISCOVERY_SCHEMA,
+                storage.OBSERVE_SCHEMA,
+            )
+            db.executemany(
+                "INSERT INTO copy_position "
+                "(addr,coin,status,realized_pnl,unrealized_pnl,opening_account_equity,closed_at) "
+                "VALUES (?,?,'closed',?,0,?,'2026-08-01T00:00:00Z')",
+                [
+                    ("0xsmall", "BTC", -20.0, 2_000.0),
+                    ("0xlarge", "ETH", -1_000.0, 100_000.0),
+                ],
+            )
+            for addr in ("0xsmall", "0xlarge"):
+                evidence = wallet_risk.actual_copy_evidence(
+                    db, addr, now=datetime(2026, 8, 5, tzinfo=timezone.utc),
+                )
+                self.assertAlmostEqual(0.01, evidence["cumulativeLossPct30d"])
+                self.assertEqual(
+                    "actual_copy_cumulative_loss_over_0_5pct",
+                    wallet_risk.actual_copy_reason(evidence),
+                )
+            db.close()
 
     def test_live_refresh_clears_legacy_positive_status_risk(self):
         with tempfile.TemporaryDirectory() as td:
@@ -188,6 +242,34 @@ class WalletRiskTest(unittest.TestCase):
                     "FROM wallet_registry WHERE addr='0xhealthy'"
                 ).fetchone()),
             )
+            db.close()
+
+    def test_live_refresh_clears_historical_performance_advisory(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(
+                str(Path(td) / "test.db"),
+                storage.DISCOVERY_SCHEMA,
+                storage.OBSERVE_SCHEMA,
+            )
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,first_seen_at,last_seen_at,risk_level,risk_reasons_json,"
+                "risk_confirmation_count,risk_first_confirmed_at,updated_at) "
+                "VALUES ('0xhistory','qualified','now','now','medium',?,2,?,'now')",
+                ('["source_7d_conservative_pnl_not_positive"]', "2026-01-01T00:00:00Z"),
+            )
+
+            assessment, _evidence = wallet_risk.assess_actual_copy(
+                db,
+                generation="live-2026-01-02",
+                addr="0xhistory",
+                source="observer_live",
+                assessed_at="2026-01-02T00:00:00Z",
+                fallback_reason="source_7d_conservative_pnl_not_positive",
+            )
+
+            self.assertEqual(wallet_risk.NORMAL, assessment.level)
+            self.assertEqual((), assessment.reasons)
             db.close()
 
     def test_actual_copy_accumulates_repeated_losses_like_current_core_three(self):
@@ -240,7 +322,7 @@ class WalletRiskTest(unittest.TestCase):
             )
             reason = wallet_risk.actual_copy_reason(evidence)
             self.assertEqual(
-                "actual_copy_30d_conservative_pnl_not_positive", reason,
+                "actual_copy_cumulative_loss_over_2pct", reason,
             )
             assessment = wallet_risk.advance(
                 assessed_at="2026-07-31T08:00:00Z", reason=reason,
@@ -272,6 +354,9 @@ class WalletRiskTest(unittest.TestCase):
             "catastrophicPositionIds": [],
             "openUnrealized": 0.0,
         })
+        self.assertEqual(
+            "actual_copy_cumulative_loss_over_2pct", medium_reason,
+        )
         lowered = wallet_risk.advance(
             previous_level=high.level,
             previous_count=high.confirmation_count,

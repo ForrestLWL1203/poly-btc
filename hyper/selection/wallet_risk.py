@@ -53,11 +53,10 @@ IMMEDIATE_MEDIUM_REASONS = frozenset({
     "copy_30d_closed_pnl_not_positive",
     "copy_open_loss_over_50pct",
     "rough_copy_30d_conservative_not_profitable",
-    "actual_copy_30d_conservative_pnl_not_positive",
-    "actual_copy_open_loss_over_50pct",
+    "actual_copy_cumulative_loss_over_2pct",
 })
 LOW_RISK_REASONS = frozenset({
-    "actual_copy_negative_insufficient_sample",
+    "actual_copy_cumulative_loss_over_0_5pct",
     "source_episode_evidence_insufficient",
     "copy_episode_evidence_insufficient",
     "source_7d_closed_pnl_not_positive",
@@ -160,15 +159,20 @@ def reason_kind(reason: Optional[str], *, deferred: bool = False) -> str:
 def assessment_reason(reason: Optional[str]) -> Optional[str]:
     """Return only a reason which the wallet-risk state machine owns.
 
-    Profile stages also expose positive status strings through their ``reason``
-    field.  Treating every non-empty string as financial risk made
-    ``source_structure_passed`` appear as low risk and then survive every live
-    refresh.  Unknown status strings remain available in their owning audit
-    tables but may not create a wallet-risk label.
+    Profile stages also expose qualification and positive status strings through
+    their ``reason`` field. Historical profitability/activity failures stay in
+    retention and selection audit; only percentage-based actual-Copy loss plus
+    hard control states may create a wallet-risk label.
     """
     reason = str(reason or "").strip()
     kind = reason_kind(reason)
-    if kind in {LOW, MEDIUM, HIGH, UNAVAILABLE, "structural", "deferred"}:
+    if (
+        reason in {
+            "actual_copy_cumulative_loss_over_0_5pct",
+            "actual_copy_cumulative_loss_over_2pct",
+        }
+        or kind in {HIGH, UNAVAILABLE, "structural", "deferred"}
+    ):
         return reason
     return None
 
@@ -265,6 +269,17 @@ def advance(
             MEDIUM, (str(reason),), max(1, previous_count),
             previous_first_confirmed_at or assessed_at, assessed_at, None, True,
             "immediate_medium",
+        )
+
+    if str(reason) == "actual_copy_cumulative_loss_over_0_5pct":
+        return RiskAssessment(
+            LOW, (str(reason),), 1,
+            (
+                previous_first_confirmed_at
+                if previous_level == LOW and str(reason) in previous_reasons
+                else assessed_at
+            ),
+            assessed_at, None, True, "percentage_low",
         )
 
     first_at = previous_first_confirmed_at or assessed_at
@@ -385,36 +400,21 @@ def actual_copy_evidence(
 def actual_copy_reason(
     evidence: Mapping,
     *,
-    fallback_reason: Optional[str] = None,
+    cumulative_low_loss_pct: float = 0.005,
+    cumulative_medium_loss_pct: float = 0.02,
     cumulative_high_loss_pct: float = 0.08,
 ) -> Optional[str]:
-    """Classify actual copy results, including recoverable cumulative loss."""
+    """Classify actual Copy solely by conservative loss as a share of equity."""
     if evidence.get("catastrophicPositionIds"):
         return "actual_copy_single_liquidation_loss_over_8pct"
-    if (
-        int(evidence.get("closedN30d") or 0) >= 2
-        and float(evidence.get("cumulativeLossPct30d") or 0.0)
-        >= float(cumulative_high_loss_pct)
-    ):
+    loss_pct = max(0.0, float(evidence.get("cumulativeLossPct30d") or 0.0))
+    if loss_pct >= float(cumulative_high_loss_pct):
         return "actual_copy_cumulative_loss_over_8pct"
-    if (
-        int(evidence.get("closedN30d") or 0) >= 3
-        and float(evidence.get("conservativePnl30d") or 0.0) <= 0
-    ):
-        return "actual_copy_30d_conservative_pnl_not_positive"
-    if (
-        float(evidence.get("closedPnl30d") or 0.0) > 0
-        and -min(0.0, float(evidence.get("openUnrealized") or 0.0))
-        > float(evidence.get("closedPnl30d") or 0.0) * 0.50
-    ):
-        return "actual_copy_open_loss_over_50pct"
-    if (
-        int(evidence.get("closedN30d") or 0) < 3
-        and float(evidence.get("conservativePnl30d") or 0.0) < 0
-        and not fallback_reason
-    ):
-        return "actual_copy_negative_insufficient_sample"
-    return fallback_reason
+    if loss_pct >= float(cumulative_medium_loss_pct):
+        return "actual_copy_cumulative_loss_over_2pct"
+    if loss_pct >= float(cumulative_low_loss_pct):
+        return "actual_copy_cumulative_loss_over_0_5pct"
+    return None
 
 
 def persist(
@@ -521,6 +521,8 @@ def assess_actual_copy(
     fallback_reason: Optional[str] = None,
     complete: bool = True,
     min_confirmation_hours: float = 72.0,
+    cumulative_low_loss_pct: float = 0.005,
+    cumulative_medium_loss_pct: float = 0.02,
     cumulative_high_loss_pct: float = 0.08,
     position_table: str = "copy_position",
 ) -> tuple[RiskAssessment, dict]:
@@ -532,11 +534,28 @@ def assess_actual_copy(
         if prior_reason and not prior_reason.startswith("actual_copy_"):
             preserved_fallback = assessment_reason(prior_reason)
     evidence = actual_copy_evidence(db, addr, position_table=position_table)
-    reason = actual_copy_reason(
+    actual_reason = actual_copy_reason(
         evidence,
-        fallback_reason=preserved_fallback,
+        cumulative_low_loss_pct=cumulative_low_loss_pct,
+        cumulative_medium_loss_pct=cumulative_medium_loss_pct,
         cumulative_high_loss_pct=cumulative_high_loss_pct,
     )
+    actual_kind = reason_kind(actual_reason)
+    fallback_kind = reason_kind(preserved_fallback)
+    reason = actual_reason
+    if preserved_fallback and (
+        fallback_kind == HIGH
+        or actual_kind != HIGH
+    ):
+        # Structural/data/funding controls must not be erased by an advisory
+        # percentage band.  A newly proven actual-Copy high still outranks any
+        # non-high fallback and is persisted before execution is disabled.
+        reason = preserved_fallback
+    evidence["riskThresholds"] = {
+        "lowLossPct": float(cumulative_low_loss_pct),
+        "mediumLossPct": float(cumulative_medium_loss_pct),
+        "highLossPct": float(cumulative_high_loss_pct),
+    }
     actual_evidence_complete = bool(
         reason and str(reason).startswith("actual_copy_")
     )

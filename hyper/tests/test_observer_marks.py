@@ -2280,7 +2280,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual("medium", registry["risk_level"])
         self.assertIn(
-            "actual_copy_30d_conservative_pnl_not_positive",
+            "actual_copy_cumulative_loss_over_2pct",
             registry["risk_reasons_json"],
         )
         self.assertTrue(registry["risk_assessed_at"])

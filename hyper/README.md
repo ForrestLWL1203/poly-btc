@@ -299,13 +299,17 @@ and required market paths, then reruns the pre-strict Top32 and profit-aligned T
 incumbents form the effective membership floor; requalify wallets remain eligible for strict recovery but no
 longer reserve a seat. Actual-Copy risk is persisted before membership formation, independently of whether the
 later daily publication succeeds; Observer also refreshes it after settlements and every five minutes.
-Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
+Historical profitability/activity qualification failures remain retention/selection audit and do not create a
+financial-risk badge. Actual-Copy financial risk uses 30-day conservative loss divided by the earliest recorded
+opening account equity in the window: below 0.5% is normal, 0.5%–2% low, 2%–8% medium, and 8% or more high.
+Dollar loss, trade count and elapsed confirmations do not affect the band; positive unrealized PnL receives zero
+weight. Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
 than 16 seats, daily may append the highest strict proposal. With automatic tuning enabled it uses the same
 single count-first local-surface formation as complete discovery; resulting membership drift is confirmed on
 that surface and never starts an exact-membership closure.
 Hard financial safety is limited to a verified source self-liquidation plus fresh zero-equity/no-position
-snapshots, one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity, or at least
-two actual Copy closes whose 30-day cumulative conservative loss reaches 8% of the opening-equity reference.
+snapshots, one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity, or 30-day
+cumulative conservative actual-Copy loss reaching at least 8% of the opening-equity reference.
 The cumulative case may recover through later profits; the single-event cases remain durable. Legacy
 positions with no opening-equity value cannot prove that threshold. A zero-equity/no-position wallet without
 liquidation evidence is recoverable unavailable; structural HFT/DCA/hedge/unexecutable-market failures use a

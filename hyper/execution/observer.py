@@ -836,6 +836,8 @@ class Observer:
                 assessed_at=stamp,
                 complete=True,
                 min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+                cumulative_low_loss_pct=config.ACTUAL_COPY_LOW_RISK_LOSS_PCT,
+                cumulative_medium_loss_pct=config.ACTUAL_COPY_MEDIUM_RISK_LOSS_PCT,
                 cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
                 position_table=self.taker.pos_table,
             )

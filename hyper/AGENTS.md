@@ -457,21 +457,18 @@ context but has no permission effect. Existing copied positions whose source los
 managed exit-only.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
-per-coin limits. Complete and daily assessments use the same risk state machine. The first ordinary
-7d/return/PF/activity/sample/open-rate or low-sample actual-Copy failure is low risk. A second independent
-successful assessment at least 72 hours later is medium risk; non-positive 30-day closed/conservative PnL,
-open loss above 50% of 30-day closed profit, or actual 30-day conservative loss with at least three closed
-positions is immediately medium. Low/medium remain Core with entry permission, and one complete healthy
-assessment clears them. Data/path/valuation failures do not advance confirmation. Structural failures block
-execution without masquerading as high financial risk. Zero equity/no positions without liquidation proof is
-recoverable unavailable. Verified source zeroing and Canonical/actual Copy liquidation loss at or above 8% of
-opening equity are durable high-risk events and immediately remove new-open authority.
-Actual Copy also accumulates closed realized PnL plus open realized PnL and all negative unrealized PnL over
-30 days against the earliest recorded opening account equity in that window. At least two closed positions and
-an 8% cumulative conservative loss is recoverable high risk: later profit below 8% lowers it to medium, and a
-healthy net-positive assessment clears it. Observer refreshes this projection after settlements and every
-five-minute account snapshot; daily refresh persists it before selection work, so a later publication failure
-cannot erase the day's risk label. Ordinary losses and 5%–8% isolated liquidations remain advisory evidence.
+per-coin limits. Historical 7d/return/PF/activity/sample/open-rate failures belong to retention and selection
+audit; they do not create a financial-risk badge. Data/path/valuation failures do not advance financial risk.
+Structural failures block execution without masquerading as financial risk. Zero equity/no positions without
+liquidation proof is recoverable unavailable. Verified source zeroing and Canonical/actual Copy liquidation loss
+at or above 8% of opening equity are durable high-risk events and immediately remove new-open authority.
+Actual Copy accumulates closed realized PnL plus open realized PnL and all negative unrealized PnL over 30 days,
+then divides a conservative loss by the earliest recorded opening account equity in that window. Positive
+unrealized PnL has zero weight. Below 0.5% is normal, 0.5%–2% is low, 2%–8% is medium, and 8% or more is
+recoverable high; the boundaries depend only on percentage, never dollar loss, trade count, or elapsed
+confirmations. Low/medium retain entry permission. Later improvement moves directly to the matching lower band
+or normal. Observer refreshes this projection after settlements and every five-minute account snapshot; daily
+refresh persists it before selection work, so a later publication failure cannot erase the day's risk label.
 Observer persists `pending/confirmed/cleared`
 execution freezes separately from permanent risk evidence: a target self-liquidation fill blocks new opens/adds
 until standard and affected-DEX clearinghouse snapshots prove either recovery or zero equity with no positions.
