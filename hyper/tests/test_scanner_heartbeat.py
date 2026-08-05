@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hyper import storage
+from hyper import config, storage
 from hyper.discovery import scanner
 
 
@@ -57,6 +57,35 @@ class ScannerHeartbeatTests(unittest.TestCase):
                 "SELECT state,heartbeat_at FROM process_status WHERE name='scanner'"
             ).fetchone()
             self.assertEqual(tuple(row), ("idle", "2000-01-01T00:00:00Z"))
+            db.close()
+
+    def test_record_run_rolls_history_to_latest_five(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db, _ = self._database(directory)
+            for index in range(config.SCAN_HISTORY_KEEP_COUNT + 3):
+                scanner._record_run(
+                    db,
+                    f"run-{index}",
+                    0,
+                    index,
+                    index,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    commit=False,
+                )
+            db.commit()
+
+            rows = db.execute(
+                "SELECT started_at FROM scan_runs ORDER BY id DESC"
+            ).fetchall()
+            self.assertEqual(len(rows), config.SCAN_HISTORY_KEEP_COUNT)
+            self.assertEqual(
+                [row[0] for row in rows],
+                [f"run-{index}" for index in range(7, 2, -1)],
+            )
             db.close()
 
 

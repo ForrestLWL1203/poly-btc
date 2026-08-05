@@ -3,6 +3,8 @@
 import json
 import time
 
+from hyper import config
+
 from .common import iso_epoch, q1, qall, score100
 
 
@@ -182,6 +184,7 @@ def ep_discovery(db):
 
 
 def ep_scan_runs(db, limit):
+    limit = max(0, min(int(limit), int(config.SCAN_HISTORY_KEEP_COUNT)))
     rows = qall(db, "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
                     "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
                     "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"

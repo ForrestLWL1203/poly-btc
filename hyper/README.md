@@ -621,8 +621,8 @@ the local mock dashboard and inspect the rendered result.
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
 - Every scheduled full or Challenger scan runs `storage-maintenance` as `ExecStopPost`. It shares the scanner
   lock, expires 37-day fill history in indexed small batches, purges permanently blacklisted automation cache,
-  expires per-wallet audit detail older than 90 days, preserves the current/full/in-progress and latest 30
-  generation snapshots, and records physical WAL plus active/checkpointed frames. It never runs `VACUUM`;
+  compacts generation workspace by lifecycle, keeps only the latest five scan-run summaries, and records
+  physical WAL plus active/checkpointed frames. It never runs `VACUUM`;
   after committing it uses PASSIVE checkpoint and truncates only a fully checkpointed, unblocked WAL. SQLite
   connections set a 64 MiB `journal_size_limit`.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or

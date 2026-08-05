@@ -242,6 +242,24 @@ class StorageGuardTests(unittest.TestCase):
             self.db.execute("SELECT state FROM execution_signal").fetchone()[0], "retryable",
         )
 
+    def test_storage_guard_trims_legacy_scan_history_to_latest_five(self):
+        self.db.executemany(
+            "INSERT INTO scan_runs (started_at,finished_at) VALUES (?,?)",
+            [(f"run-{index}", f"done-{index}") for index in range(8)],
+        )
+        self.db.commit()
+
+        deleted = storage_guard.trim_scan_history(self.db)
+        self.db.commit()
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(
+            [row[0] for row in self.db.execute(
+                "SELECT started_at FROM scan_runs ORDER BY id DESC"
+            )],
+            [f"run-{index}" for index in range(7, 2, -1)],
+        )
+
     def test_critical_disk_state_takes_precedence(self):
         result = storage_guard.run(
             self.db,

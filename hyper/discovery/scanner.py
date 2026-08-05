@@ -7228,6 +7228,7 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
          int(retention_metrics.get("confirmedDemotion") or 0),
          int(retention_metrics.get("safetyExit") or 0),
          int(bool(retention_metrics.get("replacementBlocked")))))
+    storage_guard.trim_scan_history(db)
     if commit:
         db.commit()
 

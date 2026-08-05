@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dashboard.api import discovery as api_discovery
-from hyper import params, storage
+from hyper import config, params, storage
 
 
 class CompactDiscoveryDb:
@@ -192,6 +192,24 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertEqual(res["runs"][0]["coreRecovered"], 1)
         self.assertEqual(res["runs"][0]["coreSafetyExit"], 1)
         self.assertTrue(res["runs"][0]["replacementBlocked"])
+
+    def test_scan_runs_api_never_returns_more_than_five_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA)
+            db.executemany(
+                "INSERT INTO scan_runs (started_at,finished_at) VALUES (?,?)",
+                [(f"run-{index}", f"done-{index}") for index in range(8)],
+            )
+            db.commit()
+
+            res = api_discovery.ep_scan_runs(db, 100)
+            db.close()
+
+        self.assertEqual(len(res["runs"]), config.SCAN_HISTORY_KEEP_COUNT)
+        self.assertEqual(
+            [run["at"] for run in res["runs"]],
+            [f"run-{index}" for index in range(7, 2, -1)],
+        )
 
 
 if __name__ == "__main__":

@@ -200,6 +200,7 @@ class WebStaticAssetsTests(unittest.TestCase):
             self.assertIn(f'from "./{rel}"', discovery)
 
         self.assertIn('export { ScanMask } from "./discovery/ScanMask.jsx"', discovery)
+        self.assertIn('/api/scan-runs?limit=5', discovery)
         self.assertNotIn("function PipelineSummary(", discovery)
         self.assertNotIn("PipelineSummary", discovery)
         self.assertNotIn("const STAGES_FE", discovery)

@@ -264,21 +264,18 @@ def _prune_pipeline_workspace(
     )
 
 
-def _prune_scan_summaries(
-    db: sqlite3.Connection,
-    now_epoch: float,
-    *,
-    dry_run: bool = False,
-) -> int:
-    cutoff = _iso(now_epoch - float(config.SCAN_SUMMARY_RETENTION_DAYS) * 86400)
-    return _delete_batches(
-        db,
-        "scan_runs",
-        "(COALESCE(finished_at,started_at)<? OR id NOT IN ("
-        "SELECT id FROM scan_runs ORDER BY id DESC LIMIT ?))",
-        (cutoff, int(config.SCAN_SUMMARY_KEEP_COUNT)),
-        dry_run=dry_run,
+def trim_scan_history(db: sqlite3.Connection, *, dry_run: bool = False) -> int:
+    """Keep only the newest compact scan summaries without committing the caller's transaction."""
+    keep_count = max(1, int(config.SCAN_HISTORY_KEEP_COUNT))
+    where = (
+        "id NOT IN (SELECT id FROM scan_runs ORDER BY id DESC LIMIT ?)"
     )
+    count = int(db.execute(
+        f"SELECT COUNT(*) FROM scan_runs WHERE {where}", (keep_count,),
+    ).fetchone()[0] or 0)
+    if count and not dry_run:
+        db.execute(f"DELETE FROM scan_runs WHERE {where}", (keep_count,))
+    return count
 
 
 def prune_execution_transients(
@@ -558,7 +555,7 @@ def run(
     execution_cleanup = prune_execution_transients(
         db, now_epoch=now_epoch, dry_run=dry_run,
     )
-    deleted_scan_runs = _prune_scan_summaries(db, now_epoch, dry_run=dry_run)
+    deleted_scan_runs = trim_scan_history(db, dry_run=dry_run)
     if not dry_run:
         db.commit()
     checkpoint = {

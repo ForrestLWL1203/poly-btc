@@ -55,7 +55,7 @@ GET_ROUTES = {
     "/api/positions": lambda db, qs: ep_positions(db, qs),
     "/api/wallets": lambda db, qs: ep_wallets(db, qs),
     "/api/discovery": lambda db, qs: ep_discovery(db),
-    "/api/scan-runs": lambda db, qs: ep_scan_runs(db, int(qs.get("limit", [20])[0])),
+    "/api/scan-runs": lambda db, qs: ep_scan_runs(db, int(qs.get("limit", [5])[0])),
     "/api/params": lambda db, qs: ep_params(db, include_score_dist=_truthy(qs, "includeScoreDist")),
     "/api/scan-status": lambda db, qs: ep_scan_status(db),
     "/api/score-dist": lambda db, qs: ep_score_dist(db),

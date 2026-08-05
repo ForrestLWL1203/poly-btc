@@ -13,7 +13,7 @@ export function Discovery({ scanning, startRescan, confirm }) {
   const load = useCallback(async () => {
     const [discovery, scanRuns] = await Promise.all([
       api.get("/api/discovery"),
-      api.get("/api/scan-runs?limit=8"),
+      api.get("/api/scan-runs?limit=5"),
     ]);
     return { discovery, runs: scanRuns.runs };
   }, []);

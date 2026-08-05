@@ -103,13 +103,11 @@ ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5
 
 # Long-running storage guard. Per-wallet discovery detail is resumable workspace;
 # compact published selection/strategy state remains authoritative.
-# Discovery detail is generation-scoped workspace, not historical audit.  The
-# old 90-day/30-generation knobs remain intentionally retired; completed
-# generations are compacted by lifecycle state instead of age.
+# Discovery detail is generation-scoped workspace, not historical audit.
+# Completed generations are compacted by lifecycle state instead of age.
 PIPELINE_DETAIL_RETENTION_DAYS = 0
 LEADERBOARD_STAGING_KEEP_GENERATIONS = 0
-SCAN_SUMMARY_RETENTION_DAYS = 90
-SCAN_SUMMARY_KEEP_COUNT = 30
+SCAN_HISTORY_KEEP_COUNT = 5
 EXECUTION_DIAGNOSTIC_RETENTION_DAYS = 7
 EXECUTION_RECONCILE_ANOMALY_RETENTION_DAYS = 90
 STORAGE_DELETE_BATCH_ROWS = 2_000
