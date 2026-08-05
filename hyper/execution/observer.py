@@ -809,6 +809,18 @@ class Observer:
             return "wallet_risk_blocked"
         if addr in self.entry_frozen:
             return "retention_probation"
+        if side and any(
+            str(position.get("coin") or "") == str(coin)
+            and str(position.get("side") or "") != str(side)
+            and f(position.get("rem_size")) > config.FLAT
+            for position in book.open_ep.values()
+        ):
+            # Hyperliquid currently exposes one net position per account and
+            # market, not independent hedge-mode long/short legs.  Preserve a
+            # deterministic first-direction-wins policy: later source wallets
+            # taking the opposite side are observed but never copied until the
+            # existing direction is fully flat.
+            return "coin_direction_conflict"
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
             if str(position.get("addr") or "").lower() == addr
@@ -2357,7 +2369,11 @@ class Observer:
         else:
             exit_px = self._mark_px(coin, ep["entry_px"])
         full = frac >= 0.999
-        attempts = 6 if self.execution_mode == "live" and full else 1
+        # LiveExecutor already owns bounded IOC attempts and deterministic
+        # recovery.  Re-entering it six times here repeated full REST
+        # pre/post reconciliation after a verified rejection or 429, creating
+        # a request storm without making the operator close more likely.
+        attempts = 1
         last_error = None
         for attempt in range(attempts):
             token = None

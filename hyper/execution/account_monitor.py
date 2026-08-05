@@ -64,6 +64,8 @@ class LiveAccountMonitor:
         self._last_position_recovery_fill_at = 0.0
         self._last_open_orders_at = 0.0
         self._last_spot_at = 0.0
+        self._consumer_busy = False
+        self._lag_recovery_until_drained = False
         self._meta_lock = threading.RLock()
         self._subscriptions = self._build_subscriptions()
         self._required_acks = {_subscription_key(item) for item in self._subscriptions}
@@ -93,6 +95,8 @@ class LiveAccountMonitor:
             self.state = str(state)
             if error:
                 self.last_error = str(error)[:160]
+            elif state == "healthy":
+                self.last_error = None
             if state == "healthy" and prior != "healthy":
                 self.healthy_since = time.time()
             elif state != "healthy":
@@ -149,7 +153,14 @@ class LiveAccountMonitor:
                 self.last_message_at
                 and time.time() - float(self.last_message_at) <= float(config.ACCOUNT_WS_STALE_S)
             )
+            replaying = self._consumer_busy or not self.queue.empty()
         if result and result.get("ok") and connected and recent and self._ready.is_set():
+            # Messages received while the authoritative REST pull was in flight
+            # are a recovery replay, not evidence that the live queue is still
+            # falling behind.  Let the ordered consumer drain that bounded
+            # backlog before queue-lag alarms become eligible again.
+            with self._meta_lock:
+                self._lag_recovery_until_drained = bool(replaying)
             self._set_state("healthy")
 
     def mark_degraded(self, error: str) -> None:
@@ -384,6 +395,8 @@ class LiveAccountMonitor:
     async def _consume(self) -> None:
         while not self._stop:
             received, message = await self.queue.get()
+            with self._meta_lock:
+                self._consumer_busy = True
             try:
                 await self._ready.wait()
                 lag_ms = max(0.0, (time.monotonic() - float(received)) * 1000.0)
@@ -403,7 +416,14 @@ class LiveAccountMonitor:
                         self._last_open_orders_at = now
                     elif channel == "spotState":
                         self._last_spot_at = now
-                if lag_ms > 2000:
+                    lag_alarm_suppressed = self._lag_recovery_until_drained
+                    healthy = self.state == "healthy"
+                # A completed isolated event is no longer a queue backlog.  In
+                # production SQLite writer contention can make that one event
+                # take >2s; escalating after it has committed caused a REST
+                # audit loop and 429s even though the queue was already empty.
+                if lag_ms > 2000 and healthy and not lag_alarm_suppressed \
+                        and not self.queue.empty():
                     self.mark_degraded("account_ws_queue_lag")
             except Exception as exc:  # noqa: BLE001 - a corrupt account event is fail closed
                 self._set_state(
@@ -412,6 +432,11 @@ class LiveAccountMonitor:
                 self.executor.freeze_from_monitor("ACCOUNT_WS_EVENT_INVALID")
             finally:
                 self.queue.task_done()
+                with self._meta_lock:
+                    self._consumer_busy = False
+                    if self.queue.empty():
+                        self.queue_lag_ms = 0
+                        self._lag_recovery_until_drained = False
 
     async def _ping_loop(self, conn) -> None:
         while not self._stop:

@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 
 from hyper import storage
@@ -227,6 +228,65 @@ class AccountWsMonitorTests(unittest.TestCase):
 
         self.assertEqual((executor.equity, executor.available), (1234.0, 1200.0))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM live_copy_position").fetchone()[0], 0)
+
+    def test_isolated_slow_event_does_not_leave_monitor_degraded(self):
+        async def run():
+            monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
+            monitor._ready.set()
+            monitor._set_state("healthy")
+            monitor.queue.put_nowait((
+                time.monotonic() - 3.0,
+                {"channel": "userNonFundingLedgerUpdates", "data": {}},
+            ))
+            consumer = asyncio.create_task(monitor._consume())
+            await monitor.queue.join()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            self.assertEqual(monitor.state, "healthy")
+            self.assertEqual(monitor.queue_lag_ms, 0)
+
+        asyncio.run(run())
+
+    def test_sustained_slow_backlog_degrades_monitor(self):
+        async def run():
+            monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
+            monitor._ready.set()
+            monitor._set_state("healthy")
+            message = {"channel": "userNonFundingLedgerUpdates", "data": {}}
+            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+            consumer = asyncio.create_task(monitor._consume())
+            await monitor.queue.join()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            self.assertEqual(monitor.state, "degraded")
+            self.assertEqual(monitor.last_error, "account_ws_queue_lag")
+
+        asyncio.run(run())
+
+    def test_rest_recovery_replay_does_not_retrigger_queue_lag(self):
+        async def run():
+            monitor = LiveAccountMonitor(self._executor(), mode="ws_primary")
+            monitor._ready.set()
+            monitor._conn = object()
+            monitor.last_message_at = time.time()
+            monitor.mark_degraded("account_ws_queue_lag")
+            message = {"channel": "userNonFundingLedgerUpdates", "data": {}}
+            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+            monitor.queue.put_nowait((time.monotonic() - 3.0, message))
+
+            monitor.restore_after_rest({"ok": True})
+            consumer = asyncio.create_task(monitor._consume())
+            await monitor.queue.join()
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+            self.assertEqual(monitor.state, "healthy")
+            self.assertIsNone(monitor.last_error)
+            self.assertFalse(monitor._lag_recovery_until_drained)
+            self.assertEqual(monitor.queue_lag_ms, 0)
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -1115,6 +1115,32 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_opposite_coin_direction_is_blocked_until_existing_side_is_flat(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            ep.update(coin="BTC", addr="0xaaa")
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            self.assertEqual(
+                obs._new_exposure_block_reason("0xbbb", "BTC", side="short"),
+                "coin_direction_conflict",
+            )
+            self.assertIsNone(
+                obs._new_exposure_block_reason("0xbbb", "BTC", side="long"),
+            )
+
+            ep["rem_size"] = 0.0
+            self.assertIsNone(
+                obs._new_exposure_block_reason("0xbbb", "BTC", side="short"),
+            )
+
+        asyncio.run(run())
+
     def test_manual_close_uses_taker_ask_for_short(self):
         async def run():
             db = self._db()
@@ -1133,6 +1159,30 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertEqual(res["exit"], 202.0)
             action = db.execute("SELECT our_px FROM copy_action WHERE pos_id=?", (pos_id,)).fetchone()
             self.assertEqual(action["our_px"], 202.0)
+
+        asyncio.run(run())
+
+    def test_live_manual_close_does_not_repeat_failed_executor_cycle(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.execution_mode = "live"
+            obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
+
+            with patch.object(
+                obs, "_apply_reduce", new_callable=AsyncMock,
+                side_effect=RetryableSignalError("live_reduce_execution_failed"),
+            ) as reduce:
+                with self.assertRaisesRegex(RuntimeError, "manual_close_incomplete"):
+                    await obs._cmd_close(
+                        pos_id, source_event_id="command:test:position:1",
+                    )
+
+            reduce.assert_awaited_once()
 
         asyncio.run(run())
 
