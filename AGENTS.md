@@ -9,8 +9,9 @@ This repository is a multi-product copy-trade workspace:
 - Future product business logic belongs in a separate top-level package such as `polymarket/`.
 - `data/` and `secret/` are shared runtime locations, not source modules.
 
-For any Hyperliquid change, including the current Dashboard's Hyperliquid projections and controls, read
-`hyper/AGENTS.md` and then the private local `hyper/CLAUDE.md` before acting.
+For any Hyperliquid change, including Dashboard projections and controls, read `hyper/AGENTS.md` completely,
+then read the private operational notes in `hyper/CLAUDE.md`. `hyper/AGENTS.md` is the authoritative behavioral
+contract; `hyper/CLAUDE.md` must not duplicate or override product rules.
 
 ## Shared rules
 
@@ -29,14 +30,19 @@ For any Hyperliquid change, including the current Dashboard's Hyperliquid projec
   that exact key operation; routine inspection or deployment is not authorization to change keys.
 - Preserve unrelated worktree changes and never use destructive Git resets without explicit approval.
 - Update the owning module's docs, tests, launcher/service paths, and build commands when moving an entry point.
+- A code deployment is not permission to start, stop, pause, drain, or change the selected Paper/Live mode.
+  Preserve the current production runtime state unless the user explicitly asks to change it.
 
 ## Current verification
 
 Run from the repository root:
 
 ```bash
-python3 -m compileall -q hyper dashboard
-python3 -m unittest discover -s hyper/tests
+.venv/bin/python -m compileall -q hyper dashboard
+.venv/bin/python -m unittest discover -s hyper/tests
 dashboard/web/build.sh
 hyper/launcher/web/build.sh
 ```
+
+Use `python3` only when the repository virtual environment is unavailable and the required dependencies are
+installed in that interpreter.

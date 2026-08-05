@@ -1,799 +1,421 @@
 # AGENTS.md
 
-## Scope
+## Purpose and authority
 
-This repository is organized as a multi-product copy-trade workspace. The active product is Hyperliquid:
+This file is the current engineering and production contract for the Hyperliquid product. Read it completely
+before changing anything under `hyper/` or any Hyperliquid projection/control under `dashboard/`.
 
-- leaderboard discovery and wallet profiling;
-- copyability scoring and canonical copy replay;
-- a bounded quality pre-Core pool followed by count-specific adaptive portfolio tuning and strict publication;
-- a mode-bound Paper/Mainnet Observer with durable Live signal recovery;
-- a read-oriented Dashboard API and React dashboard;
-- local/VPS process and deployment tooling.
+- Verify details against current code and migrations; never revive behavior from an old note or screenshot.
+- `hyper/CLAUDE.md` contains private operational access notes only. It must not redefine strategy behavior.
+- Historical documents in `hyper/docs/` explain decisions but do not override this contract or current code.
+- Avoid hardcoding tuned production values in documentation. Runtime strategy values come from the active
+  immutable strategy revision; defaults come from `hyper/config.py`.
 
-Old non-Hyperliquid research scripts are not part of the active runtime. Read `CLAUDE.md` first for private
-local notes, then verify any assumption against the current code and database schema.
+Repository ownership:
 
-Repository boundaries:
+- `hyper/` owns Hyperliquid discovery, replay, selection, execution, tests, docs, and deployment tooling.
+- Business code belongs in `discovery/`, `copy/`, `selection/`, `market/`, `execution/`, or `ops/`.
+- `dashboard/` reads product state and writes only through the documented command/parameter control plane.
+- `data/` and `secret/` are runtime locations, never source modules or commit material.
 
-- `hyper/` owns Hyperliquid business logic, CLI entry points, tests, docs, and its deployment launcher.
-- Keep new business modules inside the owning responsibility package: `discovery/`, `copy/`, `selection/`,
-  `market/`, `execution/`, or `ops/`. The `hyper/` root is reserved for shared `config`, `params`, `storage`,
-  and `util` primitives; do not add new flat business modules there.
-- `dashboard/` owns the shared Dashboard server/API and frontend. It may present multiple products later.
-- Future product implementations belong in their own top-level package, for example `polymarket/`.
+## Non-negotiable production invariants
 
-## Non-negotiable invariants
+### Secrets and remote access
 
-- `data/hl.db` is the normal SQLite state store and runs in WAL mode.
-- Dashboard code reads business state and writes only `commands` and `params`.
-- Scanner and Observer are the writers of discovery/trading state. Do not make Dashboard routes mutate
-  `profile`, `watchlist`, `follow_selection`, `copy_position`, or other business tables directly.
-- A published, complete, current `scan_generation` plus its `follow_selection` rows is the source of truth
-  for new copy opens. Do not infer production membership from `MIN_FOLLOW_SCORE`, row order, or the raw
-  `watchlist` table.
-- Once an immutable strategy revision exists, Observer executes its parameter and target snapshots. The
-  revision's generation, Core rows, per-wallet sector policies, and follow parameters must agree; missing
-  or corrupt execution context fails closed.
-- A published generation may intentionally have zero Core wallets. Do not fall back to an old score line in
-  that case. Before the first successful selection generation, Observer may run idle; existing open copies
-  are still managed exit-only.
-- Only executable product markets may reach profile economics or replay: standard Crypto perpetuals and the
-  transparent `xyz:*` stock/index/commodity namespace. Spot, `#<id>` outcome/settlement rows, and opaque
-  builder namespaces are out of scope.
-- Settings saves must not start a scan. A scan starts from the explicit Dashboard action or the configured
-  automatic cadence.
-- Every complete discovery scan is a strict membership reset: every unstarred incumbent competes as an
-  ordinary current-generation candidate and drops when it is not selected. Only a currently active,
-  operator-starred Core may enter the bounded incumbent-retention lane; hard safety, structural and incomplete
-  evidence gates still revoke that protection. There is no promotion confirmation or forced minimum tenure.
-  Challenger
-  daily refresh is the deliberate exception: it may publish only the same Core set or a strict superset, never
-  a removal or replacement. Expensive optimization runs only for a proven daily promotion or when explicitly
-  requested; an evidence-only refresh must not silently start a parameter grid. Automatic daily removal has
-  two hard-safety exceptions: a recent exchange-labelled self-liquidation followed by a fresh zero-equity/no-
-  position clearinghouse snapshot, or a canonical Copy liquidation losing at least 8% of its episode-opening
-  dynamic equity. Ordinary losses, sub-8% Paper liquidations and rolling-return declines never satisfy them.
-- Dashboard business failures are not data errors. Reserve “数据异常” for collection, cache, replay, valuation-
-  pipeline, or immutable-strategy integrity failures; an incomplete open-position mark is the explicit
-  “开放仓位估值待确认” observation state, not a generic data-error badge.
-- Reuse the Dashboard's shared `.btn` variants and nearby component patterns. Do not introduce one-off inline
-  or private button skins when an existing neutral/accent/go/stop/danger variant expresses the action.
-- Never expose, print, commit, or copy secrets, private keys, target files, live databases, or private VPS
-  values. The active VPS connection is available locally; `secret/vps.txt` is its canonical source. Keep values
-  there, re-read it before remote work, and never substitute a remembered or hardcoded target.
-- Authenticate to the active VPS with the established local `~/.ssh/id_ed25519` key and `IdentitiesOnly=yes`.
-  Use the password only for bootstrap/recovery when that key is not yet accepted. Never generate a keypair or
-  add, replace, rotate, or remove any local/remote SSH key without explicit user authorization for that exact
-  key operation; deployment permission alone never permits SSH-key changes.
+- Never expose, print, commit, or copy private keys, credentials, target files, live databases, or private VPS
+  values. Inspect structure without emitting values.
+- Re-read `secret/vps.txt` before every remote operation. Never use a remembered or hardcoded target.
+- Use the established `~/.ssh/id_ed25519` with `IdentitiesOnly=yes`. Password authentication is recovery-only.
+- Do not create, install, rotate, replace, or remove SSH keys without explicit authorization for that exact key
+  operation.
+
+### State ownership and control
+
+- The normal store is `data/hl.db`, using SQLite WAL.
+- Scanner owns discovery/generation state. Observer and LiveExecutor own trading state. Dashboard must not
+  directly mutate profiles, selections, positions, actions, signals, orders, fills, or sessions.
+- Dashboard writes only `commands` and operator-editable `params`; workers validate and apply those requests.
+- A deployment must preserve the current Observer state and selected Paper/Live mode. Restart only the affected
+  service, and never start/stop/pause/drain trading unless the user requested it.
+- `hl-scan.service` starts a real scan. Never include it in a broad restart just to load new code.
+
+### Paper/Live boundary
+
+- Paper and Live share target discovery, Core membership, strategy decisions, and sizing logic, but their books
+  are completely isolated:
+  - Paper: `copy_position`, `copy_action`;
+  - Live: `live_copy_position`, `live_copy_action`, execution sessions/signals/intents/attempts/fills.
+- The selected mode alone determines which held positions Observer polls and manages. A Paper position must
+  never keep a Live wallet in the polling set, block a Live exit, or affect Live counts, and vice versa.
+- Switching Paper/Live is forbidden while Observer is running. Stop Observer first, switch, then restart.
+- The shared Core wallet set is not recollected when switching modes.
+
+### Published strategy truth
+
+- New entries come only from the complete, current, published `scan_generation`, its `follow_selection`, and the
+  active immutable `strategy_revision` snapshot.
+- Do not infer Core from `watchlist`, score thresholds, table order, Paper positions, or stale audit rows.
+- A published generation may legitimately contain zero Core. Never fall back to an older score line.
+- Every activated strategy revision must descend from the previously active revision. Normal scan, daily refresh,
+  calibration, and manual parameter publication all preserve this chain.
+- A valid descendant revision is hot-bound into a running Live session. Core or parameter publication must not
+  pause entries, restart Observer, rescale existing positions, or require operator recovery.
+- Only the narrowly identified legacy parentless-publication repair may reconstruct lineage. It may auto-resume
+  only after a fresh exchange reconcile and live-ledger projection prove zero unknown positions, unknown orders,
+  and ambiguous intents. Real ambiguity, drift, or operator pause remains fail-closed.
+- Missing/corrupt revision targets, sector policy, generation linkage, or parameter snapshot is an integrity
+  failure; do not silently reconstruct it from mutable current tables.
 
 ## Runtime map
 
 | Concern | Primary files |
 |---|---|
-| CLI discovery | `hyper/cli/discover.py`, `hyper/discovery/scanner.py` |
-| Generation staging/publication | `hyper/discovery/generation.py`, `hyper/selection/state.py`, `hyper/selection/strategy_revision.py` |
-| Profile metrics/gates | `hyper/discovery/metrics.py`, `hyper/discovery/scanner_copy_bt.py`, `hyper/selection/follow_score.py` |
-| Cached fills/replay inputs | `hyper/copy/fills.py`, `hyper/copy/copy_data.py`, `hyper/copy/copy_evidence.py` |
-| Generation market snapshot | `hyper/market/generation_market.py`, `hyper/market/volatility.py` |
-| Sector specialization | `hyper/copy/sector.py`, `hyper/copy/copy_data.py` |
-| Canonical copy replay | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/copy/fill_transition.py` |
-| Core formation/tuning | `hyper/selection/core_formation.py`, `hyper/selection/auto_tune.py`, `hyper/copy/sizing.py` |
-| Observer/paper execution | `hyper/cli/observe.py`, `hyper/execution/observer.py`, `hyper/market/rest.py`, `hyper/market/ws.py` |
-| Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
-| Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, `dashboard/web/app.css`, compiled `dashboard/web/app.js` |
-| Launcher/process control | `hyper/launcher/launcher.py`, `hyper/launcher/server.py`, `hyper/launcher/core/*`, `hyper/launcher/web/*` |
-| Shared schema/migrations | `hyper/storage.py` |
-| Safe Paper reset | `hyper/ops/paper_reset.py`, `hyper/cli/discover.py reset-paper` |
-| Tunable values | `hyper/config.py`, `hyper/params.py`, SQLite `params` table |
+| Discovery CLI/orchestration | `hyper/cli/discover.py`, `hyper/discovery/scanner.py` |
+| Generation staging/publication | `hyper/discovery/generation.py`, `hyper/selection/state.py` |
+| Profiles and gates | `hyper/discovery/metrics.py`, `hyper/discovery/scanner_copy_bt.py`, `hyper/selection/follow_score.py` |
+| Fill/cache/replay inputs | `hyper/copy/fills.py`, `hyper/copy/copy_data.py`, `hyper/copy/economics.py` |
+| Canonical replay/sizing | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/copy/sizing.py` |
+| Core formation/tuning | `hyper/selection/core_formation.py`, `hyper/selection/auto_tune.py` |
+| Immutable revisions | `hyper/selection/strategy_revision.py` |
+| Market data | `hyper/market/rest.py`, `hyper/market/ws.py`, `hyper/market/generation_market.py`, `hyper/market/volatility.py` |
+| Observer/execution | `hyper/cli/observe.py`, `hyper/execution/observer.py`, `hyper/execution/live_executor.py` |
+| Credentials/preflight/control | `hyper/execution/credentials.py`, `hyper/execution/live_preflight.py`, `hyper/execution/control.py` |
+| Dashboard API/frontend | `dashboard/server.py`, `dashboard/api/*`, `dashboard/web/*` |
+| Services/deployment | `hyper/ops/procman.py`, `hyper/launcher/core/*` |
+| Schema/migrations/retention | `hyper/storage.py`, `hyper/ops/storage_guard.py` |
+| Tunable values | `hyper/config.py`, `hyper/params.py`, SQLite `params` |
 
-## Discovery and selection pipeline
+## Discovery, profiling, and Core formation
 
-The production flow is:
+### Scheduled pipeline
 
-`Leaderboard staging → $250k volume/PnL-direction recall → permanent automation-address subtraction → hybrid eager-new/fill-first cached Perp-volume proof
-→ executable-market fill cache → structural hard gates → generation-frozen activity + fills-only conservative
-Copy/PF/lottery gates → scored Top32 evidence pool →
-profile-stage handoff to a fresh process → freeze profit-aligned Top16 →
-current-surface bounded count center → one n±1 local tier tune with n±2 guards → at most three strict finalists →
-one winning-surface individual strict pass across frozen Top16 → same-surface bounded final count → one shared path certification →
-atomic generation/selection/strategy revision publish →
-Observer reload → replay-summary materialization`
+The production path is:
 
-`AUTO_TUNE_MARGIN_ENABLE=false` is a hard fixed-surface contract for automatic complete and Challenger
-generations. Membership or ordering changes may not re-enable the tuner. The active parameters still receive
-the complete individual/shared strict contract; congestion, insufficient open coverage or portfolio risk must
-shrink the profit-aligned Core prefix through the existing bounded adaptive count search (for example
-`16 → 8 → 12 → 10`), never sequential count enumeration. No feasible non-empty prefix may publish as an
-intentional zero-Core generation. When enabled, each generation may run at most one
-`count_first_local_surface_v2` formation; its main search uses one local-surface tune, and a material
-post-qualification count drift permits only one bounded exact-membership margin calibration. Membership changes
-after that calibration are strictly replayed on the chosen
-surface and may not start another pool. Top32 remains evidence/Challenger scope only; ranks 17-32 cannot be
-reabsorbed after the Top16 is frozen.
+```text
+Leaderboard staging
+→ cheap recall and permanent-automation blacklist subtraction
+→ Perp/executable-market proof and incremental 37-day fill cache
+→ structural/Profile/Rough Copy gates
+→ Top32 evidence and Challenger pool
+→ fresh finalizer process
+→ freeze profit-aligned Top16
+→ current-surface bounded Core-count search
+→ optional local three-tier tuning around n±1 with n±2 guards
+→ at most three strict finalists
+→ one winning-surface individual strict pass over frozen Top16
+→ same-surface final count and shared price-path certification
+→ atomic generation + selection + revision publication
+→ post-publication evidence cleanup
+```
 
-Tuning is bounded by candidate counts, never by wall-clock time. Scanner, Challenger and deferred-finalizer
-services have no total start timeout. A resource guard checkpoints and defers before OOM; the independent
-finalizer timer resumes a ready generation without refetching completed wallets. A prior Core left with a
-transient data error is retried alone: a complete frozen fill cache is reused directly, otherwise only its
-missing source delta is fetched before rebuilding current-generation Profile and Rough Copy evidence. The
-sealed generation market snapshot remains read-only throughout recovery. Per-request network timeouts and
-retry/deferred queues remain mandatory so a dead connection cannot block the generation forever.
-Every complete generation also persists its exact Profile workset in bounded pipeline audit detail. Profile
-transport/worker exceptions are consumed serially after the pool closes and may not be converted into a
-published omission. Transient generation-volatility failures are not memoized; the affected wallets are
-retried with bounded exponential backoff before the market snapshot seals. Terminal cache-integrity outcomes
-remain explicit quarantine evidence. Legacy/interrupted single-member holes may be closed only from frozen
-workset/Perp audit evidence and never by splicing a later market surface into the generation.
-Complete-scan and daily-refresh Profile threads must never share the writer connection: each task uses an
-independent query-only handle and returns artifacts to the parent, which is the only Profile/cache writer.
-Resume checks compact formation evidence before any replay allocation or resource gate. Cgroup
-`memory.current` remains telemetry only because it includes reclaimable SQLite file pages; deferral uses the
-process RSS/Swap, available memory, decoded-surface estimate and cgroup anonymous/unreclaimable working set.
-Strict-finalist paths are loaded only for a cache miss and released before Top16 individual replay.
-Individual formation evidence persists effective metrics, qualification and score only; full 30/14/7
-positions, equity paths and event trajectories must never enter `formation_prefix_evidence`. Legacy rows are
-trimmed with SQLite JSON projection before Python decodes them.
-Complete-scan retention overlays are limited to active operator-starred Core and must reuse those same
-winning-surface Top16 individual results before the one final shared certification. Unstarred incumbents never
-receive a retention overlay. Daily refresh may retain all current Core on the same cached evidence. Neither
-path may start a second individual strict pass or certify a provisional membership before retention and then
-replay a second effective membership.
-Final same-surface count search must apply the same actionable-open and capacity gates as atomic publication;
-those metrics cannot be treated as telemetry during count choice and then become blockers only at publish.
-Both tune-pool and final-membership fill sequences are lazy: persistent evidence lookup happens first, and a
-37-day fill sequence is decoded only for a true cache miss. Evidence-only recovery must therefore be able to
-derive a fully cached formation without touching fill/path loaders.
+- Complete discovery runs Monday and Thursday at 04:00 Asia/Shanghai.
+- Daily Challenger refresh runs on the other days at 04:00 and uses the latest complete full-scan evidence.
+- Settings saves never start a scan. Only the explicit command or configured schedule does.
+- No automatic scan/tuner/finalizer wall-clock deadline exists. Individual network requests still have finite
+  timeouts, retries, deferred queues, and resumable checkpoints.
+- A resource guard saves progress and defers before OOM. On hosts with at most 2 GiB RAM, replay remains
+  single-process/serial and reuses the longest fill/path context instead of multiplying it across workers.
 
-### 1. Generation safety
+### Candidate and cache rules
 
-Each scan gets a generation id. Leaderboard rows are written to staging and validated before profiles are
-accepted. The default validation requires:
+- New-wallet cheap recall requires at least $250,000 leveraged seven-day volume and non-negative 7d/30d PnL.
+  These are recall gates, not final economic qualification.
+- Only standard Crypto perpetuals and transparent `xyz:*` stock/index/commodity perps are executable. Spot,
+  `#<id>` outcomes/settlements, and opaque builder namespaces never enter metrics, replay, or execution.
+- A fresh history covers 37 days: 30 scoring days plus seven warm-up days. A proven complete cache uses source
+  cursor deltas and prunes the rolling window; it does not redownload all history each scan.
+- Source completeness comes from `fill_cache_state`, never from the earliest retained timestamp. Interrupted
+  pagination persists its continuation cursor.
+- High-confidence whole-wallet HFT, market-making, grid/DCA automation, or non-executable-market decisions enter
+  `wallet_scan_blacklist`. Future scans subtract them before Portfolio/history work and delete raw fill cache.
+  Ambiguous automation, temporary economic weakness, heavy-DCA behavior, and data failures remain recoverable.
+- Core, Challenger, Exit-only, and current-mode held-position wallets may bypass cheap recall for refresh/safe
+  exit, but receive no privilege at final qualification.
+- Each generation freezes its candidate order, fill evidence, market snapshot, and as-of time. Recovery must not
+  splice in a later market surface or refetch already complete wallets.
 
-- at least 85% of the previous valid leaderboard row count (except the first non-empty generation);
-- unique wallet addresses;
-- at least 99% complete leaderboard windows;
-- no malformed/empty snapshot.
+### Generation integrity
 
-An invalid or incomplete generation must retain the last published generation and must not publish a new
-selection, prune discovery state, or activate new parameters. `scan_generation`, `pipeline_audit`,
-`scan_progress`, `scan_runs`, and `strategy_revision` are the operational record.
+- Every scan has a generation id. Stage and validate Leaderboard data before accepting profiles.
+- A valid Leaderboard has unique addresses, complete windows, no malformed/empty snapshot, and normally at least
+  85% of the prior valid row count.
+- Incomplete data, missing frozen paths, worker failure, or integrity mismatch retains the previous published
+  generation. Never publish an omission as a complete result.
+- Profile workers use independent query-only connections and return artifacts to the parent writer. They do not
+  share the Scanner writer connection.
+- `pipeline_audit` is resumable workspace for the active generation, not permanent historical evidence.
 
-### 2. Candidate workset and profiles
+### Canonical Copy evidence
 
-- New-wallet Leaderboard recall requires leveraged 7d notional volume `$250,000` and non-negative 7d/30d PnL.
-  Nominal leveraged volume is activity evidence, never a profitability denominator. A new or incomplete-cache
-  wallet first asks official `perpWeek` to confirm at least `$250,000` of Perp-only seven-day volume so a clear
-  miss does not trigger a multi-page history bootstrap. A complete-cache wallet refreshes its source delta and
-  current structural evidence first: a structural failure ends the profile without Portfolio/state/replay, and
-  at least `$250,000` of seven-day executable Perp notional is a one-way local proof of the same official floor.
-  An inconclusive local volume result always falls back to official Portfolio; it is never a local rejection.
-  Account value, official ROI magnitude, positive-equity history duration, Perp PnL share and official
-  `perpMonth` profitability are not admission gates. Core, strict Challenger and open-position owners bypass
-  cheap recall only so the same generation can refresh or safely remove them; they receive no final-qualification
-  privilege from prior identity.
-- Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
-  and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
-  active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
-  tolerated only at the coarse-harvest layer.
-- `profit-distribution` is a non-publishing research path. It reads the source database in query-only mode and
-  bypasses ROI/PnL, win-rate, sample-depth and score gates during broad collection, while preserving structural
-  uncopyability, catastrophic source risk and data/path integrity checks. Before strict replay it separately
-  requires recurring OID-deduplicated open/flip opportunities: the latest seven days
-  must be active, at least three of four rolling seven-day buckets must be active and the maximum 28-day opening
-  gap must not exceed ten days. Sparse wallets remain in the research distribution but cannot consume strict
-  replay slots. Every requested source artifact and derived profile is committed to a private 0600 research
-  database, with an anonymous report checkpoint after rough collection and history repair; neither may be
-  substituted for a scan generation or strategy revision. `--rough-only` must stop before price-path or strict
-  work. `--strict-limit 0` is the unbiased strict-distribution mode after activity qualification. A positive
-  strict limit is a candidate-hunt mode: it profiles the complete requested recall set, ranks operational
-  structural survivors by rough 70/30 conservative return, and strictly replays only that bounded prefix; never
-  use its biased quantiles to set policy.
-- A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
-  seven warm-up days). Reported copy evidence remains 30/14/7 days.
-- Canonical 30/14/7 Copy evidence is one 37-day warm replay sliced at each reporting boundary, never three
-  independently funded accounts. Timestamped open, capacity-block, add and deploy evidence is sliced with the
-  same continuous capital path, so recent-window congestion uses the equity actually banked before that window.
-- With no published generation, every scan request is forcibly upgraded to `cold_full`: it harvests a new
-  Leaderboard, profiles the complete candidate workset, bootstraps each new wallet's 37-day history, and
-  rebuilds sector specialization.
-  A failed first generation remains cold on the next attempt.
-- `candidate_fills` is the cache. Once `fill_cache_state` proves that the 37-day source window was completely
-  fetched, all later scheduled evaluations fetch only the delta after that wallet's source cursor,
-  merge it into the rolling window, and prune rows older than 37 days. Do not infer source completeness from
-  the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
-  missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
-  continuation cursor; it must not restart from the 37-day boundary on the next run.
-- A complete high-confidence whole-wallet `bot_frequency`, `hft_uncopyable`, or `grid_dca` decision enters
-  `wallet_scan_blacklist`. Future generations subtract those addresses immediately after coarse Leaderboard
-  recall, before Portfolio or fill-history calls, and storage maintenance removes their raw discovery cache.
-  One-sector contamination does not qualify when another executable sector survives. Heavy-DCA, concurrency,
-  compulsive behavior, economic misses and all data failures remain recoverable and are never permanent.
-  Operator reversal is explicit and scanner-lock protected through `unblacklist-wallet --addr`; there is no
-  automatic expiry or Dashboard toggle.
-- Complete discovery runs Monday and Thursday at 04:00 `Asia/Shanghai`. They refresh the complete Leaderboard,
-  discover the candidate universe, repair missing 37-day caches, and evaluate every cheap-recall +
-  Perp-volume survivor. Core, strict Challenger and open-position owners are also evaluated for safe
-  removal/exit. The fills-only pre-strict queue has an independent maximum of 32; the strict/tune pool has an
-  independent maximum of 16.
-- On Tuesday, Wednesday, Friday, Saturday and Sunday at 04:00 `Asia/Shanghai`,
-  `python3 -m hyper.cli.discover --db ... challenger-refresh` refreshes only the Core + Challenger cohort frozen
-  by the latest successful complete discovery generation, plus current Core and open-position owners. It clones
-  that generation's Leaderboard snapshot for integrity but never calls the Leaderboard API, discovers wallets,
-  bootstraps/repairs 37-day history or prunes discovery caches. Its promotion universe is exactly the latest
-  complete new-model generation's Core plus strict Challenger rows. Current Core/open-position owners outside
-  that universe may receive safety evidence but cannot first-time promote through daily work. A legacy or
-  policy-mismatched complete generation makes daily fail closed. It reruns the same frozen activity, pre-strict,
-  final individual strict and shared admission contract as complete discovery; daily is never a weaker route.
-  It first uses the active strategy surface (`retune=False`) to replay the bounded Top16 and shared account
-  strictly. Existing `active` and `draining` Core wallets form the effective membership floor; `requalify`
-  wallets have released their seats but remain in the daily strict-requalification pool. Low and medium
-  financial risk never removes an incumbent or revokes entry permission. Empty seats may be filled by the
-  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. When
-  `AUTO_TUNE_MARGIN_ENABLE` is enabled, a promotion runs the same one-shot count-first local-surface formation;
-  membership drift after its winning surface never starts an exact-membership closure. With the switch disabled,
-  a strict promotion may publish on the active fixed surface. A current-Core data/path failure retains the previous generation and does
-  not advance risk confirmation. Automatic removal is limited to durable high risk, recoverable zero-equity
-  unavailability, structural uncopyability, or an already-resolved losing operator exit. High risk requires a
-  verified source self-liquidation plus zero equity/no positions, or a Canonical/actual Copy liquidation losing
-  at least 8% of episode opening equity; legacy positions without opening equity cannot satisfy the actual-Copy
-  threshold.
-- Complete scans, manual scans and Challenger refreshes share `data/run/scanner.lock`. A busy daily job records
-  `skipped_scan_busy` and exits successfully. Workset and fill transport remain separate: complete worksets are
-  `all`; daily worksets are `frozen_challenger_pool`; fill transport is delta unless a complete run repairs it.
+- 30/14/7 evidence is sliced from one continuous 37-day account path. Do not replay three independently funded
+  accounts or add wallet-level profits together to simulate a portfolio.
+- Shared portfolio replay uses a standardized account for selection/tuning. Paper and Live scale the published
+  policy against their own current equity; selection must not depend on the current Paper balance.
+- Profile and shared replay use the same executable universe, generation snapshot, fees, slippage, maintenance
+  margin, liquidation accounting, and strategy semantics.
+- A target flat-to-open transition is an actionable open regardless of target notional size. Hyperliquid's
+  executable minimum and current account capacity are execution concerns, not a source-signal threshold.
+- Split exchange fills from the same opening OID extend one opening anchor. Later add OIDs can create at most one
+  followed add apiece; fill fragments do not become repeated adds.
 
-### 3. Market-sector specialization
+### Quality and lifecycle rules
 
-- Crypto and stock/index/commodity evidence are evaluated independently. A complete/cold scan rebuilds each
-  wallet's `sector_policy_json` from the current generation; an incremental scan may carry prior evidence for
-  audit continuity only, never to preserve a current-generation weak sector's live permission.
-- A wallet may be Crypto-only, Stock-only, or genuine Mix. A side with positive Copy economics may remain
-  `watch` while samples grow; live permission requires sufficient sector evidence, positive canonical Copy
-  economics and no structural hard failure. Path drawdown and proxy liquidation evidence remain available to
-  tuning rather than vetoing a sector before sizing can be repaired.
-- A profitable sector with too few closed samples is `watch` evidence for Challenger ranking, not live-trading
-  permission. Observer, individual replay, shared replay and Dashboard metrics use the same allowed/watch policy;
-  an execution snapshot without an explicit allowed sector fails closed.
-- Full/cold generation output therefore forms specialization every time. Do not restore whole-wallet portfolio
-  PnL/volume/drawdown as a substitute for scoped fills and canonical Copy economics.
-- Scanner economics use a sealed generation market snapshot, never the Observer's mutable `coin_vol`. After a
-  wallet's executable fills are known and before its first strict Copy replay, its actual coins are resolved once
-  per generation: closed-candle sigma as of generation start plus the generation's bulk Crypto/`xyz` context,
-  max leverage and Crypto liquidity. An API failure defers affected wallets as a true data error; a valid market
-  with fewer than five closed daily candles uses the explicit 7% `insufficient_history_default`.
-- Selection price-path prefetch must apply each wallet's effective `allowed` sectors, or its `watch` sectors only
-  when no sector is allowed, before validating against the sealed generation snapshot. A disabled specialty's
-  cached fills may not require unrelated generation metadata or abort the whole bounded candidate batch. Path
-  prefetch failure is a resumable generation data failure, never permission to publish a valid empty Core.
+Keep gate definitions in their owning code. When changing them, update tests and operator-facing explanations
+together. The current broad contract is:
 
-### 4. Quality gates and scores
+- Structural exclusions reject proven bots/HFT/grid behavior, non-executable activity, corrupt history, and
+  catastrophic source risk before expensive replay.
+- Lottery concentration is conditional, not a Top3-profit ban: a concentrated wallet survives when its remaining
+  body still has positive, repeatable economics. Do not revive the old rule that rejected every concentrated
+  winner.
+- Rough Copy requires positive 30d/7d economics, adequate samples, and executable open coverage before entering
+  the bounded strict pool.
+- Strict individual and shared formation require positive recent windows, current sample depth, capacity/open
+  coverage, acceptable open loss/drawdown/cost, complete price paths, and bounded isolated liquidations.
+- Exchange-labelled self-liquidation plus a fresh zero-equity/no-position account snapshot is a hard safety
+  failure. Canonical Copy liquidation losing at least 8% of episode-opening dynamic equity is also hard safety.
+  Ordinary losses, recent decline, or sub-8% isolated liquidation are not automatic daily removals.
+- A complete scan is a membership reset: unstarred incumbents compete as current candidates. Only an actively
+  operator-starred Core can use the bounded retention lane, and hard/incomplete evidence still revokes it.
+- Daily Challenger refresh may keep the same Core or publish a strict superset; it cannot silently remove or
+  replace Core. Manual Exit-only remains mode-specific for held-position completion.
+- Dashboard labels weak economics as business rejection, not “数据异常”. Reserve data-error labels for cache,
+  transport, replay, valuation, quarantine, or immutable-strategy integrity failures.
 
-`active`/`qualified` means the wallet has passed the quality and copyability requirements. It is not a promise
-that every active wallet must fit into the funded Core account.
+## Core count and automatic tuning
 
-The canonical strict-Copy replay starts from a standardized `$10,000` window equity for comparable wallet
-audits, then compounds continuously: every later open sizes from the floating equity available at that time.
-For any qualification window, dynamic return is `qualificationPnl / that window's start equity`; it is not a fixed-capital or
-per-trade return. Thus a 30-day replay that grows `$10,000` to `$13,000` contributes 30%. The rolling 7-day
-window is cut from the same continuous 30-day equity path and uses its own day-23 boundary equity.
+### Mode contract
 
-Profit qualification is deliberately one-sided. `closedPnl` is fee-paid PnL from complete closed Episodes,
-`openLoss = abs(min(currentUnrealizedPnl, 0))`, and
-`qualificationPnl = closedPnl - openLoss`. Positive unrealized PnL is stored only as
-`openProfitReference`; it has zero qualification, scoring, ranking, tuning and shared-certification weight.
-`closedPnl <= 0` is ineligible, and `openLoss / closedPnl > 50%` is a hard rejection. Dynamic conservative
-return divides `qualificationPnl` by that window's start equity. Source, individual Copy, standardized shared
-Copy and Paper-capital shared Copy all use the same contract.
+- `AUTO_TUNE_MARGIN_ENABLE=false`: use the active parameter surface, perform all strict individual/shared gates,
+  and choose a bounded profitable Core prefix. Membership changes must not re-enable tuning.
+- `AUTO_TUNE_MARGIN_ENABLE=true`: run one `count_first_local_surface_v2` formation for the generation.
+- Explicit `optimize`: research/operational full optimization, still subject to memory guards and checkpoints.
 
-Deep fills first enforce structural hard failures: HFT/OID robot density, systematic grid/heavy DCA, compulsive
-stop-to-reopen trial loops, spot hedge, opaque markets, extreme concurrency, confirmed source zeroing/major
-Copy liquidation, or incomplete fills, valuation and market scope. The retry gate is intentionally conjunctive:
-same-coin/same-side repetition alone is allowed; rejection requires deep transition/loss samples, at least 60%
-rapid same-side and loss-conditioned retries, an 8-Episode chain, and at least five predominantly losing
-loss-started chains. Source and fills-only Copy must each have at least seven complete 30-day closed Episodes
-and positive closed 30d/7d PnL. Negative unrealized PnL is fully charged and may not exceed 50% of 30-day
-closed profit; positive unrealized PnL has zero qualification weight.
+### Bounded automatic search
 
-Canonical activity is calculated once at generation start from OID-deduplicated
-flat-to-open/flip opportunities. The latest seven days must be active, at least three of four rolling seven-day
-buckets must be active, and the maximum 28-day opening gap must not exceed ten days. 72-hour activity and fixed
-7d/14d trade-count gates are retired from permission.
+- Top32 is evidence/Challenger scope. Freeze at most the profit-aligned Top16 for automatic formation; ranks
+  17–32 cannot be reabsorbed after tuning.
+- Locate a count center with bounded jumps such as `16 → 8 → 12 → 10`, never `16 → 15 → 14 ...`.
+- Test the three primary counts `n-1/n/n+1`; use `n-2/n+2` as cheap guards. Do not expand automatically to
+  arbitrary wallet subsets or a full count-by-parameter Cartesian product.
+- All three volatility tiers receive upward/downward margin evidence. New candidate margins use 0.5 percentage-
+  point grid steps; the active exact surface remains a mandatory control.
+- Final choice maximizes conservative shared economics subject to liquidation, drawdown, open-loss, capacity,
+  concentration, price-path, and recent-window safety. Do not maximize headline ROI without risk constraints.
+- Measure time-weighted deployment, deployment percentiles, tier economics, skip attribution, and the profit
+  gained versus profit lost to additional congestion. A single historical P99 peak must not alone suppress the
+  entire margin surface.
+- After the winning surface's Top16 individual strict pass, a material membership/count reduction may trigger
+  exactly one bounded **margin-only** final-membership calibration. It tests the exact control, a small fair
+  three-tier grid, and at most three strict finalists. It does not search leverage, adds, wallet counts, or
+  arbitrary subsets, and never recurses after another removal.
+- Therefore the automatic path has one local tuner plus at most one final margin calibration; it never starts
+  the retired per-count full tuners or exact-membership recursive closure.
+- Final publication performs one same-surface count search and one shared price-path certification. A candidate
+  that cannot pass actionable-open/capacity gates cannot publish merely because its PnL is high.
 
-Every structural survivor receives fills-only rough Copy. Rough admission also requires positive conservative
-30d/7d returns, Copy Profit Factor at least 1.25, at least 70% open follow and complete valuation. Fixed source
-70%/85% and Copy 60% win-rate gates are retired. Conditional lottery protection rejects a sub-50% win wallet
-when its post-Top3 body loses, or a wallet whose Top3 contributes at least 60% of gross profit while the body
-loses, wins below 50%, or retains less than 20% of total closed net profit. A low-win, high-PF wallet with a
-distributed or materially profitable body may pass.
+### Leverage and sizing semantics
 
-Rough 30d/7d returns of at least 20%/5% form `primary`; otherwise-qualified wallets form `reserve`. These tiers
-remain audit labels. Top32 and final formation share one profit-aligned score: conservative
-`70%×30d + 30%×7d` return is mapped monotonically, then multiplied by an 85%–100% confidence factor from PF,
-samples, execution, repeatability, cross-week activity and liquidation safety. Confidence can only haircut
-profitability; it cannot award bonus points to a low-return wallet. Raw profit priority, 30d, 7d, PF and stable
-address are tie-breaks. At most 32 receive a queue rank as the Rough/Challenger evidence pool; automatic
-formation freezes at most 16 before parameter search. Ranks 17-32 cannot be reabsorbed after tuning.
+- New opens use our tier leverage cap, clipped only by the venue's current maximum:
+  - BTC is always stable tier;
+  - non-BTC Crypto and transparent `xyz:*` are mid below 9% sigma and high at/above 9%;
+  - unresolved/young valid markets temporarily use the configured mid fallback.
+- Target-wallet leverage is display/audit metadata only. It must remain visible when captured, but must never
+  reduce or increase our planned leverage, affect qualification, or gate tuning.
+- Existing positions are never retroactively rescaled by a revision. Adds remain tied to the position's opening
+  strategy semantics; a fully closed later episode uses the new active revision.
+- `MARGIN_EQUITY_PCT` is the single operator new-entry risk budget (default 90%). It scales the equity basis and
+  caps aggregate fresh-entry margin. The remaining real cash can support existing-position adds and risk handling.
+  Auto-tune must not modify it.
+- First-open sizing must leave room under the per-coin cap for at least two full follow-on add units (open plus
+  two adds), subject to real available balance and other hard caps.
 
-Final per-wallet strict admission requires conservative dynamic 30d/rolling-7d returns of 10%/3%, positive
-closed PnL in both windows, a 30-day open-loss ratio at or below 50%, at least seven 30-day closed Copy
-Episodes, Copy PF at least 1.25, conditional lottery protection, at least 70% open follow rate, the frozen
-cross-week activity evidence, complete data/valuation/sector/path evidence and no more than three simulated
-isolated liquidations. Count tolerance applies only to small isolated sizing events: any single liquidated Copy
-episode whose net loss reaches 8% of the dynamic account equity recorded when that episode opened is a hard
-rejection in both rough and strict qualification. Path/data gaps in a Top32 wallet may remain deferred
-Challenger evidence and cannot enter Core. Campaigns, weekly Copy folds, per-close returns, cost
-multiples/stress, LCB/probability, maximum drawdown and score floors are not Core gates. Payoff remains audit
-telemetry; PF and conditional concentration protection are gates.
+## Observer and Live execution
 
-Formation ranks qualified wallets by the final profit-aligned score and considers only score prefixes up
-to 16. No star,
-prior Core role, tenure, minimum count, forced fill or lower-ranked substitution may alter that order. Each
-prefix is tuned with one continuous floating-equity account. The optimizer first maximizes 30-day net profit,
-then within the near-best profit band minimizes liquidations, reduces real congestion/missed opens, and jointly
-adjusts tier margin, leverage and smart-add structure. Only the fixed winner receives final path-complete strict
-replay. Publication requires the shared account to return at least 10% over 30 days and 3% over the latest
-rolling 7 days, with both standardized `$10,000` and actual Paper starting-equity results persisted.
-There is no second 85% total-margin slice: adds may use the remaining real available cash after fresh opens
-stop, while per-coin caps and isolated-margin liquidation still bound exposure.
-Historical replay assumes sufficient market liquidity; every source flat-to-open/flip lifecycle is an effective
-open opportunity regardless of source notional, and every strategy/capacity rejection is a miss. Our open is
-sized independently by our equity, margin, leverage and capacity surface. Further fills from the opening OID
-extend the source opening anchor and never become smart adds. Later source adds continue to use the existing
-smart-add rules.
-Observer retains the live liquidity filter and persists those live-only skips separately.
+### Target observation and durable signals
 
-Qualification never credits positive marked PnL. It counts complete closed-Episode PnL and charges negative
-marked PnL in full from one canonical valuation snapshot. Recent repeatability is judged by closed source/Copy
-Episode win rates plus the conservative dynamic rolling-7-day return from the same continuous 30-day equity
-path; there are no weekly-fold or per-close-density admission rules. Individual
-failures remain explicit Challenger evidence. Four or more proxy liquidations on the final tuned 30-day surface
-remain Challenger evidence; the active pre-tune surface cannot reject a wallet that parameter optimization may
-repair.
+- A newly observed target starts at the current time; do not backfill old fills into a new copy book.
+- Target fills come from REST `userFillsByTime`. Cursor movement and the complete batch commit are atomic. On
+  SQLite/row failure, restore the old cursor and refetch the overlap; `tid` dedup prevents double execution.
+- Every Live fill is journaled in `execution_signal` before strategy mutation. Signals move through durable
+  pending/processing/retryable/terminal states and survive worker or SQLite failures.
+- The ordered signal worker owns strategy and execution mutation. Do not spawn competing per-fill book writers.
+- While operator-paused or `reconcile_required`, new opens and exposure-increasing adds are blocked. Reductions,
+  target full closes, and management of already-owned Live positions continue whenever exchange state is safe.
+- A critical background loop exit must make the process fail non-zero so systemd restarts it; it must not look
+  like a clean intentional stop.
 
-Official Portfolio return treats zero-equity transfer gaps as funding boundaries rather than trading resets.
-Each positive-equity operating segment uses its own starting capital and the segment returns are compounded.
-A full withdrawal and later redeposit therefore preserve prior trading evidence without creating a zero
-denominator. A genuine PnL loss to zero remains a -100% segment, so redeposit cannot wash out liquidation loss.
+### Pricing and API budget
 
-Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
-and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
-counts complete round trips; a cache-window episode that starts already open cannot hard-reject a wallet.
-Any complete Heavy-DCA violation rejects that sector and cannot be resurrected by a profitable Copy replay.
-Execution density is based on distinct source OIDs per Episode, never exchange fill fragments. One followed add
-OID may create at most one Copy add; later slices update source exposure without sending another order.
+- Standard Crypto and `xyz:*` perps use the same public WS BBO and per-coin `activeAssetCtx` mark streams.
+- REST `l2Book` is execution-only: fetch it immediately before an open/add/reduce/close for depth and bounded
+  slippage. Never continuously poll books for Dashboard marks.
+- Official-mark REST fallback is low-frequency and runs only for stale WS marks.
+- Scanner and Observer share Hyperliquid REST weight. Target observation and real execution have priority;
+  discovery pacing must yield under active execution load.
 
-There is no zero-liquidation rule and no historical maximum-drawdown admission threshold. Source fills do not
-disclose their true margin/leverage, so both values are conservative reconstructions at our leverage ceiling.
-The active surface may enter tuning with any proxy count; the final tuned 30-day strict replay permits at most
-three isolated proxy liquidations per Core wallet. Four or more remain Challenger-only. Independently of count,
-a single liquidation loss of 8% or more of that episode's opening Copy equity is rejected before the bounded
-candidate pool and can use the Challenger-daily hard-safety removal path. Confirmed source-account zeroing
-liquidations and these major Copy liquidation events are persisted in `wallet_risk_event`; discovery cache
-pruning and rolling-window expiry cannot make those wallets eligible again. Liquidation losses still reduce net PnL
-and receive a bounded score penalty; path drawdown remains visible for diagnostics only. A 5%–8% proxy
-liquidation is a non-catastrophic large-loss audit event: it remains fully included in PnL, PF and the ordinary
-liquidation count, but is not a permanent veto. An allowed sub-8% proxy
-liquidation must not trigger a hidden 24-hour/seven-day wallet freeze that then lowers open-follow rate and rejects
-the wallet a second time. Live Paper execution likewise records the actual isolated loss without inventing a
-source-wallet-wide re-entry ban.
+### Live execution and reconciliation
 
-`source_quality_score` is audit/tie-break evidence; official Portfolio return contributes zero score and no
-Top40 source cap exists. `rough_copy_score` is likewise a quality tie-break rather than the primary queue
-order. The composite score has no 70/75 permission line. After qualification, Core formation orders by
-`0.70 × strict conservative 30d dynamic return + 0.30 × strict conservative 7d dynamic return`; 30d return,
-7d return, composite score and
-address are the deterministic tie-breaks. Final strict metrics recompute both score and profit priority for the
-surviving Top16 against the material 10%/3% return floors.
+- Live is Paper strategy plus a real execution adapter; it is not a separate strategy engine.
+- Every exposure increase reads fresh exchange equity/available balance, reconciles exchange positions/orders
+  against the Live ledger, then sizes and executes. Dashboard equity/available values come from the real account.
+- LiveExecutor uses a dedicated WAL connection. Observer must commit its signal transition before LiveExecutor
+  writes, and no coroutine/thread may borrow another owner's connection.
+- Market execution is a bounded marketable IOC/taker flow, not an unbounded “market” assumption. Validate current
+  book depth/slippage, use deterministic CLOIDs and durable intents, and record the exchange-confirmed fill before
+  mutating the Live ledger.
+- A timeout, 5xx, disconnected response, or SQLite lock is not proof that an order failed. Reconcile by CLOID,
+  exchange orders/fills, and actual position delta before retrying. Never blindly resubmit an ambiguous open or
+  close.
+- Transient transport/lock errors remain visible and retry automatically; they do not silently set operator pause.
+  Only proven exchange/ledger ambiguity enters persistent `reconcile_required`.
+- A passing Mainnet preflight starts full Live immediately. The retired 1%-equity Canary cap must not be created
+  for new sessions.
+- Agent credentials authorize trading but not withdrawal. Private keys are browser-encrypted during transfer and
+  stored encrypted on VPS; never return them through API/UI/logs. Authorization expiry is read from Hyperliquid,
+  not user-entered.
 
-Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
-`noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or
-`liquidity_blocked`; a later actionable fill slice may atomically replace an earlier noise classification for
-the same order id. `noise_merged` is intentional denoising and never a miss penalty. Raw add-order follow rate
-is audit-only. Ranking uses target/copy entry-VWAP divergence normalized by coin sigma plus genuinely blocked
-actionable adds; with fewer than five add episodes this component remains audit-only. Legacy `missed_add_rate`
-is retained only for backward-readable audit and must not feed qualification, selection, or tuning.
+### Position-management semantics
 
-### 5. Core/Challenger lifecycle
-
-The persistent `wallet_registry` retains identity, roles, good/bad confirmations, data errors, and reasons.
-The user-facing roles are:
-
-- **Core** (`role=core`): Observer may open new copy positions.
-- **Challenger** (`role=challenger`): a Top32 wallet that completed and passed individual strict but was not in
-  the best shared Core prefix, or whose strict path/data evidence is temporarily deferred. Pre-strict reserve
-  and proven economic/structure failures are not Challenger.
-- **Exit-only** (`role=exit_only`): no new opens, but existing copies are managed to exit.
-- **Rejected**: business value/structure is below the observation line and is not shown as Challenger.
-- **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
-
-Membership is separate from live operator intent. `target_controls.intent` is `active`, `draining`, or
-`requalify`. A draining wallet keeps its Core seat but cannot open or add; a requalify wallet is projected as
-Challenger and has released the seat. Risk is separately projected from immutable
-`wallet_risk_assessment` rows into `wallet_registry`: low/medium are advisory; single-event catastrophic high
-is durable; rolling cumulative-loss high is recoverable; unavailable recovers after funding and strict
-requalification; and structural/data blocks are not financial risk.
-
-`CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count, service quota or
-forced replacement count: zero to sixteen wallets may publish. Complete discovery formation is:
-
-1. Freeze cross-week activity and fills-only economics for every structural survivor. Fill Top32 by the unified
-   rough profit-aligned score; primary/reserve remains visible evidence, not a conflicting sort order.
-2. Freeze at most Top16 before parameter work. Active operator-starred Core consume ordinary Top16 seats and
-   receive only soft/medium retention protection; unstarred incumbent status has no admission priority.
-3. Locate a count center on the active surface, cross shared tier candidates over n±1 and validate n±2 guards.
-   Each node uses the same normalized cached fills with continuous floating equity. The search may shorten only
-   the lowest-profit suffix and may never insert a lower-ranked wallet.
-4. Send at most three count+surface finalists to strict validation, then run the winning surface's complete
-   individual strict qualification exactly once across the frozen Top16.
-5. Rerank the surviving frozen candidates and search the shared strict score prefix on the single winning surface.
-   Any final membership/order change is
-   replayed and confirmed on that same surface; complete formation never starts a second exact-Core tune.
-6. Run the final path-complete 30-day shared-account replay only after parameters and membership have converged.
-   Require conservative dynamic 30-day return at least 10%, conservative rolling-7-day return at least 3%,
-   a 30-day open-loss ratio at or below 50%, at least 70% open follow, positive closed and conservative PnL in
-   both windows and complete price-path coverage. Every member must remain at or below three
-   simulated liquidations and below 8% loss on every individual liquidated episode.
-7. Persist both `recommendedCore` (pure score/replay proposal) and `effectiveCore` (incumbent/risk/intent overlay),
-   plus the standardized `$10,000` certification. Paper/Live scale it at runtime. Incomplete paths, valuation or immutable
-   context abort publication. A data-complete economic-only failure publishes `operator_review_degraded` with
-   the existing effective membership and parameters; it does not promote or retune.
-
-An operator may star a current Core through the Dashboard to grant bounded retention during complete strict
-re-evaluation. The durable `target_controls.pinned` flag does not bypass hard safety, structural, data/path or
-final strict gates, cannot revive an inactive target, and consumes a normal Top16/Core seat. A conditional exit with no positions moves
-immediately to `requalify`. Position detection and cohort resolution use only the currently selected Paper or
-Live execution ledger; a position in the other ledger must never block the request. With current-ledger
-positions it captures the complete current position-ID cohort and enters
-`draining`: new opens/adds stop while reductions, closes and risk management continue. Once every captured
-position is terminal, positive aggregate post-fee PnL with no liquidation/high/system block restores `active`;
-otherwise it resolves to `requalify`. While a captured position is still open, the operator may cancel the
-unresolved drain: existing positions remain intact and normal new-open/add authority returns. High-risk or
-system-blocked wallets cannot bypass their execution block through cancellation. There is no permanent
-manual-disable state. Positions left open in the other ledger remain held-off/exit-only and resume management
-when that ledger's Observer next runs.
-
-A wallet needs the generation-frozen activity proof defined above. A 72-hour signal is shown as freshness
-context but has no permission effect. Existing copied positions whose source loses Core authority remain
-managed exit-only.
-
-Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
-per-coin limits. Historical 7d/return/PF/activity/sample/open-rate failures belong to retention and selection
-audit; they do not create a financial-risk badge. Data/path/valuation failures do not advance financial risk.
-Structural failures block execution without masquerading as financial risk. Zero equity/no positions without
-liquidation proof is recoverable unavailable. Verified source zeroing and Canonical/actual Copy liquidation loss
-at or above 8% of opening equity are durable high-risk events and immediately remove new-open authority.
-Actual Copy accumulates closed realized PnL plus open realized PnL and all negative unrealized PnL over 30 days,
-then divides a conservative loss by the earliest recorded opening account equity in that window. Positive
-unrealized PnL has zero weight. Below 0.5% is normal, 0.5%–2% is low, 2%–8% is medium, and 8% or more is
-recoverable high; the boundaries depend only on percentage, never dollar loss, trade count, or elapsed
-confirmations. Low/medium retain entry permission. Later improvement moves directly to the matching lower band
-or normal. Observer refreshes this projection after settlements and every five-minute account snapshot; daily
-refresh persists it before selection work, so a later publication failure cannot erase the day's risk label.
-Observer persists `pending/confirmed/cleared`
-execution freezes separately from permanent risk evidence: a target self-liquidation fill blocks new opens/adds
-until standard and affected-DEX clearinghouse snapshots prove either recovery or zero equity with no positions.
-
-`FOLLOW_SELECTION_MODE=auto` lets the scanner publish this selection. `manual` carries the current selection
-rows into the next generation and leaves membership operator-owned; it does not silently rewrite the Core.
-
-### 6. Atomic publication and tuning
-
-The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
-The history/Profile phase marks its generation ready, releases the scanner lock and is replaced with a fresh
-`finalize-profiled` process before formation. Complete formation freezes Top16, locates the count center on the
-active surface, then runs at most one n±1 local tune with n±2 guards. It strictly replays the frozen Top16 once
-on the chosen surface, reranks the survivors and chooses the shared profit prefix. A final membership change is
-strict-confirmed on the same surface; it never starts an
-exact-Core closure tune. Eligibility, explicit selection, generation, follow history and the immutable strategy
-revision are still sealed atomically.
-An evidence-only Challenger generation may explicitly carry the prior Core snapshot, but cannot claim a new
-portfolio certification or apply tuned parameters.
-
-Repeated strict replays must reuse one normalized price path, filter it to the candidate's actual markets/time
-range, and retain only compact portfolio summaries between membership candidates. Do not cache full position and
-equity-curve results for every explored set: the production host is intentionally small and must fail boundedly
-rather than reach the OOM killer.
-
-The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
-and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
-not tune per-coin caps, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. Production Core formation tests baseline plus symmetric per-tier/global margin
-probes, then adjacent notional-paired leverage and smart-add directions; it never expands them into a
-three-tier Cartesian product. Only four distinct surfaces cross the primary counts, and at most three
-count+surface candidates enter expensive path validation. Risk and capacity representatives must remain inside the configured near-best
-profit band, so an under-deployed surface cannot win merely by avoiding trades. The legacy full profile remains
-available for offline diagnostics; coarse count probes remain sparse. Any optimizer walk-forward folds compare
-parameter robustness only; they do not
-decide wallet admission. The selected set separately passes the official 30-day Perp screen, source Episode
-contract and dynamic strict-Copy 30d/rolling-7d returns. There is no weekly, Campaign, per-close-density or
-cost-stress admission rule.
-Price-path and maintenance-risk validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
-few absolute margins at 50/75/100% of the reserved-add-safe ceiling; it does not restore the old large Cartesian grid.
-Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays
-approximately constant before capacity caps. Selection is profit-led, but candidates within the configured
-near-best profit band are ordered by fewer liquidations, better capacity/open fit, then measured add fidelity.
-A proposal which retains the configured share of profit and strictly reduces liquidation evidence may apply as a
-safety repair without pretending to clear the ordinary relative-profit-gain hurdle.
-
-Core membership remains a strict profit-ranked prefix: production formation never searches arbitrary wallet
-subsets, never runs leave-one-out membership elimination, and never exhaustively replays every `1..N` prefix.
-It uses bounded boundary search plus neighbouring counts, a single local tune, and strict same-surface
-confirmation if final ranking changes membership. Generation-scoped prefix evidence stores only compact
-metrics keyed by the membership hash and parameter surface, so a retry resumes completed strict prefix work
-without retaining full trajectories or raw membership addresses.
-
-Within the one generation tune, identical parameter surfaces are replayed once even if several search stages
-rediscover them. Final path validation prepares one immutable fills/candle context, replays the active baseline
-once, and evaluates all distinct Pareto finalists as one CPU-bounded batch. Baseline and finalist paths still use
-the complete continuous account, liquidation, capacity and fold contract; batching changes scheduling and reuse,
-not the objective or evidence.
-The leverage, margin, and smart-add batches in that tune also reuse one worker session and immutable 30-day
-context. Do not recreate a spawn pool for each dependent axis; a one-core host must remain serial-safe.
-
-Final-Strict display/ranking score is qualification-anchored: 60% records completion of the full strict
-contract, 35% is the bounded profit-priority mapping, and 5% is PF/sample/execution/repeatability/activity/
-liquidation reliability. Rough/pre-strict scores remain unanchored so uncertified wallets never inherit the
-strict baseline. Score orders already-qualified wallets and never grants admission.
-Dashboard may project a legacy immutable Strict score detail through the current formula for display, but must
-retain and expose the generation's original score as audit evidence; never rewrite an old selection row.
-
-Current Paper defaults deliberately allow the full closed loop:
-
-- `AUTO_TUNE_MODE=apply`;
-- minimum shadow days and forward closed episodes are zero for Paper; target leverage is display/audit metadata,
-  not a model input;
-  refined price path and maintenance-metadata coverage still default to 94% and 95%;
-- a changed parameter candidate still must pass OOS/holdout/stress/risk gates;
-- portfolio tuning has no wall-clock cutoff; finite axes and finalist limits bound completion;
-- live-money deployments should use conservative shadow/coverage/forward thresholds instead.
-
-Tuning must use only the same complete generation's cached fills, sector policies, marks and follow snapshot.
-The generation market snapshot is immutable after profiling and its content hash is recorded in every scanner,
-formation and auto-tune strategy revision. Profile replay, shared replay and tuning must all load that generation's
-snapshot. A missing legacy snapshot blocks `regate`, `optimize`, selection repair and replay rematerialization until
-a new scan succeeds; an already-published legacy strategy may continue executing unchanged.
-Changing `MARGIN_EQUITY_PCT` during a run invalidates that run's finalization instead of allowing stale results to
-overwrite the new operator policy. Any pre-publication formation/path/tuner/snapshot-consistency failure rolls
-back the new membership and parameters, leaving the prior published generation and immutable strategy active.
-Completed profiles/fill cache remain on the failed generation as `leaderboard_validated`, so `finalize-profiled`
-can retry without another network sweep. A post-publication summary-replay failure is audited but cannot undo the
-already atomic strategy. `auto_tune_state.effective_portfolio_replay` is valid only when its generation matches
-the current published generation.
-Before strict replay or any parameter grid starts, bounded selection-path prefetch retries only still-missing
-markets five times at ten-second intervals, bypassing the longer background cache backoff. The scan continues
-through those retries; only markets still missing after all five attempts are classified incomplete.
-
-## Observer and execution model
-
-- A target newly added to Observer starts at the current time and never backfills historical fills into a new
-  copy book. Within an active Mainnet session, source cursors and received fills are durable: a worker restart
-  resumes the bounded polling window and retries every non-terminal signal with deterministic order ids.
-- Signal source is REST `userFillsByTime`; standard and transparent builder/stock perps use the same per-coin
-  WS BBO plus `activeAssetCtx` official-mark subscriptions. REST `l2Book` is fetched only for an actual
-  open/add/reduce/close execution. Official marks use a low-frequency REST fallback only after their WS stream
-  becomes stale.
-- Observer normally loads parameters, enabled Core targets, account context and sector policies from the active
-  immutable strategy revision whose generation matches the current published selection. The direct published-
-  selection/params loader is a rolling-migration fallback only. Existing positions for removed, disabled, or
-  no-longer-Core wallets stay polled and managed exit-only.
-- Paper state is persisted in `copy_position`/`copy_action`; Mainnet state is independently persisted in
-  `live_copy_position`/`live_copy_action`. Both are taker-only. Live PnL includes realized closed PnL plus
-  unrealized PnL for open rows.
-- The source-wallet membership high-water breaker is retired. Observer and canonical replay do not freeze,
-  reduce or exit a wallet merely because it gave back prior profit; historical `wallet_risk_state` rows and
-  `WALLET_HWM_*` values are migration-only and cannot affect qualification or execution. Path-risk telemetry,
-  liquidation cooldowns, mirrored exits and portfolio/margin caps remain active.
-- Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
-  through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
-  remain hard execution boundaries.
-- A passing Mainnet preflight starts a full Live session immediately. The retired 1%-of-equity Canary cap may
-  appear only on a legacy active session and must be removed through the execution control worker after a clean,
-  flat reconciliation; new sessions never create it.
-- Live reconciliation and order execution use a dedicated WAL connection, never Observer's coroutine-owned
-  SQLite connection. A transport or database-lock exception is visible in Observer health and retries without
-  silently changing the runtime to paused; only a successful exchange snapshot that proves ledger drift enters
-  persistent `reconcile_required`. Every exposure increase still performs its own mandatory fresh reconciliation.
-  Threaded volatility refreshes likewise open short-lived independent connections; no worker thread may borrow
-  Observer's signal/control connection.
-- REST signal batches advance a wallet's in-memory cursor only when the complete batch commits. A SQLite lock or
-  any later row failure restores the previous cursor, so the next overlap poll re-fetches the batch and tid dedup
-  prevents double execution. Replaceable mark-PnL persistence never tears down a healthy BBO socket on a busy lock.
-- BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
-  spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
-  high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use
-  the same tier leverage cap, clipped only by the venue maximum. Observer may persist source-wallet leverage for
-  Dashboard audit, but that value never changes our sizing.
-- `MARGIN_EQUITY_PCT` is the single manual new-entry risk budget (default 90%, UI range 10–100%). It scales
-  each new position's drawdown-adjusted equity base and also caps aggregate fresh-position margin against real
-  risk equity. Once that cap is reached, new positions stop; follow-on adds may still use remaining real cash
-  because they preserve an already-entered episode. Available balance and per-coin caps remain authoritative.
-  Auto-tune and Core-count selection must not modify this value. The former independent `MAX_DEPLOY_PCT`,
-  `DEPLOY_FULL_PCT` linear-shrink line and second 85% total-margin slice are retired.
-- Smart-add spacing compares target transaction prices only; our BBO price is execution/PnL, never mixed into the
-  target volatility gate. Adverse and positive adds have separate sigma gaps that expand after each followed
-  add. One target order can consume at most one first-margin unit, the final reserved add may fill remaining
-  same-coin room, and first-open sizing preserves at least two executable follow-on add slots before the hard
-  `ADD_MAX_HARD` ceiling.
-- Target reductions are percentage based: tiny fills accumulate until the target has unwound 10% since our last
-  mirrored reduce, while a full close always executes. After a target reduce, a profitable tail at or below 20%
-  of peak size exits; up to 35% may exit when its market-specific liquidation path could give back at least 50%
-  of close-now episode profit. This is profit protection and never converts a losing episode into a stop-loss.
-- Optional `SMART_TP_ENABLE` is off by default and is captured in the same immutable follow-parameter revision
-  used by Observer and canonical replay. When enabled, each position arms a volatility-normalized high-water at
-  `0.60σ/0.50σ/0.40σ` for stable/mid/high without selling; after 20%/35%/50% giveback it closes 20%/25%/25%
-  of the arming size, rebasing the remaining high-water after each cut and preserving a 30% tail. Once that tail
-  exists, target trims below 30% are observed but not mirrored; cumulative target reduction of at least 30%, a
-  full close, or a flip exits the tail completely. Target adds after the first proactive cut never rebuild exposure.
-  The legacy liquidation-risk tail rule is bypassed while smart take-profit owns the episode.
-- A manual 100% close creates a 24-hour same-wallet/same-coin cooldown only when the realized episode is losing.
-  A profitable/breakeven full close has no cooldown. Any partial manual close keeps the episode live so later
-  target adds, reductions and close remain actionable.
-- Copy execution has no per-position hard-threshold or portfolio-wide drawdown stop-loss. Positions use
-  isolated margin, so one copied liquidation is settled independently and never pauses or flattens unrelated
-  positions. Risk remains bounded by selection, sizing, leverage/deployment caps, mirrored exits, and
-  liquidation accounting.
-- Core/strategy reloads are command-driven (`reload_params`) and do not copy historical fills or retroactively
-  rescale existing positions.
+- Smart-add gaps compare target transaction prices. Our BBO is for execution/PnL, never mixed into target-motion
+  qualification. One target add OID can execute at most one followed add.
+- Target reductions accumulate until the configured mirrored threshold; a target full close always closes.
+  Percentage reductions use target episode/peak size, not our absolute source-vs-copy size.
+- Manual 100% close creates the same-wallet/same-coin cooldown only for a losing realized episode. Partial manual
+  close leaves the episode managed for later target add/reduce/close.
+- Isolated liquidation is charged to that position. There is no portfolio-wide hard PnL stop that flattens or
+  pauses unrelated positions.
+- Optional smart take-profit and tail-protection rules must use the immutable strategy revision shared by replay,
+  Paper, and Live. Do not add a Live-only profit rule.
 
 ## Dashboard contract
 
-The dashboard reads the API and controls workers through the command/params plane. Important endpoints include:
+- The Account tab configures Paper/Live mode and Mainnet credentials; Testnet is development-only and does not
+  belong in production mode selection or persistent product bookkeeping.
+- Paper mode is compact. Live reveals owner address, agent address, and agent private-key input. “加密保存并验证”
+  validates ownership/authorization/Unified/account basics and stores credentials; it does not start Observer.
+- The global top-right button is the only normal start/stop control. Its state comes from execution control and
+  process state, not a client-side assumption. Live strategy publication must not make it display stopped.
+- Agent expiry is fetched from `extraAgents`; never add an editable expiry field.
+- Mode switching is disabled while Observer is active.
+- Position close controls remain loading until every position captured by the command reaches terminal state or
+  a concrete failure is returned. Do not clear loading on a fixed timer.
+- Wallet counts and roles come from the current published selection plus the selected-mode held-position overlay.
+  Manual Exit-only in Live must not be blocked by Paper holdings.
+- Target/source entry price and captured target leverage may be displayed as audit context. Our planned/actual
+  leverage is separate; never label a missing target leverage as our execution leverage.
+- Reuse shared `.btn` semantic variants and nearby component patterns. Do not create one-off button skins.
+- Edit JSX/CSS sources and rebuild. Never hand-edit compiled `dashboard/web/app.js` or launcher bundles.
 
-- `/api/overview`, `/api/positions`, `/api/history`;
-- `/api/wallets?tab=followed|challenger|dropped`;
-- `/api/wallets/{address}` for lazy wallet details;
-- `/api/positions/{id}` for lazy position detail;
-- `/api/pipeline-audit` for generation, profile, selection, watchlist, and tuner reasons;
-- `/api/params`, `/api/commands`, and process/scan status endpoints.
+## Data lifecycle and SQLite discipline
 
-The Account tab is a product-mode and credential control, not a Testnet laboratory or an Observer runtime
-console. Paper renders as one compact mode row; choosing Live reveals only Mainnet credential setup. Testnet
-credentials and verification remain CLI/developer concerns. Agent authorization expiry is read from
-Hyperliquid `extraAgents` during credential verification and every startup preflight; never restore an
-operator-editable expiry field. The credential button performs encryption plus the initial
-identity/owner/Unified/authorization verification and never starts Observer. The global top-right copy-trade
-button is the only start/stop entry: in Live mode it automatically runs and consumes the full read-only
-preflight before starting Observer. Do not restore an Account-page start button, separate manual preflight card,
-or confirmation-phrase input. Changing Paper/Live mode requires Observer to be stopped so the displayed mode
-cannot diverge from the already-running engine.
-Manual close controls track the command terminal state instead of clearing from a fixed client-side delay. A
-batch close remains visibly busy until its command finishes and every position captured at submission has
-disappeared from the live positions API; a failed or timed-out remainder must be reported explicitly.
+### Durable business data
 
-The wallet list is intentionally light. Detail and position-detail requests are lazy. The UI labels the current
-roles as “跟单中”, “候选”, and “降级”; do not reintroduce internal role/model/data columns into the operator
-table without a concrete decision use. Wallet profitability, sample counts and win rate must come from the
-current immutable selection replay when available, filtered to the same allowed/watch sectors. Use profile replay
-only as the explicit fallback; an unavailable strict-Copy win rate renders `—`, never a fabricated `0%` or the
-target's raw account win rate.
+Retain Paper/Live positions and actions, Live execution sessions, order intents/attempts/fills, referenced
+strategy revisions, Core/Exit-only/manual controls, blacklist decisions, and safety events. These are business
+history and are not scan-cache cleanup targets.
 
-Business qualification labels include return/sample/thin-edge/recent-decline/portfolio-candidate and
-open-valuation-pending states. They must not map to “数据异常”. Only `deferred_data_error`, invalid cache/replay,
-valuation-pipeline failure, corrupt strategy context, and quarantine are data-error states; rejected weak
-economics are simply omitted from Challenger and remain explainable in audit/dropped history.
+### Bounded cache and temporary evidence
 
-## Commands and local verification
+- `candidate_fills`: rolling 37 days. Remove raw fills for permanent automation blacklist addresses. Protect
+  current Core/Challenger/Exit-only/current-mode held-position evidence as required for operation.
+- Price candles use their configured bounded per-interval windows.
+- Retain generation cache only for the current published generation, latest complete full scan, and unfinished/
+  resumable generations. Keep the latest five compact scan summaries for operator history.
+- `pipeline_audit` and `formation_prefix_evidence` are temporary resumable workspace. Delete them after atomic
+  publication or terminal failure; retain only compact success/failure summaries.
+- Normal execution snapshots, completed signals/commands/preflights, and successful reconcile checkpoints retain
+  seven days. Anomalous reconcile records retain 90 days. Durable order/fill/position ledgers are unaffected.
 
-Run from the repository root:
+### Maintenance and locking
+
+- Both scheduled scan services run `storage-maintenance` from `ExecStopPost`, including after failure.
+- Deletes are indexed, bounded, and committed in small batches. Do not hold a large write transaction while
+  Observer is running.
+- All long work must release SQLite write transactions before network calls or replay.
+- Connections set a 64 MiB `journal_size_limit`. Maintenance performs PASSIVE checkpoint and truncates only when
+  all frames are checkpointed and no reader blocks it. Never delete the WAL file manually.
+- Do not routinely run `VACUUM`. Freelist pages are reusable; use a separately planned `VACUUM INTO` only when
+  physical compaction is explicitly needed and trading/scanning safety is established.
+- `database is locked` is recoverable contention, not a reason to lose a cursor/signal or silently stop Observer.
+
+## Commands and verification
+
+Run from repository root with `.venv/bin/python` when available:
 
 ```bash
 # Dashboard
-python3 -m dashboard.server --db data/hl.db --static dashboard/web --host 127.0.0.1 --port 8810
+.venv/bin/python -m dashboard.server --db data/hl.db --static dashboard/web --host 127.0.0.1 --port 8810
 
 # Scanner / maintenance
-python3 -m hyper.cli.discover --db data/hl.db serve-rescan
-python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 8
-python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
-python3 -m hyper.cli.discover --db data/hl.db regate
-python3 -m hyper.cli.discover --db data/hl.db optimize
-python3 -m hyper.cli.discover --db data/hl.db calibrate-current-core --apply
-python3 -m hyper.cli.discover --db data/hl.db finalize-profiled --generation GENERATION_ID
-python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
-python3 -m hyper.cli.discover --db data/hl.db storage-maintenance
-python3 -m hyper.cli.discover --db data/hl.db watchlist --top 40
-python3 -m hyper.cli.discover --db data/hl.db reset-paper --yes
-# Add --factory-params only when operator settings should also return to code defaults.
+.venv/bin/python -m hyper.cli.discover --db data/hl.db serve-rescan
+.venv/bin/python -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
+.venv/bin/python -m hyper.cli.discover --db data/hl.db challenger-refresh
+.venv/bin/python -m hyper.cli.discover --db data/hl.db regate
+.venv/bin/python -m hyper.cli.discover --db data/hl.db optimize
+.venv/bin/python -m hyper.cli.discover --db data/hl.db calibrate-current-core
+.venv/bin/python -m hyper.cli.discover --db data/hl.db finalize-profiled --generation GENERATION_ID
+.venv/bin/python -m hyper.cli.discover --db data/hl.db storage-maintenance --dry-run
+.venv/bin/python -m hyper.cli.discover --db data/hl.db storage-maintenance
+.venv/bin/python -m hyper.cli.discover --db data/hl.db reset-paper --yes
 
 # Observer
-python3 -m hyper.cli.observe --db data/hl.db observe
-python3 -m hyper.cli.observe --db data/hl.db report
+.venv/bin/python -m hyper.cli.observe --db data/hl.db observe
+.venv/bin/python -m hyper.cli.observe --db data/hl.db report
 
 # Launcher
-python3 -m hyper.launcher.launcher --port 8799 --no-browser
-
-# Mock dashboard
-python3 dashboard/web/dev/seed_mock.py data/hl_mock.db
-python3 dashboard/web/dev/mock_consumer.py data/hl_mock.db
-DASH_PASSWORD=mock123 python3 -m dashboard.server --db data/hl_mock.db --static dashboard/web --host 127.0.0.1 --port 8810
+.venv/bin/python -m hyper.launcher.launcher --port 8799 --no-browser
 ```
 
-`scan --full` means a full candidate-universe harvest and evaluation. New/incomplete caches bypass the
-short-lived official Portfolio cache; complete caches instead use current delta-first structural and local
-volume evidence with an official fallback. It does not re-download a complete wallet fill cache; only new or
-incomplete wallets fetch the 37-day bootstrap window. Except for the forced
-first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
-`full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` first
-re-scores/re-ranks the current generation's frozen pre-strict evidence with the deployed model, then re-forms
-and jointly tunes that generation at its sealed as-of time without Leaderboard, Portfolio, or wallet-fill
-refetch. A missing bounded public K-line path may still be completed before strict replay. Optimize,
-selection-repair, and finalize commands share the full/daily scanner process lock but may run with Observer.
-`calibrate-current-core` also shares that lock and freezes the published Core exactly. It may change only the
-three first-open margin percentages after bounded quick replay plus strict shared/member certification; it
-must not change membership, leverage, add parameters, or fetch wallet history. `--apply` activates params and
-one immutable strategy revision atomically; omit it for evidence-only validation.
-`optimize --reuse-tuned-surface` is the narrow post-scan repair path: it reuses the current tuned surface,
-replays the repaired bounded pool, and runs full tuning only for the exact changed membership instead of
-repeating the coarse count grid.
-`finalize-profiled` retries an
-already-complete but unpublished generation after a finalization failure. `finalize-profiled --no-retune` is the
-explicit operational fallback for sealing the active parameter surface when expensive tuning exceeds host
-capacity; it does not skip strict individual, path, cost, capacity, or shared-membership gates.
-For an operator-starred current Core with deferred strict path evidence, finalization must first retry only
-that wallet's bounded public path. Preserve quick count/surface evidence and invalidate only path-dependent
-strict caches. If the path remains incomplete, leave the generation resume-ready; never publish the starred
-wallet with incomplete strict proof and never restart the full wallet harvest. Daily refresh instead keeps
-the incumbent's previous risk state on temporary deferred evidence, without admitting a new wallet through
-that incomplete evidence.
+Important command semantics:
 
-`reset-paper --yes` is the supported from-zero reset. Stop Observer and Scanner first. It clears discovery,
-cache, selection, strategy, replay and Paper trading state, preserves operator `params`, and recreates the
-`$10,000` Paper account. `--factory-params` is the explicit restore-defaults variant;
-deleting the database file is also a factory reset, not a settings-preserving reset.
+- `scan --full` rediscovers the candidate universe but still uses delta fetch for complete wallet caches.
+- `regate` rebuilds current gates/policies from frozen cached evidence; it does not fetch a new Leaderboard.
+- `optimize` deliberately performs the heavier research path on the current sealed generation.
+- `calibrate-current-core` freezes membership and adjusts only the bounded first-open margin surface. Use
+  `--apply` only when the user authorized publication.
+- `finalize-profiled` resumes an already profiled unpublished generation without redoing network collection.
+- `reset-paper --yes` is the supported Paper reset and requires Scanner/Observer stopped. It must not touch Live
+  ledgers or credentials. `--factory-params` additionally resets operator parameters.
 
-Before Python changes:
+Required verification:
 
 ```bash
-python3 -m compileall -q hyper dashboard
-python3 -m unittest discover -s hyper/tests
-```
-
-After dashboard edits, edit JSX/CSS sources and rebuild; never hand-edit the compiled bundle:
-
-```bash
+.venv/bin/python -m compileall -q hyper dashboard
+.venv/bin/python -m unittest discover -s hyper/tests
 dashboard/web/build.sh
 hyper/launcher/web/build.sh
 ```
 
-For UI changes, smoke the local mock dashboard and inspect the rendered page. Keep generated screenshots and
-temporary databases out of commits.
+For a narrow documentation-only edit, inspect links/commands and `git diff --check`; code/build tests are not
+required unless documentation changes accompany code.
 
-## Deployment and process-control pitfalls
+## Deployment checklist
 
-- The VPS deployment source of truth is the Git repository. Deploy code, then restart only the affected
-  long-running service (`hl-dashboard.service` and/or `hl-observe.service`).
-- `hl-scan.service` starts a real scan when activated/restarted. Never include it in a broad restart or restart
-  it merely to pick up code. Use `systemctl reset-failed hl-scan.service` only to clear failed state.
-- Scanner and Observer share Hyperliquid REST weight. Observer signal polling has priority; scanner pace adapts
-  to whether Observer has active work.
-- Long Scanner path/tuning phases use a separate best-effort SQLite connection to refresh the single
-  `process_status('scanner')` row once per minute. Dashboard liveness uses the newer of that heartbeat and an
-  active `scan_progress.updated_at`; neither mechanism appends heartbeat history or may delay scan work.
-- Before remote work, read the current connection from `secret/vps.txt`; never reuse a host, user, password,
-  key, or SSH target from memory. The local agent should attempt the canonical configuration before declaring
-  the VPS inaccessible.
-- After reading the current target, connect with the established local `~/.ssh/id_ed25519` and
-  `IdentitiesOnly=yes`; password authentication is recovery-only. Do not create or install a replacement key
-  merely because authentication fails—report the mismatch unless the user explicitly authorizes a key change.
-- For complex remote SQL/Python, send a local script through the current connection without embedding or
-  printing any secret value.
-- Never use a destructive Git reset on a user worktree without explicit approval. Preserve unrelated changes.
-- If a command fails before reaching the VPS, re-read `secret/vps.txt`, retry with that exact current
-  configuration, and report the concrete failure before drawing conclusions from remote state.
+1. Preserve unrelated worktree changes; never use destructive local Git reset.
+2. Read the current target from `secret/vps.txt` immediately before connecting.
+3. Deploy from the Git source of truth.
+4. Run migrations/verification appropriate to the changed component.
+5. Restart only affected long-running services. Never restart `hl-scan.service` as a generic deploy step.
+6. Confirm Observer process state, execution control state, selected mode, active session/revision, durable signal
+   backlog, reconciliation health, and recent errors after any execution change.
+7. A strategy/Core publication does not require an Observer restart and must preserve `live_running`.
+8. Do not claim Live healthy from process status alone; verify both control/session state and exchange/ledger
+   reconciliation without exposing account secrets.
 
-## Data and audit retention
+## Retired behavior: do not restore
 
-Raw fill cache is bounded to the configured profile window plus warm-up. `pipeline_audit` and formation-prefix
-rows are resumable generation workspace: they survive running/resource-deferred work but are deleted after
-atomic publication or terminal failure. Reusable generation cache is limited to the current published
-generation, latest complete full-scan generation and every unfinished generation; only the latest full scan
-keeps pre-strict Challenger evidence. Observer account snapshots and normal reconcile checkpoints retain seven
-days, anomalous checkpoints retain 90 days, while Paper/Live positions, actions and signed-order/fill ledgers
-remain durable.
-
-Both scheduled scanner services run `storage-maintenance` through `ExecStopPost`, so 37-day fill expiry,
-blacklist cleanup and health recording still run after a failed scan. Deletes use indexed address batches and
-small commits. `storage-maintenance --dry-run` reports exact protected generations and planned deletes without
-writing. The guard never runs `VACUUM`; after its own transactions close it performs PASSIVE checkpoint,
-records busy/log/checkpointed frames, and truncates only when every frame is checkpointed and no reader blocks
-the reset. Connections cap the reusable WAL file at 64 MiB. Warning thresholds are 70% disk use, over 1 GB
-active-data growth per 24 hours, or a WAL over 512 MB; disk use at 85% is critical.
+- Testnet as a product mode or persistent product ledger.
+- Paper holdings included in Live monitoring, counts, exits, or wallet retirement decisions.
+- Shared Paper/Live position tables or balances.
+- Target leverage as an input to our sizing or tuning.
+- The 1%-equity Live Canary cap.
+- Continuous REST `l2Book` polling for marks.
+- Blind order retry after an ambiguous API response.
+- Core/parameter publication pausing a healthy running Live session.
+- Dashboard routes directly mutating business tables.
+- Total scan/tune timeout that discards a resumable generation.
+- Per-count full tuner grids, recursive exact-membership closure, or sequential Core-count enumeration.
+- Permanent 90-day retention of detailed `pipeline_audit`/Profile payloads.
+- Automatic Core inference from `MIN_FOLLOW_SCORE`, raw score, or watchlist order.
+- Source-wallet profit high-water forced exits or portfolio-wide copy stop-losses.
