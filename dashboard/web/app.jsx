@@ -28,7 +28,8 @@ const NAV = [
   ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const TITLES = { overview: "总览 Overview", positions: "持仓中", history: "历史持仓", wallets: "跟踪钱包", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const ACCENT_TITLE_PAGES = new Set(["positions", "history", "wallets"]);
 const fStorage = bytes => {
   const value = Number(bytes || 0);
   if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(2) + " GB";
@@ -235,8 +236,8 @@ function Dashboard({ onLogout }) {
       <main className="main">
         <div className="topbar">
           <div>
-            <div className={"crumb " + (liveMode ? "crumb-live" : "")}>{TITLES[page] && TITLES[page].split(" ")[1]} · {liveMode ? "实盘" : "模拟盘"}</div>
-            <div className="title">{TITLES[page]}</div>
+            {!ACCENT_TITLE_PAGES.has(page) && <div className={"crumb " + (liveMode ? "crumb-live" : "")}>{TITLES[page] && TITLES[page].split(" ")[1]} · {liveMode ? "实盘" : "模拟盘"}</div>}
+            <div className={"title" + (ACCENT_TITLE_PAGES.has(page) ? " title-accent" : "")}>{TITLES[page]}</div>
           </div>
           <div className="topbar-right">
             <span className={"pill execution-pill " + (liveMode ? "tint-red" : "tint-amber")}>

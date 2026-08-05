@@ -107,6 +107,7 @@ body {
 .crumb-live { color: var(--red-l); font-weight: 700; letter-spacing: .04em; }
 .execution-pill { font-weight: 700; letter-spacing: .03em; }
 .title { font-size: 21px; font-weight: 650; margin-top: 2px; }
+.title-accent { color: var(--accent); }
 .topbar-right { display: flex; align-items: center; gap: 12px; }
 .mobile-nav { display: none; }
 
