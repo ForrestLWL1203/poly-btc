@@ -1488,17 +1488,40 @@ class Observer:
         if not bundle or strategy_revision.active_revision_id(self.db) != revision:
             raise RuntimeError("live_strategy_revision_not_active")
         if previous != revision:
-            cursor = bundle
-            seen = set()
-            while cursor and cursor.get("revision") not in seen:
-                current = cursor.get("revision")
-                if current == previous:
-                    break
-                seen.add(current)
-                parent = cursor.get("parentRevision")
-                cursor = strategy_revision.load_revision(self.db, parent) if parent else None
-            if not cursor or cursor.get("revision") != previous:
-                raise RuntimeError("live_strategy_revision_not_descendant")
+            def _ancestor(bundle_row):
+                cursor = bundle_row
+                seen = set()
+                while cursor and cursor.get("revision") not in seen:
+                    current = cursor.get("revision")
+                    if current == previous:
+                        return cursor
+                    seen.add(current)
+                    parent = cursor.get("parentRevision")
+                    cursor = strategy_revision.load_revision(self.db, parent) if parent else None
+                return None
+
+            cursor = _ancestor(bundle)
+            if not cursor:
+                if self.db.in_transaction:
+                    self.db.commit()
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    repaired = strategy_revision.repair_parentless_active_revision(
+                        self.db,
+                        live_parent_revision=previous,
+                        enqueue_reload=False,
+                    )
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
+                if not repaired:
+                    raise RuntimeError("live_strategy_revision_not_descendant")
+                self._reload_strategy()
+                revision = self.strategy_revision_id
+                bundle = strategy_revision.load_revision(self.db, revision)
+                if not bundle or not _ancestor(bundle):
+                    raise RuntimeError("live_strategy_revision_not_descendant")
         margin_pct = float(
             (bundle.get("params") or {}).get("MARGIN_EQUITY_PCT", self.margin_equity_pct)
         )
@@ -3279,11 +3302,6 @@ class Observer:
                 "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
             ).fetchone()
             maintenance_leverage = margin_row[0] if margin_row and margin_row[0] else None
-            existing_coin_leverage = next((
-                f(existing.get("leverage"))
-                for (existing_addr, existing_coin), existing in book.open_ep.items()
-                if existing_coin == coin and existing is not ep and f(existing.get("leverage")) > 0
-            ), None)
             plan = plan_open_sizing(
                 coin=coin,
                 side=ep["side"],
@@ -3296,7 +3314,6 @@ class Observer:
                 master_leverage=None,
                 params=self._open_sizing_params(book),
                 maintenance_leverage=maintenance_leverage,
-                existing_coin_leverage=existing_coin_leverage,
                 wallet_sector_side_room=group_room,
                 wallet_room=source_room,
             )
@@ -3350,7 +3367,6 @@ class Observer:
                     master_leverage=None,
                     params=self._open_sizing_params(book),
                     maintenance_leverage=maintenance_leverage,
-                    existing_coin_leverage=existing_coin_leverage,
                     wallet_sector_side_room=group_room,
                     wallet_room=source_room,
                 )

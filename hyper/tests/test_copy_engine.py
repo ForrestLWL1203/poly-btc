@@ -328,7 +328,7 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.size, 37.5)
         self.assertAlmostEqual(plan.liq_px, 96.0)
 
-    def test_existing_coin_position_keeps_its_opening_strategy_leverage(self):
+    def test_existing_coin_position_does_not_override_current_strategy_leverage(self):
         params = OpenSizingParams(
             high_sigma_min=0.10,
             tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
@@ -340,10 +340,9 @@ class CopyEngineTests(unittest.TestCase):
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
             balance=10_000.0, available=10_000.0, existing_coin_margin=100.0,
             master_notional=100_000.0, master_leverage=2.0, params=params,
-            existing_coin_leverage=5.0,
         )
         self.assertTrue(plan.ok)
-        self.assertEqual(plan.leverage, 5.0)
+        self.assertEqual(plan.leverage, 30.0)
 
     def test_each_tier_uses_our_cap_even_when_target_leverage_differs(self):
         params = OpenSizingParams(

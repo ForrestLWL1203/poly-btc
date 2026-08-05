@@ -1,7 +1,7 @@
 export const PARAM_META = {
   // follow
   STABLE_MARGIN_PCT: { name: "稳定档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "2–10", up: "每单更重", dn: "加仓余量更多" },
-  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–35", up: "放开高杠杆", dn: "压低杠杆" },
+  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定使用该策略杠杆下单；仅在交易所市场上限更低时下调，目标钱包杠杆只展示", range: "15–35", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MARGIN_PCT: { name: "中档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "2–6", up: "每单更重", dn: "加仓余量更多" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "非BTC且σ低于9%时的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MARGIN_PCT: { name: "剧烈档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "1–4", up: "每单更重", dn: "加仓余量更多" },

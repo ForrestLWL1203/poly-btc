@@ -110,6 +110,18 @@ class StrategyRevisionTests(unittest.TestCase):
         db.rollback()
         self.assertEqual(strategy_revision.active_revision_id(db), second["revision"])
 
+    def test_activated_revision_automatically_descends_from_current_active(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        second = strategy_revision.create_revision(db, "g1", source="scanner", enqueue_reload=False)
+        db.commit()
+
+        self.assertEqual(second["parentRevision"], first["revision"])
+        self.assertEqual(
+            strategy_revision.load_active(db)["parentRevision"],
+            first["revision"],
+        )
+
     def test_observer_manual_param_command_creates_child_and_loads_bundle(self):
         db = self._db()
         first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
@@ -180,6 +192,7 @@ class StrategyRevisionTests(unittest.TestCase):
         first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
         replacement = strategy_revision.create_revision(
             db, "g1", source="replacement", parent_revision=None, enqueue_reload=False,
+            allow_lineage_repair=True,
         )
         stamp = "2026-08-02T00:00:00Z"
         db.execute(
@@ -212,6 +225,53 @@ class StrategyRevisionTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(observer.strategy_revision_id, replacement["revision"])
         self.assertEqual(session_revision, first["revision"])
+
+    def test_live_session_repairs_legacy_parentless_daily_publication(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        legacy = strategy_revision.create_revision(
+            db,
+            "g1",
+            source="challenger_daily",
+            parent_revision=None,
+            enqueue_reload=False,
+            allow_lineage_repair=True,
+        )
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','live_running',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running','live-current',?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+            "active_session_id='live-current',updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current",
+            "strategy_revision": first["revision"],
+            "margin_equity_pct": 1.0,
+        })
+        observer._reload_strategy()
+
+        self.assertTrue(observer._bind_live_strategy_revision())
+
+        active = strategy_revision.load_active(db)
+        session_revision = db.execute(
+            "SELECT strategy_revision FROM execution_session WHERE session_id='live-current'"
+        ).fetchone()[0]
+        self.assertEqual(active["source"], "strategy_lineage_repair")
+        self.assertEqual(active["parentRevision"], first["revision"])
+        self.assertEqual(active["paramsHash"], legacy["paramsHash"])
+        self.assertEqual(session_revision, active["revision"])
+        self.assertEqual(observer.strategy_revision_id, active["revision"])
 
     def test_operator_disable_is_live_overlay_not_snapshot_mutation(self):
         db = self._db()

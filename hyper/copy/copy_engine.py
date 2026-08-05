@@ -478,7 +478,6 @@ def plan_open_sizing(
     master_leverage: float | None,
     params: OpenSizingParams,
     maintenance_leverage: float | None = None,
-    existing_coin_leverage: float | None = None,
     wallet_sector_side_room: float | None = None,
     wallet_room: float | None = None,
 ) -> OpenSizingPlan:
@@ -489,15 +488,9 @@ def plan_open_sizing(
     # it creates impossible notionals and false liquidations (for example ETH/XRP under a 35x stable cap).
     if maintenance_leverage and maintenance_leverage > 0:
         lev = max(params.min_lev, min(lev, float(maintenance_leverage)))
-    # Copy risk is defined by our versioned tier surface, not by a source-wallet setting that historical
-    # fills do not contain.  Keeping source leverage out of sizing makes Paper, replay and Live identical.
-    # During a policy transition, however, Hyperliquid has one aggregate leverage setting per coin; reuse an
-    # already-open coin's leverage until it is flat instead of silently modifying that real position.
-    if existing_coin_leverage and existing_coin_leverage > 0:
-        locked = float(int(existing_coin_leverage))
-        if maintenance_leverage and maintenance_leverage > 0:
-            locked = min(locked, float(maintenance_leverage))
-        lev = max(params.min_lev, locked)
+    # Copy risk is defined by our versioned tier surface, not by the source-wallet leverage or an older
+    # position opened under a previous strategy revision.  LiveExecutor applies this exact value before every
+    # exposure increase; Hyperliquid may update the coin's aggregate isolated leverage as part of that action.
 
     risk_equity = max(0.0, balance)
     risk_available = max(0.0, min(available, risk_equity))

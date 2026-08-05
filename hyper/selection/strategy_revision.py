@@ -18,6 +18,13 @@ from hyper.util import now_iso
 from . import state as selection
 
 
+_LEGACY_PARENTLESS_PUBLICATION_SOURCES = {
+    "scanner",
+    "resume_finalize",
+    "challenger_daily",
+}
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=float)
 
@@ -202,10 +209,17 @@ def create_revision(
     activate: bool = True,
     enqueue_reload: bool = True,
     stamp: Optional[str] = None,
+    allow_lineage_repair: bool = False,
 ) -> dict:
     """Create and optionally activate a revision without committing the caller's transaction."""
-    if expected_active_revision is not None and active_revision_id(db) != expected_active_revision:
+    previous = active_revision_id(db)
+    if expected_active_revision is not None and previous != expected_active_revision:
         raise RuntimeError("strategy_revision_changed")
+    if activate and previous:
+        if parent_revision is None and not allow_lineage_repair:
+            parent_revision = previous
+        elif parent_revision != previous and not allow_lineage_repair:
+            raise RuntimeError("strategy_revision_parent_not_active")
     current_generation = selection.latest_published_generation(db)
     if current_generation != generation:
         raise RuntimeError(
@@ -225,7 +239,6 @@ def create_revision(
         ),
     )
     if activate:
-        previous = active_revision_id(db)
         if previous and previous != revision:
             db.execute(
                 "UPDATE strategy_revision SET status='superseded',superseded_at=? WHERE revision=?",
@@ -254,6 +267,47 @@ def create_revision(
         "paramsHash": snapshot_hash,
         "targetCount": len(target_rows),
     }
+
+
+def repair_parentless_active_revision(
+    db,
+    *,
+    live_parent_revision: str,
+    enqueue_reload: bool = False,
+) -> Optional[dict]:
+    """Bridge a legacy parentless publication onto the currently bound Live lineage.
+
+    Older complete/daily publishers activated a new immutable bundle without linking it to the previous
+    active revision.  A running Live session correctly rejected that lateral history.  Only those known
+    publication sources are repairable here; arbitrary lateral revisions continue to fail closed.
+    """
+    active = load_active(db)
+    if not active or active.get("parentRevision") is not None:
+        return None
+    if active.get("source") not in _LEGACY_PARENTLESS_PUBLICATION_SOURCES:
+        return None
+    parent = load_revision(db, live_parent_revision)
+    if not parent or live_parent_revision == active.get("revision"):
+        return None
+    validation = dict(active.get("validation") or {})
+    validation["lineageRepair"] = {
+        "replacedActiveRevision": active["revision"],
+        "liveParentRevision": live_parent_revision,
+        "reason": "legacy_parentless_publication",
+    }
+    return create_revision(
+        db,
+        active["selectionGeneration"],
+        source="strategy_lineage_repair",
+        follow_values=active.get("params") or {},
+        targets=active.get("targets") or [],
+        parent_revision=live_parent_revision,
+        validation=validation,
+        reason="legacy_parentless_publication",
+        expected_active_revision=active["revision"],
+        enqueue_reload=enqueue_reload,
+        allow_lineage_repair=True,
+    )
 
 
 def materialize_current(
