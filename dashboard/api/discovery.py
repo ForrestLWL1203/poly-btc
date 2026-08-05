@@ -126,7 +126,7 @@ def ep_discovery(db):
         try:
             evidence = q1(
                 db,
-                "SELECT COUNT(*) rough_completed,"
+                "SELECT COUNT(*) evidence_rows,COUNT(*) rough_completed,"
                 "SUM(CASE WHEN latest_7d_active=1 AND active_weeks_4>=3 "
                 "AND max_open_gap_days_28d<=10 THEN 1 ELSE 0 END) persistent_activity,"
                 "SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) pf_lottery_passed,"
@@ -137,7 +137,12 @@ def ep_discovery(db):
                 "FROM pre_strict_evidence WHERE generation=?",
                 (generation["generation"],),
             )
-            if evidence:
+            # Successful publication deliberately removes generation-scoped
+            # ``pre_strict_evidence`` workspace.  SQLite aggregate queries still
+            # return one all-zero row for that empty set, so only prefer the live
+            # evidence counts while at least one evidence row actually exists.
+            # Otherwise retain the durable counts frozen into metrics_json.
+            if evidence and int(evidence["evidence_rows"] or 0) > 0:
                 pre_strict_counts = {
                     key: int(evidence[key] or 0)
                     for key in evidence.keys()

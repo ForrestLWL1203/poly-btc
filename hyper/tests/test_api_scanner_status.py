@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import time
@@ -165,6 +166,39 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertNotIn("failureCategories", res)
         self.assertNotIn("rejectReasons", res)
         self.assertNotIn("scoreHistogram", res)
+
+    def test_discovery_uses_published_funnel_counts_after_workspace_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,source,status,complete,publishable,is_current,started_at,published_at,metrics_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    "g-published", "challenger_daily", "published", 1, 1, 1,
+                    "2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z",
+                    json.dumps({
+                        "coarseRecallPassed": 2061,
+                        "perpPrefilterPassed": 2061,
+                        "preStrictPassed": 8,
+                        "strictQualified": 7,
+                    }),
+                ),
+            )
+            db.execute(
+                "INSERT INTO follow_selection (generation,addr,role,selected_at) "
+                "VALUES ('g-published','0xaaa','core','2026-08-05T01:00:00Z')"
+            )
+            db.commit()
+
+            res = api_discovery.ep_discovery(db)
+
+        self.assertEqual(res["funnel"]["perpPrefilter"], 2061)
+        self.assertEqual(res["funnel"]["pfLotteryPassed"], 8)
+        self.assertEqual(res["funnel"]["strict"], 7)
+        self.assertEqual(res["funnel"]["finalCore"], 1)
 
     def test_scan_runs_exposes_profiled_count_not_legacy_probed_new_name(self):
         with tempfile.TemporaryDirectory() as td:

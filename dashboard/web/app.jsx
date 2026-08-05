@@ -28,8 +28,8 @@ const NAV = [
   ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓中", history: "历史持仓", wallets: "跟踪钱包", discovery: "采集 Discovery", settings: "策略参数 Settings" };
-const ACCENT_TITLE_PAGES = new Set(["positions", "history", "wallets"]);
+const TITLES = { overview: "总览", positions: "持仓中", history: "历史持仓", wallets: "跟踪钱包", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const ACCENT_TITLE_PAGES = new Set(["overview", "positions", "history", "wallets"]);
 const fStorage = bytes => {
   const value = Number(bytes || 0);
   if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(2) + " GB";
