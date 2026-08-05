@@ -7,7 +7,6 @@ import {
   normalizeCoin,
   parseCoinList,
 } from "../lib/format.js";
-import { IC, Ico } from "../lib/icons.jsx";
 import { useApiResource } from "../lib/refresh.js";
 import { OpenPositionsTable } from "./positions/OpenPositionsTable.jsx";
 
@@ -58,7 +57,7 @@ export function Positions({ confirm, streamOpen }) {
   useEffect(() => { loadBlacklist(); }, [loadBlacklist]);
 
   const doClose = (p) => confirm({
-    title: "手动平仓", danger: true,
+    title: "手动平仓", tone: "close",
     body: `平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(当前名义额 ${fUsd(p.notional)})。选择平仓比例(默认100%),不可撤销。`,
     pctPicker: { notional: p.notional },
     onConfirm: async (frac = 1) => {
@@ -82,7 +81,7 @@ export function Positions({ confirm, streamOpen }) {
     if (!count || closingAll) return;
     confirm({
       title: "一键平仓",
-      danger: true,
+      tone: "close",
       ok: "全部平仓",
       body: `以 taker 方式平掉当前全部 ${count} 笔持仓。当前浮动盈亏 ${fSign(summary.floatingPnl, 1)}，提交后不可撤销。`,
       onConfirm: async () => {
@@ -142,9 +141,9 @@ export function Positions({ confirm, streamOpen }) {
       <div className="section-h" style={{ marginTop: 6 }}>
         <div className="positions-title-row">
           <h2>当前持仓 {open && <span className="muted">· 浮动 <span className={cls(open.summary.floatingPnl)}>{fSign(open.summary.floatingPnl, 1)}</span> · {open.summary.openCount} 笔</span>}</h2>
-          <button className="btn btn-stop btn-sm positions-close-all-btn" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
+          <button className="btn btn-close-primary btn-sm positions-close-all-btn" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
             aria-label="一键平仓全部持仓" title="一键平仓全部持仓" onClick={doCloseAll}>
-            {closingAll ? <span className="spin" /> : <Ico d={IC.close} />}
+            {closingAll && <span className="spin" />}
             {closingAll ? "平仓中" : "一键平仓"}
           </button>
         </div>

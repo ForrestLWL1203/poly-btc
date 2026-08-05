@@ -20,7 +20,7 @@ import {
 import { IC, Ico, PlayIcon, StopIcon } from "./lib/icons.jsx";
 import { useDashboardRefresh } from "./lib/refresh.js";
 
-/* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
+/* HyperEcho — precompiled React dashboard. Talks to the live dashboard API. */
 const { useState, useEffect, useRef, useCallback } = React;
 
 /* ----------------------------------------------------------------- shell */
@@ -104,7 +104,7 @@ function ObserverControl({ status, busy, onStart, onPause, onStop, live = false 
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const { ov, execution, livePositions, streamOk, refreshModeData, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
+  const { ov, execution, livePositions, refreshModeData, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
@@ -205,7 +205,12 @@ function Dashboard({ onLogout }) {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand"><div className="mk">跟</div><div><b>跟单监控台</b><span>COPY-TRADE OPS</span></div></div>
+        <div className="brand">
+          <img className="brand-mark" src="/hyper-echo-mark.svg" alt="" />
+          <div className="brand-copy">
+            <b><span>HYPER</span><em>ECHO</em></b>
+          </div>
+        </div>
         {NAV.map(([grp, items]) => (
           <div key={grp}>
             <div className="nav-group">{grp}</div>
@@ -238,10 +243,6 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: liveMode ? "pulse 1.6s infinite" : "none" }} />
               {liveMode ? "LIVE" : "PAPER · 模拟盘"}
             </span>
-            <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: streamOk ? "var(--green-l)" : "var(--t3)" }}
-              title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
-              <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
-              {streamOk ? "实时" : "轮询"}</span>
             {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
               title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
               <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
@@ -370,9 +371,10 @@ function App() {
   return (
     <div className="login-shell">
       <form className="login-card" onSubmit={doLogin}>
-        <div className="login-mark">跟</div>
-        <h1>跟单监控台</h1>
-        <p>COPY-TRADE OPS · 登录</p>
+        <div className="login-brand">
+          <img src="/hyper-echo-mark.svg" alt="" />
+          <div><b>HYPER <em>ECHO</em></b></div>
+        </div>
         {err && <p className="err">{err}</p>}
         <input type="text" name="username" defaultValue="admin" required disabled={checkingSession || loggingIn}
           placeholder="账号" autoComplete="username" />

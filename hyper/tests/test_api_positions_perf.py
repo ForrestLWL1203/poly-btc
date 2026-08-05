@@ -89,6 +89,7 @@ class ApiPositionsPerfTests(unittest.TestCase):
         self.assertEqual(res["positions"][0]["masterLeverage"], 3)
         self.assertEqual(res["positions"][0]["notional"], 505)
         self.assertEqual(res["positions"][0]["entryNotional"], 500)
+        self.assertEqual(res["positions"][0]["openedAt"], 1767225600.0)
 
     def test_closed_positions_embed_follow_positions_without_extra_query(self):
         res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})

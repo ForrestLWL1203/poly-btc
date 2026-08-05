@@ -238,7 +238,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("setTimeout(r, 1800)", positions)
         self.assertIn("一键平仓", positions)
         self.assertIn("positions-close-all-btn", positions)
-        self.assertIn("btn btn-stop btn-sm positions-close-all-btn", positions)
+        self.assertIn("btn btn-close-primary btn-sm positions-close-all-btn", positions)
+        self.assertIn('tone: "close"', positions)
         self.assertIn('closingAll ? "平仓中" : "一键平仓"', positions)
 
     def test_dashboard_shell_imports_observer_mask_component(self):

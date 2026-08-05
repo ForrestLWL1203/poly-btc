@@ -124,7 +124,7 @@ def ep_positions(db, qs):
         _follow_set_cte() +
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
-        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,"
+        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,cp.opened_at,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos,"
         "fs.retention_status,fs.retention_failure_streak,"
         "fs.operator_intent,fs.risk_block_reason "
@@ -150,6 +150,7 @@ def ep_positions(db, qs):
             "side": r["side"], "entry": entry, "leverage": r["leverage"],
             "notional": current_notional, "entryNotional": entry_notional, "mark": mark,
             "unrealizedPnl": upnl,
+            "openedAt": iso_epoch(r["opened_at"]),
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": r["follow_pos"],
             "retentionStatus": r["retention_status"] or "healthy",

@@ -1,5 +1,5 @@
 import { api } from "../lib/api.js";
-import { cls, fNum, fPct, fSign, fUsd, short } from "../lib/format.js";
+import { cls, fNum, fPct, fSign, fTime, fUsd, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
 
 const { useState, useCallback } = React;
@@ -19,8 +19,8 @@ function EquityChart({ points }) {
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="none" style={{ display: "block" }}>
       <defs>
         <linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="rgba(255,106,43,0.35)" />
-          <stop offset="100%" stopColor="rgba(255,106,43,0)" />
+          <stop offset="0%" stopColor="var(--accent)" stopOpacity=".32" />
+          <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
         </linearGradient>
       </defs>
       <path d={area} fill="url(#eqfill)" />
@@ -34,8 +34,10 @@ export function Overview({ ov }) {
   const [range, setRange] = useState("7d");
   const loadEquity = useCallback(() => api.get("/api/equity?range=" + range), [range]);
   const loadInsights = useCallback(() => api.get("/api/insights"), []);
+  const loadOpenPositions = useCallback(() => api.get("/api/positions?status=open"), []);
   const { data: eq } = useApiResource(loadEquity);
   const { data: ins } = useApiResource(loadInsights, { intervalMs: 15000 });
+  const { data: openPositions } = useApiResource(loadOpenPositions, { intervalMs: 15000 });
   if (!ov) return <div className="loading">加载中…</div>;
   const r = ov.risk, f = ov.fees;
   const walletContrib = (ins && ins.walletContrib) || [];
@@ -45,6 +47,7 @@ export function Overview({ ov }) {
     .sort((a, b) => (a.netPnl || 0) - (b.netPnl || 0)).slice(0, 3);
   const sourceNet = walletContrib.reduce((s, w) => s + (w.netPnl || 0), 0);
   const draggerNet = draggers.reduce((s, w) => s + (w.netPnl || 0), 0);
+  const recentCopies = ((openPositions && openPositions.positions) || []).slice(0, 5);
   return (
     <div className="content">
       <div className="overview-alert">
@@ -78,10 +81,10 @@ export function Overview({ ov }) {
         </div>
       </div>
 
-      <div className="overview-primary">
+      <div className="overview-panels">
         <div className="card chart-card" style={{ marginTop: 0, display: "flex", flexDirection: "column" }}>
           <div className="section-h" style={{ margin: "0 0 8px" }}>
-            <h2>权益曲线</h2>
+            <h2 className="overview-panel-title">权益曲线</h2>
             <div className="range-tabs">
               {["1d", "7d", "all"].map(x => <button key={x} className={range === x ? "on" : ""} onClick={() => setRange(x)}>{x.toUpperCase()}</button>)}
             </div>
@@ -90,7 +93,7 @@ export function Overview({ ov }) {
         </div>
 
         <div className="card">
-          <div className="card-lbl">持仓敞口</div>
+          <h2 className="overview-panel-title">持仓敞口</h2>
           <div style={{ display: "flex", gap: 24, margin: "12px 0 14px", flexWrap: "wrap" }}>
             <div title="所有在持仓位的名义额相加(多+空),衡量你在市场上铺了多大的盘">
               <div className="muted">总持仓规模</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.gross)}</div>
@@ -120,15 +123,9 @@ export function Overview({ ov }) {
             </div>
           </div>
         </div>
-      </div>
-
-      <div className="overview-bottom">
         <div className="card contrib-card">
           <div className="contrib-head">
-            <div>
-              <div className="card-lbl">盈亏来源</div>
-              <h2>跟单钱包贡献榜</h2>
-            </div>
+            <h2 className="overview-panel-title">跟单钱包贡献榜</h2>
             <div className="contrib-total">
               <span>实盘净盈亏</span>
               <b className={cls(sourceNet)}>{ins ? fSign(sourceNet, 1) : "—"}</b>
@@ -136,7 +133,6 @@ export function Overview({ ov }) {
           </div>
 
           {!ins ? <div className="loading">加载中…</div> : walletContrib.length === 0 ? <div className="empty">暂无</div> : (
-            <React.Fragment>
               <div className="contrib-split">
                 <div className="contrib-lane">
                   <div className="contrib-lane-title"><span className="dot" style={{ background: "var(--green)" }} /> 赚钱贡献</div>
@@ -161,32 +157,23 @@ export function Overview({ ov }) {
                   ))}
                 </div>
               </div>
-
-              <div className="contrib-table">
-                <table>
-                  <thead><tr><th>#</th><th>地址</th><th className="num">净盈亏</th><th className="num">实盘胜率</th><th className="num">笔数</th></tr></thead>
-                  <tbody>{walletContrib.map(w => (
-                    <tr key={w.address}>
-                      <td>{w.rank != null ? <span className="rankbadge">{w.rank}</span> : <span className="tint tint-gray">脱榜</span>}</td>
-                      <td className="addr">{short(w.address)}</td>
-                      <td className={"num " + cls(w.netPnl)}>{fSign(w.netPnl, 1)}</td>
-                      <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
-                      <td className="num">{w.closedN}</td>
-                    </tr>))}</tbody>
-                </table>
-              </div>
-            </React.Fragment>)}
+            )}
         </div>
-        <div className="card">
-          <div className="card-lbl" style={{ marginBottom: 8 }}>币种盈亏 <span className="muted">· 实盘净盈亏</span></div>
-          {!ins ? <div className="loading">加载中…</div> : ins.coinPnl.length === 0 ? <div className="empty">暂无</div> : (
-            <div className="tbl-wrap"><table>
-              <thead><tr><th>币种</th><th className="num">净盈亏</th><th className="num">笔数</th></tr></thead>
-              <tbody>{ins.coinPnl.map(c => (
-                <tr key={c.coin}>
-                  <td><b>{c.coin}</b></td>
-                  <td className={"num " + cls(c.netPnl)}>{fSign(c.netPnl, 1)}</td>
-                  <td className="num">{c.n}</td>
+        <div className="card recent-copies-card">
+          <div className="recent-copies-head">
+            <h2 className="overview-panel-title">近期开仓</h2>
+            <span>最近 5 笔</span>
+          </div>
+          {!openPositions ? <div className="loading">加载中…</div> : recentCopies.length === 0 ? <div className="empty">暂无在持跟单</div> : (
+            <div className="recent-copies-table"><table>
+              <thead><tr><th>币种</th><th>方向</th><th className="num" title="按当前标记价计算的名义金额">金额</th><th className="num">浮动盈亏</th><th className="num">开仓时间</th></tr></thead>
+              <tbody>{recentCopies.map(p => (
+                <tr key={p.id}>
+                  <td><b>{p.coin}</b></td>
+                  <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
+                  <td className="num">{fUsd(p.notional, 0)}</td>
+                  <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}</td>
+                  <td className="num muted">{fTime(p.openedAt)}</td>
                 </tr>))}</tbody>
             </table></div>)}
         </div>

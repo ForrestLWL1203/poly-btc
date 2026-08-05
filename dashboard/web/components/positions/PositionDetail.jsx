@@ -8,14 +8,30 @@ export function PositionDetail({ d }) {
   const pnl = live ? d.unrealizedPnl : d.realizedPnl;
   return (
     <div className="pos-detail">
-      <div className="pos-detail-sum">
-        <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
-        <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b> · {d.masterLeverage != null ? fNum(d.masterLeverage, 0) + "x" : "—x"}</span>
-        <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
-        <span>我方投入保证金 <b>{fUsd(d.ourMargin)}</b></span>
-        <span>{live ? "浮动" : "已实现"}盈亏 <b className={cls(pnl)}>{fSign(pnl, 1)}</b></span>
+      <div className="pos-detail-metrics">
+        <div className="pos-detail-stat">
+          <span>源加仓</span><b>{d.masterAdds}<small>次</small></b>
+        </div>
+        <div className="pos-detail-stat">
+          <span>我方加仓</span><b>{d.ourAdds}<small>次</small></b>
+        </div>
+        <div className="pos-detail-stat">
+          <span>源成本均价</span><b>{fPrice(d.masterEntry)}<small>{d.masterLeverage != null ? fNum(d.masterLeverage, 0) + "x" : "—x"}</small></b>
+        </div>
+        <div className="pos-detail-stat">
+          <span>我方成本均价</span><b>{fPrice(d.ourEntry)}<small>{fNum(d.ourLeverage, 0)}x</small></b>
+        </div>
+        <div className="pos-detail-stat">
+          <span>占用保证金</span><b>{fUsd(d.ourMargin)}</b>
+        </div>
+        <div className="pos-detail-stat pnl">
+          <span>{live ? "浮动盈亏" : "已实现盈亏"}</span><b className={cls(pnl)}>{fSign(pnl, 1)}</b>
+        </div>
       </div>
-      <div className="muted" style={{ fontSize: 11, margin: "2px 0 5px" }}>我们的成交记录:</div>
+      <div className="pos-detail-section-head">
+        <h4>成交记录</h4>
+        <span>{d.fills.length} 笔</span>
+      </div>
       <table className="fills-tbl">
         <thead><tr><th>时间</th><th>动作</th><th className="num">价格</th><th className="num">保证金投入/返还</th><th className="num">数量</th><th className="num">盈亏</th></tr></thead>
         <tbody>

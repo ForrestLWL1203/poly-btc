@@ -1,6 +1,8 @@
 import { cls, fNum, fPct, fPrice, fSign, fUsd, normalizeCoin, short } from "../../lib/format.js";
-import { BanIcon, IC, Ico } from "../../lib/icons.jsx";
+import { BanIcon } from "../../lib/icons.jsx";
 import { PositionDetail } from "./PositionDetail.jsx";
+
+const fMove = (value) => fPrice(Math.abs(value)).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 
 export function OpenPositionsTable({
   open,
@@ -26,12 +28,12 @@ export function OpenPositionsTable({
       <div className="tbl-wrap">
         <table>
           <thead><tr>
-            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num" title="当前剩余数量 × 标记价">当前名义额</th>
-            <th className="num">现价</th>
+            <th>币种</th><th>方向</th><th className="mark-price-head">现价</th><th className="num">均价/倍率</th>
+            <th className="num" title="当前剩余数量 × 标记价">名义金额</th>
             <th className="num sortable" onClick={cyclePnlSort} title="点击按浮动盈亏排序(浮亏在前 / 浮盈在前 / 默认新开在前)">
               浮动盈亏 <span className={"sort-ind" + (pnlSort ? " active" : "")}>{pnlSort === "asc" ? "▲" : pnlSort === "desc" ? "▼" : "⇅"}</span>
             </th>
-            <th>钱包</th><th className="num">lag</th><th className="num">清算触发价</th><th></th>
+            <th>钱包</th><th className="num">开仓延迟</th><th className="num">清算触发价</th><th></th>
           </tr></thead>
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
@@ -54,13 +56,24 @@ export function OpenPositionsTable({
                   })()}
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
+                <td className="num">{(() => {
+                  const delta = Number(p.mark) - Number(p.entry);
+                  const moving = Number.isFinite(delta) && Math.abs(delta) > 1e-12;
+                  const favorable = p.side === "short" ? delta < 0 : delta > 0;
+                  return <div className="mark-price-cell">
+                    <span>{fPrice(p.mark)}</span>
+                    {moving ? <span className={"price-delta " + (favorable ? "up" : "down")}
+                      title={(favorable ? "朝持仓盈利方向" : "朝持仓亏损方向") + "移动 " + fMove(delta)}>
+                      <i className={delta > 0 ? "rise" : "fall"} />{fMove(delta)}
+                    </span> : <span className="price-delta flat">0</span>}
+                  </div>;
+                })()}</td>
                 <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
                   <div className="muted" title="目标钱包的真实加权均价与当前仓位杠杆；仅展示，不参与我方下单计算">
-                    目标 {fPrice(p.masterEntry)} · {p.masterLeverage != null ? fNum(p.masterLeverage, 0) + "x" : "—x"}
+                    源 {fPrice(p.masterEntry)} · {p.masterLeverage != null ? fNum(p.masterLeverage, 0) + "x" : "—x"}
                   </div></td>
                 <td className="num">{fUsd(p.notional)}
-                  <div className="muted" title="目标钱包这一单的真实名义额；仅展示，不参与我方下单计算">目标 {fUsd(p.masterNotional)}</div></td>
-                <td className="num">{fPrice(p.mark)}</td>
+                  <div className="muted" title="目标钱包这一单的真实名义额；仅展示，不参与我方下单计算">源 {fUsd(p.masterNotional)}</div></td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} {p.followPos != null
                   ? <React.Fragment>
@@ -80,8 +93,8 @@ export function OpenPositionsTable({
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="按维持保证金触发清算；不是保证金归零价">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
                 <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
-                  return <button className="btn btn-stop btn-sm" disabled={busy} onClick={e => { e.stopPropagation(); doClose(p); }}>
-                    {busy ? <><span className="spin" />平仓中</> : <><Ico d={IC.close} />平仓</>}</button>; })()}</td>
+                  return <button className="btn btn-close-primary btn-sm" disabled={busy} onClick={e => { e.stopPropagation(); doClose(p); }}>
+                    {busy && <span className="spin" />}{busy ? "平仓中" : "平仓"}</button>; })()}</td>
               </tr>
               {isOpen && <tr className="detail-row"><td colSpan="10"><PositionDetail d={details[pid]} /></td></tr>}
               </React.Fragment>; })}
