@@ -362,9 +362,11 @@ class WebStaticAssetsTests(unittest.TestCase):
     def test_scanner_settings_show_recall_controls_and_hide_retired_roi_tuning(self):
         scanner = (ROOT / "dashboard" / "web" / "components" / "settings" / "ScannerSettingsPanel.jsx").read_text(encoding="utf-8")
 
-        self.assertIn("高级采集参数", scanner)
-        self.assertIn("advancedRows", scanner)
+        self.assertNotIn("高级采集参数", scanner)
+        self.assertNotIn("advancedRows", scanner)
         self.assertIn("HARVEST_WEEK_VLM_MIN", scanner)
+        self.assertIn("EXCLUDE_HFT", scanner)
+        self.assertIn("CORE_INITIAL_MAX_N", scanner)
         self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner)
         self.assertNotIn("HARVEST_WEEK_PNL_MIN", scanner)
         self.assertNotIn("HARVEST_MONTH_PNL_MIN", scanner)

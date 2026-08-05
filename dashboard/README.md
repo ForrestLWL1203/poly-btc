@@ -10,6 +10,9 @@ The current API projects Hyperliquid state from `hyper/`, but product discovery,
 state mutation remain in the product package. When a Polymarket module is added, product switching and combined
 navigation belong here; Polymarket business logic belongs in `polymarket/`.
 
+`/api/params` exposes only the operator-safe basic scanner controls: weekly volume floor, HFT exclusion and
+Core capacity. Internal collection, qualification and replay parameters are not part of the Dashboard API.
+
 Position fill details distinguish margin committed on entry from capital returned on reduce/close. Returned
 capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
 leverage.

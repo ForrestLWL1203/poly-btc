@@ -10,6 +10,11 @@ from .common import score100
 
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}
+DASHBOARD_SCANNER_PARAM_KEYS = {
+    "HARVEST_WEEK_VLM_MIN",
+    "EXCLUDE_HFT",
+    "CORE_INITIAL_MAX_N",
+}
 REMOVED_PARAMS = {
     "MIN_FOLLOW_SCORE", "COPY_STOP_ENABLE", "STOP_MARGIN_PCT", "STOCK_MAX_LEV",
     "MAX_DEPLOY_PCT", "DEPLOY_FULL_PCT",
@@ -62,6 +67,8 @@ def patch_params(db_path, category, updates):
         }
         for key, val in (updates or {}).items():
             if key in REMOVED_PARAMS:
+                continue
+            if category == "scanner" and key not in DASHBOARD_SCANNER_PARAM_KEYS:
                 continue
             row = db.execute("SELECT category,level,type FROM params WHERE key=?", (key,)).fetchone()
             if not row:
@@ -165,6 +172,10 @@ def _score_dist(db):
 
 def ep_params(db, include_score_dist=False):
     data = params_mod.get_all(db)
+    data["scanner"] = [
+        param for param in data.get("scanner", [])
+        if param.get("key") in DASHBOARD_SCANNER_PARAM_KEYS
+    ]
     # Ignore retired keys sent by an older Dashboard during a rolling deploy.
     for category in list(data):
         if isinstance(data.get(category), list):

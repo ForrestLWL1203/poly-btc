@@ -46,6 +46,66 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_scanner_api_exposes_only_basic_operator_params(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            "CREATE TABLE params ("
+            "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+            "effect TEXT,default_value TEXT,updated_at TEXT)"
+        )
+
+        out = api_params.ep_params(db)
+
+        self.assertEqual(
+            {param["key"] for param in out["scanner"]},
+            api_params.DASHBOARD_SCANNER_PARAM_KEYS,
+        )
+        self.assertNotIn("PRE_STRICT_QUEUE_MAX_N", {param["key"] for param in out["scanner"]})
+        self.assertNotIn("MAX_CONCURRENT_POS", {param["key"] for param in out["scanner"]})
+        self.assertNotIn("CORE_PROFITABILITY_CONTRACT", {param["key"] for param in out["scanner"]})
+        db.close()
+
+    def test_scanner_api_rejects_updates_to_internal_params(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.executemany(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES (?,?,'scanner',?,'int','rescan',?,NULL)",
+                [
+                    ("CORE_INITIAL_MAX_N", "16", "green", "16"),
+                    ("MAX_CONCURRENT_POS", "15", "blue", "15"),
+                ],
+            )
+            db.commit()
+            db.close()
+
+            updated = api_params.patch_params(path, "scanner", {
+                "CORE_INITIAL_MAX_N": 12,
+                "MAX_CONCURRENT_POS": 99,
+            })
+
+            self.assertEqual(updated, {"CORE_INITIAL_MAX_N": 12})
+            db = sqlite3.connect(path)
+            stored = dict(db.execute(
+                "SELECT key,value FROM params WHERE category='scanner'"
+            ).fetchall())
+            db.close()
+            self.assertEqual(stored["CORE_INITIAL_MAX_N"], "12")
+            self.assertEqual(stored["MAX_CONCURRENT_POS"], "15")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def test_patch_coin_blacklist_normalizes_list(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
