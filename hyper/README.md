@@ -490,12 +490,6 @@ current member and the shared account still pass strict certification. It never 
 Core membership, searches leverage/add axes, or starts the general optimizer. Without `--apply` it validates
 and caches the same evidence without changing live parameters.
 
-`.venv/bin/python -m hyper.cli.optimize_current_core --db data/hl.db --apply` is an explicit migration/repair
-operation for a current Core that was deliberately published on an unchanged parameter surface. It locks the
-exact membership, performs one efficient full-surface tune for that set, runs the same bounded final-membership
-margin calibration, activates one immutable strategy revision, and refreshes the certified 30d/7d Dashboard
-replay. It is not part of scheduled scanning and must not be used as a second automatic tuner pass.
-
 The search evaluates a bounded local parameter surface, a small finalist set, continuous-capital windows and
 strict price-path validation. Production formation does not enumerate arbitrary wallet subsets, leave-one-out
 variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a bounded strict-prefix
