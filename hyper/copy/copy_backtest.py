@@ -612,6 +612,7 @@ class Backtest:
         self.wallet_max_open_positions = config.MAX_CONCURRENT_POS
         self.wallet_stock_side_max_positions = config.MAX_CONCURRENT_POS
         self.margin_equity_pct = overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+        self.volatility_notional_sizing = overrides.get("_VOLATILITY_NOTIONAL_SIZING")
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.tail_close_enable = bool(overrides.get("TAIL_CLOSE_ENABLE", config.TAIL_CLOSE_ENABLE))
         self.tail_close_hard_remain_pct = overrides.get(
@@ -678,6 +679,7 @@ class Backtest:
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
             margin_equity_pct=self.margin_equity_pct,
+            volatility_notional_sizing=self.volatility_notional_sizing,
         )
 
     def sigma(self, coin):

@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 
 from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
+                            quantize_margin_pct, volatility_target_margin_pct,
                             rebase_isolated_position,
                             smart_add_order_margin, smart_take_profit_decision,
                             wallet_sector_side_cap_pct, wallet_sector_side_effective_cap_pct,
@@ -11,6 +12,71 @@ from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
+    def test_margin_grid_resolves_exact_half_step_downward(self):
+        self.assertAlmostEqual(quantize_margin_pct(.0525), .05)
+        self.assertAlmostEqual(quantize_margin_pct(.0526), .055)
+
+    def test_btc_anchored_volatility_margin_is_inverse_to_sigma_and_capacity_safe(self):
+        settings = {
+            "btc_margin_pct": .05, "btc_leverage": 30, "btc_sigma": .025,
+            "risk_scale": 1.0, "tail_sigma": .20, "tail_exponent": .5,
+            "margin_grid_step": .005, "min_margin_pct": .005, "reserved_adds": 2,
+        }
+        caps = {"stable": .30, "mid": .20, "high": .15}
+        btc = volatility_target_margin_pct(
+            coin="BTC", sigma=.025, leverage=30, tier="stable",
+            tier_coin_cap=caps, margin_equity_pct=.90, settings=settings,
+        )
+        eth = volatility_target_margin_pct(
+            coin="ETH", sigma=.05, leverage=15, tier="mid",
+            tier_coin_cap=caps, margin_equity_pct=.90, settings=settings,
+        )
+        hype = volatility_target_margin_pct(
+            coin="HYPE", sigma=.05, leverage=10, tier="mid",
+            tier_coin_cap=caps, margin_equity_pct=.90, settings=settings,
+        )
+        tail = volatility_target_margin_pct(
+            coin="CASHCAT", sigma=.25, leverage=6, tier="high",
+            tier_coin_cap=caps, margin_equity_pct=.90, settings=settings,
+        )
+
+        self.assertEqual(btc, .05)
+        self.assertEqual(eth, .05)  # 150% BTC notional / 2x sigma / 15x leverage
+        self.assertEqual(hype, .07)  # 7.5% target is floored to the two-add capacity grid
+        self.assertEqual(tail, .02)
+        self.assertLess(tail * 6, .05 * 30 * (.025 / .25))
+
+    def test_experimental_volatility_surface_is_opt_in(self):
+        common = dict(
+            high_sigma_min=.09,
+            tier_margin={"stable": .055, "mid": .035, "high": .045},
+            tier_lev_cap={"stable": 30.0, "mid": 15.0, "high": 6.0},
+            tier_coin_cap={"stable": .30, "mid": .20, "high": .15},
+            min_lev=1.0, min_open_margin_pct=.001,
+            margin_equity_pct=.90, capital_anchor=10_000.0,
+        )
+        ordinary = OpenSizingParams(**common)
+        experimental = OpenSizingParams(**common, volatility_notional_sizing={
+            "btc_margin_pct": .05, "btc_leverage": 30, "btc_sigma": .025,
+            "risk_scale": 1.0, "tail_sigma": .20, "tail_exponent": .5,
+            "margin_grid_step": .005, "min_margin_pct": .005, "reserved_adds": 2,
+        })
+        inputs = dict(
+            coin="ETH", side="long", entry_px=2_000.0, sigma=.05,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=2.0,
+            maintenance_leverage=15.0,
+        )
+
+        old_plan = plan_open_sizing(**inputs, params=ordinary)
+        lab_plan = plan_open_sizing(**inputs, params=experimental)
+
+        self.assertAlmostEqual(old_plan.margin_pct, .035)
+        self.assertAlmostEqual(old_plan.margin, 315.0)
+        self.assertAlmostEqual(lab_plan.margin_pct, .05)
+        self.assertAlmostEqual(lab_plan.margin, 450.0)
+        self.assertEqual(old_plan.leverage, lab_plan.leverage)
+
     def test_rebase_isolated_position_uses_current_weighted_entry_and_remaining_size(self):
         basis = rebase_isolated_position(
             64_019.93288094258,

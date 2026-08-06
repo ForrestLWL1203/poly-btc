@@ -379,6 +379,18 @@ migrates or writes the source database. Its `--max-rough` bound is a research bu
 primary/reserve Top32 contract. A legacy generation may be used only for an explicitly marked economic preview;
 it is never valid promotion evidence.
 
+To compare the published Core against the offline BTC-anchored volatility sizing experiment, run the lab on an
+SQLite online-backup clone:
+
+```bash
+.venv/bin/python -m hyper.cli.volatility_sizing_lab \
+  --db /private/hl-lab-clone.db --output /private/volatility-sizing.json --progress
+```
+
+The source clone is opened with `mode=ro` and `query_only`. The command uses the canonical continuous shared-
+account replay, performs a bounded risk-scale/leverage search, and strictly price-path-validates at most three
+experimental finalists. It never publishes parameters or Core membership and cannot affect Paper/Live sizing.
+
 For threshold research, the non-publishing distribution collector deliberately ignores the production ROI,
 PnL, win-rate, activity, sample-depth and score gates. It recalls every Leaderboard row above the volume floor,
 confirms `$250,000` of official Perp-only seven-day volume, retains only executable structure, catastrophic

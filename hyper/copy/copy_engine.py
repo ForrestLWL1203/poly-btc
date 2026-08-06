@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from hyper import config
 from .sizing import margin_pct_for_deploy, sizing_equity_for_drawdown
@@ -22,6 +23,10 @@ class OpenSizingParams:
     drawdown_exponent: float = config.SIZING_DRAWDOWN_EXPONENT
     drawdown_max_multiplier: float = config.SIZING_DRAWDOWN_MAX_MULTIPLIER
     margin_equity_pct: float = config.MARGIN_EQUITY_PCT
+    # Offline research-only sizing surface. Production callers leave this unset. Keeping the experiment
+    # behind an explicit immutable input makes it impossible for a lab replay to change ordinary Paper/Live
+    # sizing merely because the helper exists.
+    volatility_notional_sizing: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,66 @@ class SmartTakeProfitDecision:
     remaining_size: float
     exit_fee: float
     reason: str
+
+
+def quantize_margin_pct(value: float, step: float = 0.005) -> float:
+    """Round to the nearest margin grid point, resolving exact ties downward."""
+    step = max(1e-12, float(step or 0.005))
+    scaled = max(0.0, float(value or 0.0)) / step
+    lower = math.floor(scaled)
+    fraction = scaled - lower
+    units = lower + (1 if fraction > 0.5 + 1e-12 else 0)
+    return units * step
+
+
+def volatility_target_margin_pct(
+    *,
+    coin: str,
+    sigma: float,
+    leverage: float,
+    tier: str,
+    tier_coin_cap: dict,
+    margin_equity_pct: float,
+    settings: dict,
+) -> float:
+    """Derive first-open margin from a BTC notional anchor for offline research.
+
+    The target notional shrinks inversely with volatility. Leverage is selected separately and clipped by
+    venue metadata before this function runs; margin is then the residual needed to reach that notional.
+    The final value is placed on the 0.5 percentage-point grid and capped so one open plus the configured two
+    full add units fit below the tier's per-coin cap.
+    """
+    btc_margin = max(0.0, float(settings.get("btc_margin_pct", 0.05) or 0.0))
+    if str(coin or "").upper() == "BTC":
+        return btc_margin
+
+    lev = max(1e-12, float(leverage or 0.0))
+    btc_leverage = max(1e-12, float(settings.get("btc_leverage", 30.0) or 30.0))
+    btc_sigma = max(1e-12, float(settings.get("btc_sigma") or 0.0))
+    coin_sigma = max(btc_sigma, float(sigma or btc_sigma))
+    risk_scale = max(0.0, float(settings.get("risk_scale", 1.0) or 0.0))
+    tail_start = max(btc_sigma, float(settings.get("tail_sigma", 0.20) or 0.20))
+    tail_exponent = max(0.0, float(settings.get("tail_exponent", 0.50) or 0.50))
+    tail_penalty = 1.0
+    if coin_sigma > tail_start:
+        tail_penalty = (tail_start / coin_sigma) ** tail_exponent
+    target_notional_pct = (
+        btc_margin * btc_leverage
+        * min(1.0, btc_sigma / coin_sigma)
+        * risk_scale
+        * tail_penalty
+    )
+    grid_step = max(1e-12, float(settings.get("margin_grid_step", 0.005) or 0.005))
+    margin_pct = quantize_margin_pct(target_notional_pct / lev, grid_step)
+    min_margin_pct = max(0.0, float(settings.get("min_margin_pct", grid_step) or 0.0))
+    reserved_adds = max(1, int(settings.get("reserved_adds", config.SMART_ADD_MIN_CAPACITY) or 1))
+    equity_pct = max(1e-12, min(1.0, float(margin_equity_pct or 0.0)))
+    raw_capacity = max(0.0, float(tier_coin_cap.get(tier) or 0.0)) / (
+        (reserved_adds + 1) * equity_pct
+    )
+    # The published surface must stay on-grid. Floor the capacity itself so rounding cannot exceed it.
+    capacity_grid = math.floor((raw_capacity + 1e-12) / grid_step) * grid_step
+    return min(capacity_grid, max(min_margin_pct, margin_pct))
 
 
 def smart_add_margin_ceiling(
@@ -505,6 +570,16 @@ def plan_open_sizing(
     # One operator-owned percentage controls both order size and the aggregate fresh-entry budget. It is
     # not a frozen sub-wallet: once new entries stop, existing-position adds may still use real available cash.
     margin_pct = margin_pct_for_deploy(params.tier_margin[tier])
+    if params.volatility_notional_sizing:
+        margin_pct = volatility_target_margin_pct(
+            coin=coin,
+            sigma=sigma,
+            leverage=lev,
+            tier=tier,
+            tier_coin_cap=params.tier_coin_cap,
+            margin_equity_pct=margin_equity_pct,
+            settings=params.volatility_notional_sizing,
+        )
     wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
     deploy_room = max(0.0, risk_available - (1.0 - margin_equity_pct) * risk_equity)
