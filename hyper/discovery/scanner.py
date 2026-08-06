@@ -7081,7 +7081,7 @@ def _retune_repaired_membership_closure(
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
                                retune_formation=False, force_entry_requalification=False,
-                               reuse_tuned_surface=False):
+                               reuse_tuned_surface=False, fixed_current_surface=False):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -7089,6 +7089,8 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     ``replace_existing`` flag. It repairs both an empty bootstrap and a published selection produced from a
     stale derived watchlist without repeating an expensive full scan.
     """
+    if fixed_current_surface and retune_formation:
+        raise ValueError("fixed_current_surface_conflicts_with_retune")
     current = selection.latest_published_generation(db)
     generation_id = generation_id or current
     pipeline_audit.set_generation(generation_id)
@@ -7167,7 +7169,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         not bool(retune_formation)
         and _formation_membership_changed(formation, existing_core)
     )
-    if membership_retune_triggered:
+    if membership_retune_triggered and not fixed_current_surface:
         if reuse_tuned_surface:
             formation = _retune_repaired_membership_closure(
                 db, generation_id, stamp, repair_now_ms, formation,
@@ -7179,8 +7181,21 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
                 force_entry_requalification=force_entry_requalification,
                 force_retune=True,
             )
+    if fixed_current_surface:
+        search = dict(formation.get("search") or {})
+        search.update({
+            "algorithm": "published_fixed_current_surface_reform_v1",
+            "fixedCurrentSurface": True,
+            "membershipChanged": bool(membership_retune_triggered),
+            "retuneApplied": False,
+        })
+        formation["search"] = search
     _assert_automatic_formation_tuned(
-        formation, required=bool(retune_formation or membership_retune_triggered),
+        formation,
+        required=bool(
+            retune_formation
+            or (membership_retune_triggered and not fixed_current_surface)
+        ),
     )
     refresh_watchlist(
         db,
@@ -7207,11 +7222,20 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db, generation_id, rows, repair_now_ms,
     )
     current_core = _record_explicit_follow_history(db, rows, stamp, previous_core, generation_id)
+    publication_source = (
+        "selection_fixed_surface_reform"
+        if fixed_current_surface else "selection_repair"
+    )
+    publication_reason = (
+        "reformed_membership_on_current_surface"
+        if fixed_current_surface else
+        "repaired_selection" if previous_core else "repaired_cold_bootstrap"
+    )
     active_strategy = strategy_revision.create_revision(
         db,
         generation_id,
-        source="selection_repair",
-        reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
+        source=publication_source,
+        reason=publication_reason,
         parent_revision=expected_strategy_revision,
         expected_active_revision=expected_strategy_revision,
         validation={
@@ -7227,7 +7251,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         pipeline_audit._insert_event(
             db,
             stamp=stamp,
-            source="selection_repair",
+            source=publication_source,
             stage="selection",
             addr=row.addr,
             status=row.role,
@@ -7245,10 +7269,10 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     pipeline_audit._insert_event(
         db,
         stamp=stamp,
-        source="selection_repair",
+        source=publication_source,
         stage="selection_summary",
         status="ok",
-        reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
+        reason=publication_reason,
         payload={
             "generation": generation_id,
             "action": marginal.action if marginal else "keep",
@@ -7264,13 +7288,16 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db, generation_id, marginal,
     )
     tune_summary = {
-        "status": "complete", "reason": "synchronous_quality_prefix_formation",
+        "status": "complete", "reason": (
+            "fixed_current_surface_formation"
+            if fixed_current_surface else "synchronous_quality_prefix_formation"
+        ),
         "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
     }
     pipeline_audit._insert_event(
         db,
         stamp=stamp,
-        source="selection_repair",
+        source=publication_source,
         stage="tuner_finalize",
         status=tune_summary.get("status"),
         reason=tune_summary.get("reason"),
@@ -7282,6 +7309,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         "generation": generation_id,
         "core": len(current_core),
         "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
+        "fixedCurrentSurface": bool(fixed_current_surface),
         "selectionAction": marginal.action if marginal else "keep",
         "tuner": tune_summary,
     }
@@ -7378,6 +7406,39 @@ def optimize_published_generation(
         "preStrictRerank": rerank,
         "selection": selection_result,
         "tune": selection_result.get("tuner"),
+    }
+
+
+def reform_published_generation_current_surface(
+    db, generation_id=None, stamp=None,
+) -> dict:
+    """Re-rank and publish current evidence without changing the active parameter surface."""
+    generation_id = generation_id or selection.latest_published_generation(db)
+    pipeline_audit.set_generation(generation_id)
+    stamp = stamp or now_iso()
+    meta = db.execute(
+        "SELECT COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
+        "FROM scan_generation sg LEFT JOIN generation_market_manifest gmm "
+        "ON gmm.generation=sg.generation "
+        "WHERE sg.generation=? AND sg.status='published' AND sg.complete=1 AND sg.is_current=1",
+        (generation_id,),
+    ).fetchone()
+    generation_asof_ms = int(meta[0] or 0) if meta else 0
+    if generation_asof_ms <= 0:
+        raise RuntimeError("fixed_surface_reform_generation_asof_missing")
+    rerank = _rerank_cached_pre_strict_queue(
+        db, generation_id, now_ms=generation_asof_ms,
+    )
+    result = repair_published_selection(
+        db, generation_id, stamp=stamp, replace_existing=True,
+        retune_formation=False, force_entry_requalification=True,
+        fixed_current_surface=True,
+    )
+    return {
+        "status": "ok" if result.get("status") == "repaired" else result.get("status"),
+        "generation": generation_id,
+        "preStrictRerank": rerank,
+        "selection": result,
     }
 
 
