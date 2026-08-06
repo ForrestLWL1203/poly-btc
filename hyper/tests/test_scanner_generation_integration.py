@@ -647,20 +647,21 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 2)
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
-    def test_complete_scan_retries_transient_profile_and_sigma_failures_before_seal(self):
+    def test_complete_scan_keeps_rough_copy_local_and_resolves_strict_market_before_seal(self):
         source = inspect.getsource(scanner.scan)
         reader_source = inspect.getsource(scanner._profile_reader)
+        rough_source = inspect.getsource(scanner._rough_replay_source_pool)
 
         self.assertIn('PRAGMA query_only=ON', reader_source)
         self.assertIn('_profile_reader(profile_db_path, db)', source)
         self.assertIn('stage="retry_deferred_profiles"', source)
-        self.assertIn('stage="retry_deferred_market"', source)
-        self.assertIn("rough_copy_market_data_error:sigma_request_failed:", source)
+        self.assertNotIn("resolver.ensure(", rough_source)
+        self.assertIn("resolver.rough_context(", rough_source)
+        self.assertIn("_prepare_strict_market_snapshot(", source)
         self.assertLess(
-            source.index('stage="retry_deferred_market"'),
+            source.index("_prepare_strict_market_snapshot("),
             source.index("generation_market.seal("),
         )
-        self.assertIn("while market_retry_addrs:", source)
 
     def test_profile_reader_is_independent_and_query_only_for_file_database(self):
         with tempfile.TemporaryDirectory() as td:
@@ -678,7 +679,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE name='forbidden_worker_write'"
             ).fetchone())
 
-    def test_successful_rough_retry_clears_stale_market_deferred_marker(self):
+    def test_rough_replay_never_resolves_candles_and_clears_stale_marker(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             db.execute(
@@ -688,21 +689,18 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "'source_qualified','{\"allowed\":[\"crypto\"]}')"
             )
             db.commit()
-            resolver = SimpleNamespace()
-            attempts = iter((
-                scanner.generation_market.MarketSnapshotError(
-                    "sigma_request_failed:BTC"
-                ),
-                ({"BTC": .05}, {"BTC": {"mark_px": 100.0}}),
-            ))
+            calls = {"ensure": 0, "rough": 0}
 
             def ensure(_coins):
-                result = next(attempts)
-                if isinstance(result, Exception):
-                    raise result
-                return result
+                calls["ensure"] += 1
+                raise AssertionError("rough Copy must not resolve candle data")
 
-            resolver.ensure = ensure
+            def rough_context(coins):
+                calls["rough"] += 1
+                self.assertEqual(coins, {"BTC"})
+                return {"BTC": {"mark_px": 100.0, "max_leverage": 50.0}}
+
+            resolver = SimpleNamespace(ensure=ensure, rough_context=rough_context)
             context = SimpleNamespace(
                 generation_market_resolver=resolver,
                 copy_bt_valuation_marks={},
@@ -726,22 +724,57 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.pre_strict, "evaluate", return_value=qualification), \
                     patch.object(scanner, "_store_pre_strict_evidence"), \
                     patch.object(scanner, "_finalize_pre_strict_queue", return_value={}):
-                first = scanner._rough_replay_source_pool(
+                result = scanner._rough_replay_source_pool(
                     db, ["0xaaa"], "g1", 1_000, context, "now",
-                )
-                second = scanner._rough_replay_source_pool(
-                    db, ["0xaaa"], "g1", 1_000, context, "now",
-                    source="scan_retry",
                 )
 
-            self.assertEqual(first["failed"], ["0xaaa"])
-            self.assertEqual(second["qualified"], ["0xaaa"])
+            self.assertEqual(result["qualified"], ["0xaaa"])
+            self.assertEqual(calls, {"ensure": 0, "rough": 1})
             self.assertEqual(
                 db.execute(
                     "SELECT data_status,evidence_status FROM profile WHERE addr='0xaaa'"
                 ).fetchone(),
                 ("valid", "source_qualified"),
             )
+
+    def test_strict_market_snapshot_resolves_only_queued_and_retained_coins(self):
+        attempts = []
+        eth_failed = False
+
+        def ensure(coins):
+            nonlocal eth_failed
+            coin = next(iter(coins))
+            attempts.append(coin)
+            if coin == "ETH" and not eth_failed:
+                eth_failed = True
+                raise scanner.generation_market.MarketSnapshotError(
+                    "sigma_request_failed:ETH"
+                )
+            return ({coin: .05}, {coin: {"mark_px": 100.0}})
+
+        context = SimpleNamespace(
+            generation_market_resolver=SimpleNamespace(ensure=ensure),
+        )
+
+        def fills(_db, addr, _now_ms, _context):
+            return {
+                "0xqueued": [{"coin": "BTC"}, {"coin": "ETH"}],
+                "0xcore": [{"coin": "BTC"}, {"coin": "SOL"}],
+            }[addr]
+
+        with patch.object(scanner, "_copy_bt_cached_fills", side_effect=fills), \
+                patch.object(scanner, "_set_scan_progress"), \
+                patch.object(scanner.time, "sleep"):
+            result = scanner._prepare_strict_market_snapshot(
+                None, ["0xqueued"], "g1", 1_000, context,
+                retention_addrs=["0xcore"],
+            )
+
+        self.assertEqual(result["coins"], 3)
+        self.assertEqual(result["retryPasses"], 1)
+        self.assertEqual(attempts.count("BTC"), 1)
+        self.assertEqual(attempts.count("ETH"), 2)
+        self.assertEqual(attempts.count("SOL"), 1)
 
     def test_retention_overlay_reuses_winning_surface_evidence(self):
         decision = SimpleNamespace(

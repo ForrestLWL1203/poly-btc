@@ -3199,28 +3199,28 @@ def _rough_replay_source_pool(
             continue
         row = dict(zip(cols, raw))
         fills = _copy_bt_cached_fills(db, addr, int(now_ms), p)
-        sigmas, market_ctx = {}, {}
-        if resolver is not None:
-            try:
-                sigmas, market_ctx = resolver.ensure({
-                    fill.get("coin") for fill in fills if fill.get("coin")
-                })
-            except generation_market.MarketSnapshotError as exc:
-                row.update(
-                    reason=f"rough_copy_market_data_error:{exc}",
-                    data_status="deferred_data_error",
-                    evidence_status="invalid",
-                )
-                db.execute(
-                    f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' * len(cols))})",
-                    [row.get(column) for column in cols],
-                )
-                failed.append(addr)
-                continue
-        # A previous pass may have persisted a transient market-data error on this same generation row.
-        # Reaching this point proves the frozen market inputs are now complete, so do not feed that stale
-        # deferred marker back into the successful replay/eligibility calculation.
+        # Rough Copy is a cached-fill replay by contract.  Do not call
+        # ``resolver.ensure`` here: that method fetches daily candles for every
+        # first-seen coin and previously turned this local stage into a serial
+        # REST crawl.  Empty sigmas deliberately select the backtest engine's
+        # deterministic fallback.  The already-frozen bulk context is safe to
+        # reuse because it performs no per-coin request; strict finalists resolve
+        # their immutable volatility snapshot after this queue is frozen.
+        sigmas = {}
+        if resolver is not None and callable(getattr(resolver, "rough_context", None)):
+            market_ctx = resolver.rough_context({
+                fill.get("coin") for fill in fills if fill.get("coin")
+            })
+        else:
+            cached_ctx = dict(getattr(p, "copy_bt_market_ctx", None) or {})
+            market_ctx = {
+                coin: dict(cached_ctx.get(coin) or {})
+                for coin in {fill.get("coin") for fill in fills if fill.get("coin")}
+                if coin in cached_ctx
+            }
+        # Older interrupted generations may carry the retired rough-market
+        # transport marker.  A K-line-free replay no longer depends on that
+        # transport, so successful local evaluation clears it.
         row["data_status"] = "valid"
         if str(row.get("evidence_status") or "") == "invalid":
             row["evidence_status"] = "source_qualified"
@@ -3328,6 +3328,62 @@ def _rough_replay_source_pool(
     return {
         "attempted": len(addrs), "qualified": qualified, "failed": failed,
         "queued": queued,
+    }
+
+
+def _prepare_strict_market_snapshot(
+    db, queued_addrs, generation_id, now_ms, p, *, retention_addrs=None,
+) -> dict:
+    """Resolve immutable daily-candle inputs only for the strict candidate set."""
+    resolver = getattr(p, "generation_market_resolver", None)
+    if resolver is None:
+        if generation_id:
+            raise generation_market.MarketSnapshotError(
+                "generation_market_resolver_missing"
+            )
+        return {"coins": 0, "attempts": 0, "retryPasses": 0}
+    addrs = list(dict.fromkeys(
+        str(addr or "").lower()
+        for addr in [*(queued_addrs or ()), *(retention_addrs or ())]
+        if addr
+    ))
+    coins = set()
+    for addr in addrs:
+        coins.update(
+            fill.get("coin")
+            for fill in _copy_bt_cached_fills(db, addr, int(now_ms), p)
+            if fill.get("coin")
+        )
+    pending = sorted(coins)
+    attempts = retry_passes = resolved = 0
+    while pending:
+        retry = []
+        for coin in pending:
+            attempts += 1
+            try:
+                resolver.ensure({coin})
+            except generation_market.MarketSnapshotError as exc:
+                if str(exc).startswith("sigma_request_failed:"):
+                    retry.append(coin)
+                    continue
+                raise
+            resolved += 1
+            _set_scan_progress(
+                db, stage="strict_market_snapshot",
+                candidates_scanned=resolved, candidates_total=len(coins),
+            )
+        if not retry:
+            break
+        retry_passes += 1
+        _set_scan_progress(
+            db, stage="retry_strict_market_snapshot",
+            candidates_scanned=resolved, candidates_total=len(coins),
+        )
+        time.sleep(min(60.0, float(2 ** min(retry_passes - 1, 6))))
+        pending = retry
+    return {
+        "coins": len(coins), "attempts": attempts,
+        "retryPasses": retry_passes,
     }
 
 
@@ -8961,6 +9017,10 @@ def refresh_challengers(db, p) -> dict:
             source="challenger_daily",
             queue_allowed_addrs=base_promotion_universe,
         )
+        strict_market_summary = _prepare_strict_market_snapshot(
+            db, rough_summary.get("queued") or (), generation_id, now_ms, p,
+            retention_addrs=previous_core,
+        )
         severe_copy_liquidations = {
             str(addr or "").lower()
             for (addr,) in db.execute(
@@ -8996,6 +9056,7 @@ def refresh_challengers(db, p) -> dict:
                 "preStrictPassed": len(rough_summary.get("qualified") or ()),
                 "top32": len(rough_summary.get("queued") or ()),
                 "promotionUniverse": len(base_promotion_universe),
+                "strictMarketCoins": strict_market_summary.get("coins", 0),
             },
         )
         prepublication_high_core = set()
@@ -10147,58 +10208,15 @@ def scan(db, p):
     rough_summary = _rough_replay_source_pool(
         db, source_pool, generation_id, now_ms, p, stamp,
     )
-    # The resolver intentionally does not memoize ``sigma_request_failed``.  Re-run only the wallets whose
-    # rough Copy replay hit that transient request; all successful/business-rejected wallets keep their
-    # first-pass evidence.  The market manifest stays mutable until this queue is empty, then seals once.
-    rough_market_retry_pass = 0
-    rough_market_retry_attempts = 0
-
-    def transient_rough_market_addrs():
-        deferred = {
-            str(addr or "").lower()
-            for addr, reason in db.execute(
-                "SELECT addr,reason FROM profile WHERE profile_generation=? "
-                "AND data_status='deferred_data_error'",
-                (generation_id,),
-            ).fetchall()
-            if str(reason or "").startswith(
-                "rough_copy_market_data_error:sigma_request_failed:"
-            )
-        }
-        return [addr for addr in source_pool if addr in deferred]
-
-    market_retry_addrs = transient_rough_market_addrs()
-    while market_retry_addrs:
-        rough_market_retry_pass += 1
-        if rough_market_retry_pass > 1:
-            time.sleep(min(60.0, float(2 ** min(rough_market_retry_pass - 2, 6))))
-        _set_scan_progress(
-            db, stage="retry_deferred_market", candidates_scanned=0,
-            candidates_total=len(market_retry_addrs),
-        )
-        retry_summary = _rough_replay_source_pool(
-            db, market_retry_addrs, generation_id, now_ms, p, stamp,
-            source="scan_retry",
-        )
-        rough_market_retry_attempts += len(market_retry_addrs)
-        rough_summary["qualified"] = list(dict.fromkeys(
-            list(rough_summary.get("qualified") or ())
-            + list(retry_summary.get("qualified") or ())
-        ))
-        pipeline_audit._insert_event(
-            db, stamp=stamp, source="scan", stage="market_deferred_retry",
-            status="complete", reason="sigma_transport_retry_pass",
-            payload={
-                "generation": generation_id, "pass": rough_market_retry_pass,
-                "attempted": len(market_retry_addrs),
-            },
-        )
-        db.commit()
-        market_retry_addrs = transient_rough_market_addrs()
+    strict_market_summary = _prepare_strict_market_snapshot(
+        db, rough_summary.get("queued") or (), generation_id, now_ms, p,
+        retention_addrs=selection.published_core_membership(db) or (),
+    )
     rough_summary["profileRetryPasses"] = profile_retry_pass
     rough_summary["profileRetryAttempts"] = profile_retry_attempts
-    rough_summary["marketRetryPasses"] = rough_market_retry_pass
-    rough_summary["marketRetryAttempts"] = rough_market_retry_attempts
+    rough_summary["strictMarketCoins"] = strict_market_summary.get("coins", 0)
+    rough_summary["marketRetryPasses"] = strict_market_summary.get("retryPasses", 0)
+    rough_summary["marketRetryAttempts"] = strict_market_summary.get("attempts", 0)
     p.source_only_profile = False
     pipeline_audit._insert_event(
         db, stamp=stamp, source="scan", stage="source_quality_pool",
@@ -10208,6 +10226,7 @@ def scan(db, p):
             "roughCopyCompleted": rough_summary.get("attempted", 0),
             "preStrictPassed": len(rough_summary.get("qualified") or ()),
             "top32": len(rough_summary.get("queued") or ()),
+            "strictMarketCoins": strict_market_summary.get("coins", 0),
         },
     )
     db.commit()

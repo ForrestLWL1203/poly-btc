@@ -184,6 +184,20 @@ class SealedResolver:
             {coin: dict(self.market_ctx.get(coin) or {}) for coin in required},
         )
 
+    def rough_context(self, coins) -> dict[str, dict]:
+        """Return already-frozen context without resolving volatility.
+
+        Rough Copy is deliberately fills-only.  A resumed generation may reuse
+        its sealed bulk context, but must not turn that inexpensive replay into
+        a candle fetch or make its result depend on which coins were resolved
+        earlier in the generation.
+        """
+        return {
+            coin: dict(self.market_ctx.get(coin) or {})
+            for coin in sorted({str(value) for value in coins if value})
+            if coin in self.market_ctx
+        }
+
 
 class Resolver:
     """Generation-scoped, per-coin de-duplicated market-data resolver."""
@@ -292,6 +306,32 @@ class Resolver:
             "day_ntl_vlm": day_vlm, "oi_notional": oi_notional,
             "mark_px": mark_px, "max_leverage": max_leverage,
         }
+
+    def rough_context(self, coins) -> dict[str, dict]:
+        """Project the frozen bulk context without requesting candle data.
+
+        ``fetch_context_snapshot`` has already captured these fields in one
+        bounded bulk request.  Sigma is intentionally absent: the rough replay
+        uses the engine's deterministic fallback and only strict finalists
+        populate the immutable per-coin volatility snapshot.
+        """
+        selected = {}
+        for coin in sorted({str(value) for value in coins if value}):
+            ctx = self.contexts.get(coin)
+            if not isinstance(ctx, dict):
+                continue
+            mark_px = _number(ctx.get("markPx") or ctx.get("oraclePx") or ctx.get("midPx"))
+            open_interest = _number(ctx.get("openInterest"))
+            selected[coin] = {
+                "day_ntl_vlm": _number(ctx.get("dayNtlVlm")),
+                "oi_notional": (
+                    open_interest * mark_px
+                    if open_interest is not None and mark_px is not None else None
+                ),
+                "mark_px": mark_px,
+                "max_leverage": _number(ctx.get("universe_maxLeverage")),
+            }
+        return selected
 
     def ensure(self, coins) -> tuple[dict[str, float], dict[str, dict]]:
         # The lock intentionally spans the network call: the REST pacer is global anyway, and this guarantees
