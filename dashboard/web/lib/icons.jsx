@@ -20,6 +20,13 @@ export const PlayIcon = () => (
   </svg>
 );
 
+export const PauseIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+    <rect x="7" y="5.5" width="3.6" height="13" rx="1" />
+    <rect x="13.4" y="5.5" width="3.6" height="13" rx="1" />
+  </svg>
+);
+
 export const StopIcon = () => (
   <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
     <rect x="7" y="7" width="10" height="10" rx="1.4" />

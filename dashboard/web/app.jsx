@@ -17,7 +17,7 @@ import {
   fUsd,
   scannerColor,
 } from "./lib/format.js";
-import { IC, Ico, PlayIcon, StopIcon } from "./lib/icons.jsx";
+import { IC, Ico, PauseIcon, PlayIcon, StopIcon } from "./lib/icons.jsx";
 import { useDashboardRefresh } from "./lib/refresh.js";
 
 /* HyperEcho — precompiled React dashboard. Talks to the live dashboard API. */
@@ -37,68 +37,29 @@ const fStorage = bytes => {
   return Math.round(value / 1e3) + " KB";
 };
 
-function ObserverControl({ status, busy, onStart, onPause, onStop, live = false }) {
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef(null);
+function ObserverControl({ status, executionState, busy, onStart, onPause, onStop, live = false }) {
+  const stopped = status === "stopped";
   const paused = status === "paused";
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOutside = e => {
-      if (!menuRef.current?.contains(e.target)) setOpen(false);
-    };
-    const closeOnEscape = e => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
-
-  useEffect(() => setOpen(false), [status, busy]);
-
-  if (status === "stopped") {
-    return (
-      <button className="btn btn-go btn-icon-round" onClick={onStart} disabled={busy}
-        aria-label="启动跟单" title="启动跟单" aria-busy={busy || undefined}>
-        <PlayIcon />
-      </button>
-    );
-  }
-
-  const act = action => {
-    setOpen(false);
-    action();
-  };
+  const draining = live && executionState === "draining";
+  const reconcileRequired = live && executionState === "reconcile_required";
+  const transportLocked = draining || reconcileRequired;
+  const showPlay = stopped || paused;
+  const transportLabel = stopped ? "启动跟单" : paused ? "恢复开仓" : "暂停新开仓";
+  const stopLabel = live ? "排空并停止实盘" : "彻底停止跟单";
 
   return (
-    <div className="command-menu-wrap" ref={menuRef}>
-      <button className={"btn btn-icon-round " + (paused ? "btn-go" : "btn-accent")}
-        onClick={() => setOpen(v => !v)} disabled={busy}
-        aria-label={paused ? "恢复或停止跟单" : "暂停或停止跟单"}
-        title={paused ? "恢复或停止跟单" : "暂停或停止跟单"}
-        aria-haspopup="menu" aria-expanded={open} aria-busy={busy || undefined}>
-        {paused ? <PlayIcon /> : <StopIcon />}
+    <div className="observer-controls" role="group" aria-label="跟单运行控制">
+      <button className={"btn observer-control-btn " + (showPlay ? "observer-play-btn" : "observer-pause-btn")}
+        onClick={showPlay ? onStart : onPause} disabled={busy || transportLocked}
+        aria-label={transportLabel} title={transportLocked ? (draining ? "实盘正在排空" : "需要先完成账户核对") : transportLabel}
+        aria-busy={busy || undefined}>
+        {showPlay ? <PlayIcon /> : <PauseIcon />}
       </button>
-      {open && (
-        <div className="command-menu" role="menu" aria-label="跟单运行控制">
-          <div className="command-menu-title">{paused ? "继续运行" : "温和停止"}</div>
-          <button className={"btn " + (paused ? "btn-go" : "btn-accent")} role="menuitem"
-            onClick={() => act(paused ? onStart : onPause)}>
-            {paused ? "恢复开单" : "暂停新开仓"}
-          </button>
-          <p>{paused ? "恢复跟随目标钱包的新开仓" : "不再开新仓，存量仓位继续自动管理至退出"}</p>
-          <div className="command-menu-separator" />
-          <div className="command-menu-title">{live ? "实盘排空" : "彻底停止"}</div>
-          <button className="btn btn-stop" role="menuitem" onClick={() => act(onStop)}>
-            {live ? "排空后停止" : "彻底停止跟单"}
-          </button>
-          <p>{live ? "禁止新增敞口，继续跟随减仓和平仓；真实仓位归零后才停止进程" : "停止 Observer 进程，存量仓位将不再自动管理"}</p>
-        </div>
-      )}
+      <button className="btn observer-control-btn observer-stop-btn" onClick={onStop}
+        disabled={busy || stopped || draining} aria-label={stopLabel} title={stopLabel}
+        aria-busy={busy || undefined}>
+        <StopIcon />
+      </button>
     </div>
   );
 }
@@ -137,6 +98,18 @@ function Dashboard({ onLogout }) {
   const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
   const pausing = !!obsPending || liveStarting;
   const liveMode = execution?.selectedMode === "live" || ov?.system?.mode === "live";
+  const executionState = execution?.state;
+  const observerDraining = liveMode && executionState === "draining";
+  const observerReconcileRequired = liveMode && executionState === "reconcile_required";
+  const observerPaused = obs === "paused" && !observerDraining && !observerReconcileRequired;
+  const observerStopped = obs === "stopped";
+  const observerStatusLabel = observerDraining ? "排空中"
+    : observerReconcileRequired ? "需要核对"
+      : observerPaused ? "暂停开仓"
+        : observerStopped ? "已停止" : null;
+  const observerStatusTone = observerReconcileRequired ? "tint-red"
+    : (observerDraining || observerPaused) ? "tint-amber"
+      : observerStopped ? "tint-gray" : (liveMode ? "tint-red" : "tint-amber");
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
@@ -240,16 +213,21 @@ function Dashboard({ onLogout }) {
             <div className={"title" + (ACCENT_TITLE_PAGES.has(page) ? " title-accent" : "")}>{TITLES[page]}</div>
           </div>
           <div className="topbar-right">
-            <span className={"pill execution-pill " + (liveMode ? "tint-red" : "tint-amber")}>
-              <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: liveMode ? "pulse 1.6s infinite" : "none" }} />
-              {liveMode ? "LIVE" : "PAPER · 模拟盘"}
+            <span className={"pill execution-pill " + observerStatusTone}>
+              {observerPaused || observerDraining
+                ? <PauseIcon />
+                : observerStopped || observerReconcileRequired
+                  ? <StopIcon />
+                  : <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />}
+              <span>{liveMode ? "LIVE" : "PAPER · 模拟盘"}</span>
+              {observerStatusLabel && <em>{observerStatusLabel}</em>}
             </span>
             {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
               title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
               <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
               {storageGuard.status === "critical" ? "磁盘高危" : "磁盘预警"} {Number(storageGuard.diskUsedPct || 0).toFixed(0)}%
             </span>}
-            {ov && ov.system && <ObserverControl status={obs} busy={pausing}
+            {ov && ov.system && <ObserverControl status={obs} executionState={executionState} busy={pausing}
               onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} live={liveMode} />}
           </div>
         </div>

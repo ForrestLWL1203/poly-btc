@@ -23,8 +23,10 @@ while closed-position history preserves entry-basis notional.
 The Hyperliquid Account tab exposes only Paper and Mainnet Live. Paper is a compact one-line state; selecting
 Live reveals encrypted Mainnet Agent setup. Testnet is intentionally absent from product UI. Agent expiry is
 read from Hyperliquid during credential verification. Account setup performs only the initial credential checks
-and never starts Observer; the global top-right copy-trade button is the only start/stop entry and performs the
-full Live startup preflight before creating the session. Mode changes require Observer to be stopped.
+and never starts Observer; the top-right transport controls are the only start/pause/stop entry and perform the
+full Live startup preflight before creating the session. The play control starts or resumes, pause blocks new
+exposure while existing positions remain managed, and stop safely drains Live exposure before process exit.
+Mode changes require Observer to be stopped.
 
 Passing that startup preflight enters normal Live execution immediately; there is no separate 1%-equity Canary
 stage. Normal equity sizing, deployment, per-coin, add and liquidity limits continue to apply.

@@ -312,8 +312,9 @@ together. The current broad contract is:
   belong in production mode selection or persistent product bookkeeping.
 - Paper mode is compact. Live reveals owner address, agent address, and agent private-key input. “加密保存并验证”
   validates ownership/authorization/Unified/account basics and stores credentials; it does not start Observer.
-- The global top-right button is the only normal start/stop control. Its state comes from execution control and
-  process state, not a client-side assumption. Live strategy publication must not make it display stopped.
+- The global top-right player-style controls are the only normal start/pause/stop controls. Their state comes
+  from execution control and process state, not a client-side assumption. Live strategy publication must not
+  make them display stopped.
 - Agent expiry is fetched from `extraAgents`; never add an editable expiry field.
 - Mode switching is disabled while Observer is active.
 - Position close controls remain loading until every position captured by the command reaches terminal state or
