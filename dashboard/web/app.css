@@ -105,10 +105,36 @@ body {
   backdrop-filter: blur(6px); }
 .crumb { font-size: 11px; color: var(--t3); }
 .crumb-live { color: var(--red-l); font-weight: 700; letter-spacing: .04em; }
-.execution-pill { min-height: 28px; font-weight: 700; letter-spacing: .03em; }
-.execution-pill svg { width: 11px; height: 11px; flex: 0 0 auto; }
-.execution-pill em { margin-left: 2px; padding-left: 8px; border-left: 1px solid currentColor;
-  font-size: 10px; font-style: normal; font-weight: 650; letter-spacing: .02em; opacity: .78; }
+.execution-rings-status {
+  --rings-color: var(--accent);
+  position: relative; isolation: isolate; flex: 0 0 132px; width: 132px; height: 38px; overflow: hidden;
+  border: 1px solid rgba(var(--accent-rgb), .22); border-radius: 999px;
+  background: radial-gradient(circle at 50% 52%, rgba(var(--accent-rgb), .12), rgba(13,20,20,.7) 52%, rgba(10,10,11,.92) 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.055), 0 7px 24px rgba(0,0,0,.22);
+}
+.execution-rings-status::before {
+  content: ""; position: absolute; z-index: -1; left: 50%; top: 50%; width: 28px; height: 28px;
+  transform: translate(-50%, -50%); border: 1px solid currentColor; border-radius: 50%; opacity: .16;
+  box-shadow: 0 0 11px currentColor, 0 0 0 7px rgba(255,255,255,.025), 0 0 0 14px rgba(255,255,255,.018);
+}
+.execution-rings-status.live { color: var(--red-l); border-color: rgba(255,92,92,.25);
+  background: radial-gradient(circle at 50% 52%, rgba(255,92,92,.12), rgba(27,14,17,.72) 52%, rgba(10,10,11,.94) 100%); }
+.execution-rings-status.paused { color: var(--amber); border-color: rgba(231,197,111,.25);
+  background: radial-gradient(circle at 50% 52%, rgba(231,197,111,.11), rgba(25,21,13,.72) 52%, rgba(10,10,11,.94) 100%); }
+.execution-rings-status.stopped { color: var(--t2); border-color: rgba(122,122,130,.18);
+  background: radial-gradient(circle at 50% 52%, rgba(122,122,130,.09), rgba(18,18,21,.76) 52%, rgba(10,10,11,.94) 100%); }
+.execution-rings-status.check { color: var(--red-l); border-color: rgba(255,92,92,.34);
+  background: radial-gradient(circle at 50% 52%, rgba(255,92,92,.13), rgba(30,13,16,.76) 52%, rgba(10,10,11,.94) 100%); }
+.execution-rings-canvas { position: absolute; z-index: 0; inset: 0; display: block; width: 100%; height: 100%; opacity: .78; }
+.execution-rings-status.stopped .execution-rings-canvas,
+.execution-rings-status.paused .execution-rings-canvas,
+.execution-rings-status.check .execution-rings-canvas { opacity: .55; }
+.execution-rings-label {
+  position: absolute; z-index: 1; inset: 0; display: flex; align-items: center; justify-content: center; gap: 6px;
+  color: currentColor; text-shadow: 0 1px 5px #000, 0 0 12px rgba(0,0,0,.88);
+  font: 760 11px/1 var(--mono); letter-spacing: .18em; padding-left: .18em; pointer-events: none;
+}
+.execution-rings-label i { font: 800 9px/1 var(--mono); letter-spacing: -.12em; }
 .title { font-size: 21px; font-weight: 650; margin-top: 2px; }
 .title-accent { color: var(--accent); }
 .topbar-right { display: flex; align-items: center; gap: 12px; }
@@ -708,6 +734,7 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .tabs::-webkit-scrollbar { display: none; }
   .topbar-right .pill,
   .topbar-right .btn { flex: 0 0 auto; }
+  .execution-rings-status { flex-basis: 124px; width: 124px; height: 36px; }
   .topbar-right .pill { padding: 5px 10px; }
   .topbar-right .btn:not(.observer-control-btn) { min-width: 128px !important; padding: 8px 12px; }
 

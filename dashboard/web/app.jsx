@@ -2,6 +2,7 @@ import { api, AUTH_EXPIRED_EVENT } from "./lib/api.js";
 import { activateLiveAndStart, friendlyExecutionError } from "./lib/execution.js";
 import { Confirm } from "./components/Confirm.jsx";
 import { Discovery, ScanMask, scanStageLabel } from "./components/Discovery.jsx";
+import { ExecutionStatusRings } from "./components/ExecutionStatusRings.jsx";
 import { History } from "./components/History.jsx";
 import { ObsMask } from "./components/ObsMask.jsx";
 import { Overview } from "./components/Overview.jsx";
@@ -99,17 +100,6 @@ function Dashboard({ onLogout }) {
   const pausing = !!obsPending || liveStarting;
   const liveMode = execution?.selectedMode === "live" || ov?.system?.mode === "live";
   const executionState = execution?.state;
-  const observerDraining = liveMode && executionState === "draining";
-  const observerReconcileRequired = liveMode && executionState === "reconcile_required";
-  const observerPaused = obs === "paused" && !observerDraining && !observerReconcileRequired;
-  const observerStopped = obs === "stopped";
-  const observerStatusLabel = observerDraining ? "排空中"
-    : observerReconcileRequired ? "需要核对"
-      : observerPaused ? "暂停开仓"
-        : observerStopped ? "已停止" : null;
-  const observerStatusTone = observerReconcileRequired ? "tint-red"
-    : (observerDraining || observerPaused) ? "tint-amber"
-      : observerStopped ? "tint-gray" : (liveMode ? "tint-red" : "tint-amber");
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
@@ -213,15 +203,7 @@ function Dashboard({ onLogout }) {
             <div className={"title" + (ACCENT_TITLE_PAGES.has(page) ? " title-accent" : "")}>{TITLES[page]}</div>
           </div>
           <div className="topbar-right">
-            <span className={"pill execution-pill " + observerStatusTone}>
-              {observerPaused || observerDraining
-                ? <PauseIcon />
-                : observerStopped || observerReconcileRequired
-                  ? <StopIcon />
-                  : <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />}
-              <span>{liveMode ? "LIVE" : "PAPER · 模拟盘"}</span>
-              {observerStatusLabel && <em>{observerStatusLabel}</em>}
-            </span>
+            <ExecutionStatusRings status={obs} executionState={executionState} live={liveMode} />
             {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
               title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
               <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />

@@ -119,10 +119,21 @@ class WebStaticAssetsTests(unittest.TestCase):
 
     def test_navigation_counts_history_and_manual_scan_can_be_stopped(self):
         jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
+        rings = (
+            ROOT / "dashboard" / "web" / "components" / "ExecutionStatusRings.jsx"
+        ).read_text(encoding="utf-8")
         mask = (ROOT / "dashboard" / "web" / "components" / "discovery" / "ScanMask.jsx").read_text(encoding="utf-8")
 
         self.assertIn('k === "history" ? ov.closedCount', jsx)
-        self.assertIn('liveMode ? "LIVE" : "PAPER · 模拟盘"', jsx)
+        self.assertIn(
+            '<ExecutionStatusRings status={obs} executionState={executionState} live={liveMode} />',
+            jsx,
+        )
+        self.assertIn('label = running ? (live ? "LIVE" : "PAPER") : "STOP"', rings)
+        self.assertIn('label = draining ? "DRAIN" : "PAUSE"', rings)
+        self.assertIn('<MagicRingsCanvas active={running}', rings)
+        self.assertIn('timer = window.setTimeout(tick, 1000 / 30)', rings)
+        self.assertIn('if (shouldAnimate()) tick();\n      else draw();', rings)
         self.assertNotIn("LIVE · ${execution?.state", jsx)
         self.assertIn('api.cmd("scan_stop", {})', jsx)
         self.assertIn("紧急终止采集", mask)
