@@ -1514,6 +1514,40 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
+    def test_operational_top32_repair_keeps_independent_core_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+
+            self.assertEqual(scanner._formation_core_upper(db), 16)
+            self.assertEqual(scanner._formation_strict_candidate_limit(db), 16)
+            self.assertEqual(scanner._formation_strict_candidate_limit(db, 32), 32)
+            self.assertEqual(scanner._formation_strict_candidate_limit(db, 99), 32)
+
+        source = inspect.getsource(scanner.form_quality_prefix)
+        self.assertIn("strict_pool_limit", source)
+        self.assertIn("ranked_candidates[:core_upper]", source)
+        self.assertIn("effective_ranked[:core_upper]", source)
+
+    def test_wide_selection_path_prefetch_is_split_into_top16_batches(self):
+        candidates = [f"0x{index:040x}" for index in range(32)]
+        summary = {
+            "candidates": 16, "fills": 20, "pathRows": 100,
+            "coverage": 1.0, "missingCoins": 0, "pathRetryAttempts": 0,
+        }
+        with patch.object(
+            scanner, "_prefetch_selection_paths", return_value=summary,
+        ) as prefetch:
+            result = scanner._prefetch_selection_paths_batched(
+                None, candidates, 1, "g1", batch_size=16,
+            )
+
+        self.assertEqual(prefetch.call_count, 2)
+        self.assertEqual([len(call.args[1]) for call in prefetch.call_args_list], [16, 16])
+        self.assertEqual(result["batches"], 2)
+        self.assertEqual(result["candidates"], 32)
+        self.assertEqual(result["pathRows"], 200)
+
     def test_bounded_path_pool_is_profit_ordered_without_incumbent_bypass(self):
         rows = [
             {

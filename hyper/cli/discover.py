@@ -331,6 +331,8 @@ def main() -> int:
     rs.add_argument("--generation")
     rs.add_argument("--stamp")
     rs.add_argument("--replace-existing", action="store_true")
+    rs.add_argument("--reuse-tuned-surface", action="store_true")
+    rs.add_argument("--strict-candidate-limit", type=int)
     fg = sub.add_parser("finalize-profiled", help="finish a cached profiled generation without wallet refetch")
     fg.add_argument("--generation")
     fg.add_argument("--stamp")
@@ -609,6 +611,8 @@ def main() -> int:
                 result = scanner.repair_published_selection(
                     db, args.generation, stamp=args.stamp,
                     replace_existing=args.replace_existing,
+                    reuse_tuned_surface=bool(args.reuse_tuned_surface),
+                    strict_candidate_limit=args.strict_candidate_limit,
                 )
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")

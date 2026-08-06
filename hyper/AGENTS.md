@@ -402,6 +402,9 @@ Important command semantics:
   `--apply` only when the user authorized publication.
 - `reform_current_core` re-ranks frozen current-generation evidence, publishes membership on the unchanged
   active parameter surface, and then certifies/stores the resulting shared strict replay for Dashboard display.
+- Explicit `repair-selection --strict-candidate-limit 32` may replay the frozen Top32 in two Top16 path
+  batches to backfill strict failures. It must not raise the independent Core cap or alter scheduled Top16
+  automatic formation.
 - `optimize_current_core` is an explicit migration/repair path for membership published on a fixed surface.
   It freezes the exact current Core, full-tunes that set once, runs the standard bounded final margin
   calibration, and refreshes the shared Dashboard replay. Use `--apply` only with operator authorization.

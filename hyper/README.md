@@ -476,6 +476,12 @@ the scanner lock with full and
 daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
 new selection, tuned parameters, and revision publish atomically.
 
+The hidden operational `repair-selection --replace-existing --reuse-tuned-surface
+--strict-candidate-limit 32` path may backfill individual Strict failures from the already-frozen Top32. It
+reuses the same Top16-tuned surface, splits public path preparation into Top16 batches, and retains the
+independent 16-wallet Core cap. Scheduled complete and daily formation continue to freeze Top16 and never
+reabsorb ranks 17–32 after tuning.
+
 `python3 -m hyper.cli.discover --db data/hl.db calibrate-current-core --apply` is the narrower production
 operation for an already published Core. It freezes the exact current membership, tests an exact control plus
 at most ten three-tier 0.5-percentage-point grid surfaces and three conditional upward extensions, with at most

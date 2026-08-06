@@ -3866,6 +3866,17 @@ def _formation_core_upper(db) -> int:
     ))
 
 
+def _formation_strict_candidate_limit(db, requested=None) -> int:
+    """Bound optional operational backfill to the frozen Top32 without raising the Core cap."""
+    core_upper = _formation_core_upper(db)
+    if requested is None:
+        return core_upper
+    return max(core_upper, min(
+        int(config.PRE_STRICT_QUEUE_MAX_N), int(config.MAX_TARGETS),
+        max(1, int(requested)),
+    ))
+
+
 def _core_prefix_retention() -> dict:
     return {
         "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
@@ -4035,7 +4046,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False, force_retune=False,
                         retention_addrs=None, _follow_override=None,
                         _fixed_membership_addrs=None,
-                        _margin_calibration_only=False) -> dict:
+                        _margin_calibration_only=False,
+                        strict_candidate_limit=None) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
     resource_peak = {
@@ -4083,6 +4095,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         () if force_entry_requalification else tuple(selection.published_core_membership(db) or ())
     )
     core_upper = _formation_core_upper(db)
+    strict_pool_limit = _formation_strict_candidate_limit(
+        db, strict_candidate_limit,
+    )
     fixed_membership = tuple(dict.fromkeys(
         str(addr or "").lower()
         for addr in (_fixed_membership_addrs or ()) if addr
@@ -4094,8 +4109,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             (() if force_entry_requalification else retention_addrs)
         ),
     )
-    # Top32 remains the rough/Challenger evidence pool.  Automatic formation freezes one bounded Top16
-    # before any parameter work; ranks 17-32 are never reabsorbed after seeing a tuned surface.
+    # Normal automatic formation freezes Top16 before parameter work. An explicit operational repair may
+    # strictly replay the complete frozen Top32 to backfill individual failures, while the independent Core
+    # cap remains 16 and the parameter count search still sees no more than those first 16 seats.
     if fixed_membership:
         row_by_addr = {
             str(row.get("addr") or "").lower(): row
@@ -4108,10 +4124,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             )
         pre_strict_candidates = [row_by_addr[addr] for addr in fixed_membership]
         core_upper = len(pre_strict_candidates)
+        strict_pool_limit = core_upper
     else:
         pre_strict_candidates = _bounded_formation_candidates(
             all_ranked_candidates,
-            core_upper,
+            strict_pool_limit,
         )
     prepath_rows = list(pre_strict_candidates)
     prepath_rejected = []
@@ -4626,8 +4643,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # delete the rest of the bounded Top16 before strict replay.  Every Top16 wallet receives the winning
     # surface, individual failures are removed, and only then may the shared-account prefix search choose
     # its final count.  Otherwise fitting k=9 silently made ranks 10–16 ineligible without evaluating them.
-    # The frozen Top16 receives the one authoritative individual strict replay on the winning surface.
-    # Rough ranks 17-32 remain Challenger evidence and cannot re-enter after observing tuned parameters.
+    # The frozen strict pool receives one authoritative individual replay on the winning Top16 surface.
+    # The optional Top32 repair can therefore backfill rejected Top16 wallets without allowing more than
+    # ``core_upper`` members into the final shared-account prefix.
     tuned_candidate_rows = list(prepath_rows)
 
     def replay_effective_surface(follow_surface, candidate_rows=None):
@@ -5286,6 +5304,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "rebalanceDue": rebalance_due,
             "coreAgeDays": core_age_days,
             "rebalanceIntervalDays": rebalance_interval,
+            "strictCandidateCount": len(prepath_rows),
+            "coreCandidateLimit": core_upper,
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": winning_count,
             "coarseTuneRuns": len(tune_runs),
@@ -6422,6 +6442,38 @@ def _repair_cached_path_incomplete_evidence(
     }
 
 
+def _prefetch_selection_paths_batched(
+    db, candidates, now_ms, generation_id, *, batch_size=None,
+) -> dict:
+    """Prepare a wider repair pool without overlapping two Top16 path working sets in memory."""
+    candidates = list(dict.fromkeys(
+        str(addr or "").lower() for addr in candidates if addr
+    ))
+    batch_size = max(1, int(batch_size or _formation_core_upper(db)))
+    if len(candidates) <= batch_size:
+        return _prefetch_selection_paths(db, candidates, now_ms, generation_id)
+    summaries = []
+    for start in range(0, len(candidates), batch_size):
+        summaries.append(_prefetch_selection_paths(
+            db, candidates[start:start + batch_size], now_ms, generation_id,
+        ))
+        gc.collect()
+    return {
+        "candidates": len(candidates),
+        "fills": sum(int(row.get("fills") or 0) for row in summaries),
+        "pathRows": sum(int(row.get("pathRows") or 0) for row in summaries),
+        "coverage": min(
+            (float(row.get("coverage") or 0.0) for row in summaries),
+            default=1.0,
+        ),
+        "missingCoins": sum(int(row.get("missingCoins") or 0) for row in summaries),
+        "pathRetryAttempts": sum(
+            int(row.get("pathRetryAttempts") or 0) for row in summaries
+        ),
+        "batches": len(summaries),
+    }
+
+
 def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles,
                                    previous_roles, controls, held,
                                    desired_order, formation_meta,
@@ -7190,6 +7242,7 @@ def _retune_repaired_membership_closure(
     initial_formation,
     *,
     force_entry_requalification,
+    strict_candidate_limit=None,
 ):
     """Reuse the published tuned surface, then full-tune only the repaired exact membership.
 
@@ -7233,6 +7286,7 @@ def _retune_repaired_membership_closure(
             force_entry_requalification=force_entry_requalification,
             force_retune=False,
             _follow_override=exact["follow"],
+            strict_candidate_limit=strict_candidate_limit,
         )
         actual = tuple(last.get("selected") or ())
         stable = actual == expected
@@ -7272,7 +7326,8 @@ def _retune_repaired_membership_closure(
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
                                retune_formation=False, force_entry_requalification=False,
-                               reuse_tuned_surface=False, fixed_current_surface=False):
+                               reuse_tuned_surface=False, fixed_current_surface=False,
+                               strict_candidate_limit=None):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -7340,13 +7395,17 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         leaderboard_generation=generation_id,
         commit=False,
     )
+    strict_pool_limit = _formation_strict_candidate_limit(
+        db, strict_candidate_limit,
+    )
     prefetch_candidates = _selection_prefetch_candidates(
         db, generation_id, repair_now_ms,
-        limit=_formation_core_upper(db),
+        limit=strict_pool_limit,
     )
     db.rollback()
-    path_summary = _prefetch_selection_paths(
+    path_summary = _prefetch_selection_paths_batched(
         db, prefetch_candidates, repair_now_ms, generation_id,
+        batch_size=_formation_core_upper(db),
     )
     _repair_cached_path_incomplete_evidence(
         db, generation_id, prefetch_candidates, path_summary,
@@ -7355,6 +7414,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db, generation_id, stamp, repair_now_ms, retune=retune_formation,
         force_entry_requalification=force_entry_requalification,
         force_retune=retune_formation,
+        strict_candidate_limit=strict_pool_limit,
     )
     membership_retune_triggered = (
         not bool(retune_formation)
@@ -7365,12 +7425,14 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
             formation = _retune_repaired_membership_closure(
                 db, generation_id, stamp, repair_now_ms, formation,
                 force_entry_requalification=force_entry_requalification,
+                strict_candidate_limit=strict_pool_limit,
             )
         else:
             formation = form_quality_prefix(
                 db, generation_id, stamp, repair_now_ms, retune=True,
                 force_entry_requalification=force_entry_requalification,
                 force_retune=True,
+                strict_candidate_limit=strict_pool_limit,
             )
     if fixed_current_surface:
         search = dict(formation.get("search") or {})
