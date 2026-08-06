@@ -1,12 +1,8 @@
-import { SCANNER_LABEL, agoText, scannerColor } from "../../lib/format.js";
+import { SCANNER_LABEL, agoText, fShanghaiDateTime, scannerColor } from "../../lib/format.js";
 import { IC, Ico } from "../../lib/icons.jsx";
 import { scanStageLabel } from "./ScanMask.jsx";
 
 const PIPELINE_LABELS = ["排行榜", "Perp 确认", "有效画像", "入围名单", "Core"];
-
-const displayStamp = value => value
-  ? String(value).replace("T", " ").replace("Z", "")
-  : "—";
 
 export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan }) {
   const sc = discovery.scanner || { mode: "unknown", detail: {} };
@@ -35,7 +31,7 @@ export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan
           <span>当前状态</span>
           <strong style={{ color: statusColor }}>{stateLabel}<i className="scan-live-dot" /></strong>
           <small>{activeScan ? "启动时间" : "上次完成"}</small>
-          <b className="mono">{activeScan ? displayStamp(startedAt) : agoText(discovery.lastScanAt)}</b>
+          <b className="mono">{activeScan ? fShanghaiDateTime(startedAt) : agoText(discovery.lastScanAt)}</b>
         </div>
       </div>
 

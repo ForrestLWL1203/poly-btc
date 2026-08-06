@@ -203,6 +203,9 @@ class WebStaticAssetsTests(unittest.TestCase):
 
     def test_discovery_internals_are_split(self):
         discovery = (ROOT / "dashboard" / "web" / "components" / "Discovery.jsx").read_text(encoding="utf-8")
+        status_card = (ROOT / "dashboard" / "web" / "components" / "discovery" / "ScanStatusCard.jsx").read_text(encoding="utf-8")
+        history_table = (ROOT / "dashboard" / "web" / "components" / "discovery" / "ScanHistoryTable.jsx").read_text(encoding="utf-8")
+        formatting = (ROOT / "dashboard" / "web" / "lib" / "format.js").read_text(encoding="utf-8")
         parts = {
             "discovery/ScanMask.jsx": "export function ScanMask(",
             "discovery/ScanStatusCard.jsx": "export function ScanStatusCard(",
@@ -222,6 +225,12 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function PipelineSummary(", discovery)
         self.assertNotIn("PipelineSummary", discovery)
         self.assertNotIn("const STAGES_FE", discovery)
+        self.assertIn('timeZone: "Asia/Shanghai"', formatting)
+        self.assertIn("export const fShanghaiDateTime", formatting)
+        self.assertIn("fShanghaiDateTime(startedAt)", status_card)
+        self.assertIn("fShanghaiDateTime(r.at)", history_table)
+        self.assertNotIn('.replace("Z", "")', status_card)
+        self.assertNotIn('.replace("Z", "")', history_table)
 
     def test_positions_and_history_internals_are_split(self):
         positions = (ROOT / "dashboard" / "web" / "components" / "Positions.jsx").read_text(encoding="utf-8")

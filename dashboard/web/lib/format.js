@@ -4,6 +4,31 @@ export const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Nu
 
 export const fTime = (ep) => (ep == null ? "—" : new Date(ep * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }));
 
+const SHANGHAI_DATE_TIME = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+export const fShanghaiDateTime = (value) => {
+  if (!value) return "—";
+  const raw = String(value).trim();
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)
+    ? raw
+    : raw.replace(" ", "T") + "Z";
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return "—";
+  const parts = Object.fromEntries(
+    SHANGHAI_DATE_TIME.formatToParts(date).map(part => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+};
+
 export const fPct = (v, d = 1) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(d) + "%");
 
 export const fNum = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));

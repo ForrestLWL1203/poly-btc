@@ -1,4 +1,5 @@
 import { IC, Ico } from "../../lib/icons.jsx";
+import { fShanghaiDateTime } from "../../lib/format.js";
 
 const runType = run => run.kind === "challenger_refresh" ? "轻量重评" : "全量重评";
 
@@ -25,7 +26,7 @@ export function ScanHistoryTable({ runs }) {
                 <td className="scan-run-state"><span aria-label={failed ? "本轮失败" : "本轮完成"} title={failed ? "未发布" : "已完成"}>
                   <Ico d={failed ? IC.xCircle : IC.checkCircle} />
                 </span></td>
-                <td className="addr">{r.at ? r.at.replace("T", " ").replace("Z", "") : "—"}</td>
+                <td className="addr">{fShanghaiDateTime(r.at)}</td>
                 <td><span className={"scan-run-kind " + (r.kind === "challenger_refresh" ? "is-light" : "is-full")}>{runType(r)}</span></td>
                 <td className="num">{r.candidates}</td>
                 <td className="num">{r.profiled ?? "—"}{r.failed ? ` / ${r.failed}失败` : ""}</td>
