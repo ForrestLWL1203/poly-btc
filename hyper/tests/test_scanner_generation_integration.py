@@ -644,7 +644,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("_retention_exact_formation(", daily_source)
         self.assertIn("retention_addrs=pinned_core_order", complete_source)
         self.assertIn("retention_addrs=pinned_core_order", finalizer_source)
-        self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 2)
+        self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 3)
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
     def test_complete_scan_keeps_rough_copy_local_and_resolves_strict_market_before_seal(self):
@@ -1476,7 +1476,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.scan)
 
         self.assertEqual(source.count("_build_explicit_selection("), 1)
-        self.assertNotIn("_selection_prefetch_candidates(", source)
+        self.assertIn("_selection_prefetch_candidates(", source)
         self.assertIn("publication_core_order = tuple(formation.get", source)
         self.assertNotIn("preview_rows", source)
 
@@ -1833,11 +1833,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_scan_does_not_publish_after_selection_path_prefetch_failure(self):
         source = inspect.getsource(scanner.scan)
 
-        formation_at = source.index("formation = form_quality_prefix(")
-        prefetch_at = source.index("_prefetch_selection_paths(", formation_at)
-        publication_at = source.index("generation.publish_generation(", prefetch_at)
-        self.assertLess(formation_at, prefetch_at)
-        self.assertLess(prefetch_at, publication_at)
+        prefetch_at = source.index("_prefetch_selection_paths(")
+        formation_at = source.index("formation = form_quality_prefix(", prefetch_at)
+        publication_at = source.index("generation.publish_generation(", formation_at)
+        self.assertLess(prefetch_at, formation_at)
+        self.assertLess(formation_at, publication_at)
         self.assertIn("generation finalize failed; old selection retained", source)
 
     def test_quality_prefix_uses_allowed_sector_copy_evidence(self):
@@ -2457,19 +2457,18 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(metrics["selectionCore"], 0)
             self.assertTrue(metrics["resumedFinalize"])
 
-    def test_finalize_profiled_prefetches_only_winning_prefix_after_formation(self):
+    def test_finalize_profiled_prefetches_top16_before_formation(self):
         source = inspect.getsource(scanner.finalize_profiled_generation)
 
         repair_at = source.index("_repair_resumable_pinned_strict_paths(")
+        prefetch_candidates_at = source.index("_selection_prefetch_candidates(", repair_at)
+        prefetch_at = source.index("_prefetch_selection_paths(", prefetch_candidates_at)
         formation_at = source.index("formation = form_quality_prefix(")
         selected_at = source.index("publication_core_order = tuple(")
-        prefetch_at = source.index(
-            "_prefetch_selection_paths(\n"
-            "            db, publication_core_order, now_ms, generation_id,"
-        )
-        self.assertLess(repair_at, formation_at)
+        self.assertLess(repair_at, prefetch_candidates_at)
+        self.assertLess(prefetch_candidates_at, prefetch_at)
+        self.assertLess(prefetch_at, formation_at)
         self.assertLess(formation_at, selected_at)
-        self.assertLess(selected_at, prefetch_at)
         self.assertIn('strict_deferred_mode="defer"', source)
         self.assertNotIn("PRE_STRICT_QUEUE_MAX_N", source)
 

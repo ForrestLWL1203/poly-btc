@@ -2438,7 +2438,9 @@ def _paper_account_equity(db) -> float:
     return value if value > 0.0 else float(config.INITIAL_BALANCE)
 
 
-def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=None) -> list[str]:
+def _selection_prefetch_candidates(
+    db, generation_id=None, now_ms=None, limit=None, *, retention_addrs=None,
+) -> list[str]:
     """Return the bounded qualified universe needed for path prefetch without running selection."""
     limit = max(0, int(
         config.PRE_STRICT_QUEUE_MAX_N if limit is None else limit
@@ -2448,6 +2450,7 @@ def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=No
     if generation_id:
         rows = _quality_core_profiles(
             db, generation_id, core_only=False, now_ms=now_ms,
+            retention_addrs=retention_addrs,
         )
         return [
             row["addr"] for row in _bounded_formation_candidates(
@@ -3838,6 +3841,17 @@ def _bounded_formation_candidates(rows, limit) -> list[dict]:
     return retained + entrants[:max(0, limit - len(retained))]
 
 
+def _formation_core_upper(db) -> int:
+    """Single source of truth for the frozen Strict candidate count."""
+    return max(1, min(
+        int(config.MAX_TARGETS),
+        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
+        int(params.get(
+            db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
+        ) or config.CORE_INITIAL_MAX_N),
+    ))
+
+
 def _core_prefix_retention() -> dict:
     return {
         "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
@@ -4054,13 +4068,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     current_core = (
         () if force_entry_requalification else tuple(selection.published_core_membership(db) or ())
     )
-    core_upper = max(1, min(
-        int(config.MAX_TARGETS),
-        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
-        int(params.get(
-            db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
-        ) or config.CORE_INITIAL_MAX_N),
-    ))
+    core_upper = _formation_core_upper(db)
     fixed_membership = tuple(dict.fromkeys(
         str(addr or "").lower()
         for addr in (_fixed_membership_addrs or ()) if addr
@@ -6169,6 +6177,54 @@ def _prefetch_selection_paths(db, candidates, now_ms, generation_id) -> dict:
     }
 
 
+def _invalidate_strict_formation_evidence(db, generation_id: str) -> int:
+    """Drop only path-dependent Strict evidence after its input cache changed."""
+    deleted = db.execute(
+        "DELETE FROM formation_prefix_evidence WHERE generation=? "
+        "AND policy_version=? AND (params_hash LIKE 'strict-finalist:%' "
+        "OR params_hash LIKE 'individual:%' OR params_hash LIKE 'final-shared:%')",
+        (generation_id, _FORMATION_PREFIX_CACHE_POLICY),
+    ).rowcount
+    return max(0, int(deleted or 0))
+
+
+def _repair_cached_path_incomplete_evidence(
+    db, generation_id: str, candidates, path_summary,
+) -> dict:
+    """Make a recovered path visible to Strict instead of replaying its stale fail-closed result."""
+    candidates = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in candidates if addr
+    ))
+    if not candidates or int((path_summary or {}).get("missingCoins") or 0):
+        return {"recovered": 0, "strictEvidenceInvalidated": 0}
+    marks = ",".join("?" for _ in candidates)
+    recovered = [
+        str(row[0] or "").lower()
+        for row in db.execute(
+            "SELECT addr FROM pre_strict_evidence WHERE generation=? "
+            f"AND lower(addr) IN ({marks}) AND strict_status='deferred' "
+            "AND strict_first_failure='copy_path_incomplete'",
+            (generation_id, *candidates),
+        ).fetchall()
+        if row[0]
+    ]
+    if not recovered:
+        return {"recovered": 0, "strictEvidenceInvalidated": 0}
+    deleted = _invalidate_strict_formation_evidence(db, generation_id)
+    recovered_marks = ",".join("?" for _ in recovered)
+    db.execute(
+        "UPDATE pre_strict_evidence SET strict_status='frozen_top16',"
+        "strict_first_failure=NULL WHERE generation=? "
+        f"AND lower(addr) IN ({recovered_marks})",
+        (generation_id, *recovered),
+    )
+    db.commit()
+    return {
+        "recovered": len(recovered),
+        "strictEvidenceInvalidated": deleted,
+    }
+
+
 def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles,
                                    previous_roles, controls, held,
                                    desired_order, formation_meta,
@@ -7085,9 +7141,15 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     )
     prefetch_candidates = _selection_prefetch_candidates(
         db, generation_id, repair_now_ms,
+        limit=_formation_core_upper(db),
     )
     db.rollback()
-    _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms, generation_id)
+    path_summary = _prefetch_selection_paths(
+        db, prefetch_candidates, repair_now_ms, generation_id,
+    )
+    _repair_cached_path_incomplete_evidence(
+        db, generation_id, prefetch_candidates, path_summary,
+    )
     formation = form_quality_prefix(
         db, generation_id, stamp, repair_now_ms, retune=retune_formation,
         force_entry_requalification=force_entry_requalification,
@@ -8111,12 +8173,7 @@ def _repair_resumable_pinned_strict_paths(
     path_summary = _prefetch_selection_paths(
         db, deferred, int(now_ms), generation_id,
     )
-    deleted = db.execute(
-        "DELETE FROM formation_prefix_evidence WHERE generation=? "
-        "AND policy_version=? AND (params_hash LIKE 'strict-finalist:%' "
-        "OR params_hash LIKE 'individual:%' OR params_hash LIKE 'final-shared:%')",
-        (generation_id, _FORMATION_PREFIX_CACHE_POLICY),
-    ).rowcount
+    deleted = _invalidate_strict_formation_evidence(db, generation_id)
     deferred_marks = ",".join("?" for _ in deferred)
     db.execute(
         "UPDATE pre_strict_evidence SET strict_status='frozen_top16',"
@@ -8253,6 +8310,22 @@ def finalize_profiled_generation(
         db, stamp, leaderboard_generation=generation_id, commit=False,
     )
     db.rollback()
+    if not offline:
+        prefetch_candidates = _selection_prefetch_candidates(
+            db, generation_id, now_ms,
+            limit=_formation_core_upper(db),
+            retention_addrs=pinned_core_order,
+        )
+        _set_scan_progress(
+            db, stage="prefetch_selection_paths",
+            candidates_scanned=0, candidates_total=len(prefetch_candidates),
+        )
+        path_summary = _prefetch_selection_paths(
+            db, prefetch_candidates, now_ms, generation_id,
+        )
+        _repair_cached_path_incomplete_evidence(
+            db, generation_id, prefetch_candidates, path_summary,
+        )
     formation = form_quality_prefix(
         db, generation_id, stamp, now_ms,
         retune=bool(retune), force_retune=bool(retune),
@@ -8288,22 +8361,6 @@ def finalize_profiled_generation(
             decisions=retention_decisions,
         )
     publication_core_order = tuple(formation.get("selected") or ())
-    # Recovery is deliberately cache-first.  The sealed formation evidence already owns the frozen Top16,
-    # its local parameter surface and the winning final count.  Prefetching the wider Top32 before reading
-    # that evidence needlessly decoded every candidate fill and rebuilt price trajectories (the exact
-    # multi-hundred-MiB high-water allocation this recovery path is intended to avoid).  Once formation has
-    # selected its bounded prefix, prepare paths only for the wallets that can actually reach publication.
-    # A genuine formation cache miss still prepares its own strict-finalist paths in auto_tune; this final
-    # selected-prefix pass merely keeps network work outside the atomic publication transaction.
-    if publication_core_order and not offline:
-        _set_scan_progress(
-            db, stage="prefetch_selection_paths",
-            candidates_scanned=len(publication_core_order),
-            candidates_total=len(publication_core_order),
-        )
-        _prefetch_selection_paths(
-            db, publication_core_order, now_ms, generation_id,
-        )
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:
@@ -9104,6 +9161,21 @@ def refresh_challengers(db, p) -> dict:
         db.rollback()
 
         automatic_retune = _automatic_formation_retune_enabled(db)
+        prefetch_candidates = _selection_prefetch_candidates(
+            db, generation_id, now_ms,
+            limit=_formation_core_upper(db),
+            retention_addrs=previous_core_order,
+        )
+        _set_scan_progress(
+            db, stage="prefetch_selection_paths",
+            candidates_scanned=0, candidates_total=len(prefetch_candidates),
+        )
+        path_summary = _prefetch_selection_paths(
+            db, prefetch_candidates, now_ms, generation_id,
+        )
+        _repair_cached_path_incomplete_evidence(
+            db, generation_id, prefetch_candidates, path_summary,
+        )
         fixed_formation = form_quality_prefix(
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
@@ -9287,15 +9359,6 @@ def refresh_challengers(db, p) -> dict:
             promotion_universe=base_promotion_universe,
             formation=formation,
         )
-        if publish_core_order:
-            _set_scan_progress(
-                db, stage="prefetch_selection_paths",
-                candidates_scanned=len(publish_core_order),
-                candidates_total=len(publish_core_order),
-            )
-            _prefetch_selection_paths(
-                db, publish_core_order, now_ms, generation_id,
-            )
         _assert_margin_equity_snapshot(db, p.margin_equity_pct)
         publication_stamp = now_iso()
         refresh_watchlist(
@@ -10338,6 +10401,22 @@ def scan(db, p):
                 # summary-only, so reclaim profile temporaries before entering its largest allocation phase.
                 automatic_retune = _automatic_formation_retune_enabled(db)
                 gc.collect()
+                prefetch_candidates = _selection_prefetch_candidates(
+                    db, generation_id, now_ms,
+                    limit=_formation_core_upper(db),
+                    retention_addrs=pinned_core_order,
+                )
+                _set_scan_progress(
+                    db, stage="prefetch_selection_paths",
+                    candidates_scanned=0,
+                    candidates_total=len(prefetch_candidates),
+                )
+                path_summary = _prefetch_selection_paths(
+                    db, prefetch_candidates, now_ms, generation_id,
+                )
+                _repair_cached_path_incomplete_evidence(
+                    db, generation_id, prefetch_candidates, path_summary,
+                )
                 formation = form_quality_prefix(
                     db, generation_id, stamp, now_ms,
                     retune=automatic_retune, force_retune=automatic_retune,
@@ -10370,15 +10449,6 @@ def scan(db, p):
                         decisions=retention_decisions,
                     )
                 publication_core_order = tuple(formation.get("selected") or ())
-                if publication_core_order:
-                    _set_scan_progress(
-                        db, stage="prefetch_selection_paths",
-                        candidates_scanned=len(publication_core_order),
-                        candidates_total=len(publication_core_order),
-                    )
-                    _prefetch_selection_paths(
-                        db, publication_core_order, now_ms, generation_id,
-                    )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
                 candidates_total=len(workset),
