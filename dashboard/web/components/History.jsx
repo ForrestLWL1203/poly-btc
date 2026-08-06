@@ -20,7 +20,7 @@ export function History() {
   };
   const loadClosed = useCallback(() => api.get("/api/positions?status=closed"), []);
   const { data } = useApiResource(loadClosed, { intervalMs: 15000 });
-  const PER = 25;
+  const PER = 10;
   const st = data && data.stats;
   const all = (data && data.positions) || [];
   const rows = all.filter(p => (filter === "all" || p.result === filter) && (ctype === "all" || p.closeType === ctype));

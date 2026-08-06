@@ -278,6 +278,15 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function Settings(", jsx)
         self.assertIn('from "./components/Settings.jsx"', jsx)
 
+    def test_history_uses_ten_rows_per_page(self):
+        history = (ROOT / "dashboard" / "web" / "components" / "History.jsx").read_text(encoding="utf-8")
+        table = (ROOT / "dashboard" / "web" / "components" / "history" / "ClosedPositionsTable.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("const PER = 10;", history)
+        self.assertIn("rows.slice(pg * PER, pg * PER + PER)", history)
+        self.assertIn("第 {pg + 1} / {pages} 页", table)
+        self.assertIn("rows.length > perPage", table)
+
     def test_settings_internals_are_split(self):
         settings = (ROOT / "dashboard" / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")
         top_level_parts = {
