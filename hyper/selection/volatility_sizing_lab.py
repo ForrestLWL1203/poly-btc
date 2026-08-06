@@ -11,9 +11,11 @@ import json
 import math
 
 from hyper import config, params
-from hyper.copy.copy_backtest import prepare_price_path
+from hyper.copy.copy_backtest import prepare_price_path, prepare_replay_fills
+from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_engine import volatility_target_margin_pct
 from hyper.market import price_path
+from hyper.ops import resource_guard
 from hyper.selection import auto_tune, state as selection
 from hyper.util import f
 
@@ -51,6 +53,44 @@ def _generation_context(db) -> tuple[str, int, list[str]]:
     if not addrs:
         raise RuntimeError("volatility_lab_requires_nonempty_core")
     return generation, now_ms, addrs
+
+
+def _frozen_core_window_fills(
+    db, generation: str, addrs: list[str], now_ms: int,
+) -> dict[int, list[dict]]:
+    """Load the published generation's immutable Core policy, never mutable Profile state."""
+    owners = sorted({(addr or "").lower() for addr in addrs if addr})
+    placeholders = ",".join("?" for _ in owners)
+    rows = db.execute(
+        f"SELECT lower(addr),sector_policy_json FROM follow_selection "
+        f"WHERE generation=? AND role='core' AND enabled=1 "
+        f"AND lower(addr) IN ({placeholders})",
+        (generation, *owners),
+    ).fetchall()
+    policies = {}
+    for row in rows:
+        try:
+            policy = json.loads(row[1] or "{}")
+        except (TypeError, ValueError):
+            policy = {}
+        policies[str(row[0] or "").lower()] = policy
+    missing = [owner for owner in owners if not (policies.get(owner) or {}).get("allowed")]
+    if missing:
+        raise RuntimeError("volatility_lab_frozen_core_policy_missing")
+
+    days = auto_tune._tune_days()
+    max_days = max(days)
+    warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+    start_ms = int(now_ms) - (max_days + warmup_days) * DAY_MS
+    raw_fill_bytes = auto_tune._portfolio_fill_json_bytes(db, owners, start_ms)
+    max_bytes = int(getattr(config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024) or 0)
+    if max_bytes > 0 and raw_fill_bytes > max_bytes:
+        raise RuntimeError("volatility_lab_frozen_core_fills_over_budget")
+    resource_guard.require_replay_budget(raw_fill_bytes)
+    fills = prepare_replay_fills(load_copyable_fills(
+        db, owners, start_ms, policies=policies, policy_default=False,
+    ))
+    return {max_days: fills}
 
 
 def _experiment_settings(*, btc_sigma: float, risk_scale: float) -> dict:
@@ -211,6 +251,7 @@ def _strict_shortlist(experimental: list[dict], limit: int = 3) -> list[dict]:
 def _recommendation(baseline: dict, candidates: list[dict]) -> dict:
     base30 = baseline["windows"]["30"]
     base_roi = f(base30.get("roi"))
+    base_pnl = f(base30.get("netPnl"))
     base_liqs = int(base30.get("liquidations") or 0)
     base_dd = f(base30.get("maxDrawdown"))
     accepted = []
@@ -228,6 +269,15 @@ def _recommendation(baseline: dict, candidates: list[dict]) -> dict:
             reasons.append("drawdown_increased_too_much")
         if base_roi > 0.0 and f(primary.get("roi")) < base_roi * 0.80:
             reasons.append("thirty_day_roi_collapsed_over_20pct")
+        candidate_pnl = f(primary.get("netPnl"))
+        clearly_safer_near_profit = (
+            base_pnl > 0.0
+            and candidate_pnl >= base_pnl * 0.92
+            and int(primary.get("liquidations") or 0) < base_liqs
+            and f(primary.get("maxDrawdown")) <= base_dd
+        )
+        if candidate_pnl < base_pnl and not clearly_safer_near_profit:
+            reasons.append("no_economic_or_risk_improvement")
         if f(primary.get("pricePathCoverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
             reasons.append("price_path_incomplete")
         item["accepted"] = not reasons
@@ -311,7 +361,7 @@ def run_lab(db, *, initial_balance: float | None = None, progress=None) -> dict:
     btc_sigma = f(sigmas.get("BTC"))
     if btc_sigma <= 0.0:
         raise RuntimeError("volatility_lab_btc_sigma_missing")
-    window_fills = auto_tune._portfolio_window_fills(db, addrs, now_ms)
+    window_fills = _frozen_core_window_fills(db, generation, addrs, now_ms)
     if not window_fills or not any(window_fills.values()):
         raise RuntimeError("volatility_lab_core_fills_unavailable")
     max_days = max(window_fills)

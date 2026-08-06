@@ -1,3 +1,5 @@
+import json
+import sqlite3
 import unittest
 
 from hyper.selection import volatility_sizing_lab as lab
@@ -63,6 +65,62 @@ class VolatilitySizingLabTests(unittest.TestCase):
 
         self.assertEqual(len(shortlisted), 3)
         self.assertEqual(len({row["name"] for row in shortlisted}), 3)
+
+    def test_frozen_core_fills_ignore_broader_mutable_profile_policy(self):
+        db = sqlite3.connect(":memory:")
+        db.execute(
+            "CREATE TABLE follow_selection (generation TEXT,addr TEXT,role TEXT,enabled INTEGER,"
+            "sector_policy_json TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE candidate_fills (addr TEXT,time INTEGER,tid TEXT,fill_json TEXT)"
+        )
+        addr = "0xabc"
+        db.execute(
+            "INSERT INTO follow_selection VALUES (?,?,?,?,?)",
+            (
+                "g1", addr, "core", 1,
+                json.dumps({"allowed": ["crypto"], "crypto": {"allow": True}}),
+            ),
+        )
+        for tid, coin in (("1", "BTC"), ("2", "xyz:NVDA")):
+            fill = {
+                "time": 9_500_000, "tid": tid, "coin": coin, "side": "B",
+                "px": "100", "sz": "1", "startPosition": "0", "crossed": True,
+            }
+            db.execute(
+                "INSERT INTO candidate_fills VALUES (?,?,?,?)",
+                (addr, fill["time"], tid, json.dumps(fill)),
+            )
+
+        windows = lab._frozen_core_window_fills(db, "g1", [addr], 10_000_000)
+
+        fills = windows[max(windows)]
+        self.assertEqual([row["coin"] for row in fills], ["BTC"])
+
+    def test_inferior_candidate_is_not_recommended_merely_for_staying_within_twenty_percent(self):
+        def result(name, pnl, roi, liquidations, drawdown):
+            windows = {
+                str(days): {
+                    "netPnl": pnl if days == 30 else 1.0,
+                    "roi": roi if days == 30 else .01,
+                    "liquidations": liquidations,
+                    "maxLiquidationLossPct": .03,
+                    "maxDrawdown": drawdown,
+                    "pricePathCoverage": 1.0,
+                    "capacityFit": .8,
+                }
+                for days in (30, 14, 7)
+            }
+            return {"name": name, "windows": windows}
+
+        baseline = result("current", 100.0, 10.0, 5, .10)
+        candidate = result("inferior", 81.0, 8.1, 7, .12)
+
+        recommendation = lab._recommendation(baseline, [candidate])
+
+        self.assertEqual(recommendation["status"], "keep_current")
+        self.assertIn("no_economic_or_risk_improvement", candidate["rejectionReasons"])
 
 
 if __name__ == "__main__":
