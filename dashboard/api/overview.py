@@ -349,10 +349,17 @@ def ep_insights(db):
     position_table = tables["position"]
     NET = "COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0)"
     wallet_sql = (
-        f"SELECT cp.addr, {NET} net, w.rank, "
+        f"SELECT cp.addr, {NET} net, MAX(core.selection_rank) rank, "
         "SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) cn, "
         "SUM(CASE WHEN cp.status!='open' AND cp.realized_pnl>0 THEN 1 ELSE 0 END) wn "
-        f"FROM {position_table} cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr"
+        f"FROM {position_table} cp LEFT JOIN ("
+        "SELECT fs.addr,fs.selection_rank FROM follow_selection fs "
+        "JOIN scan_generation sg ON sg.generation=fs.generation "
+        "LEFT JOIN target_controls tc ON lower(tc.addr)=lower(fs.addr) "
+        "WHERE sg.status='published' AND sg.complete=1 AND sg.is_current=1 "
+        "AND fs.role='core' AND fs.enabled=1 "
+        "AND COALESCE(tc.intent,'active')!='requalify'"
+        ") core ON lower(core.addr)=lower(cp.addr) GROUP BY cp.addr"
     )
     wallets = [{
         "address": r["addr"], "rank": r["rank"], "netPnl": r["net"] or 0.0, "closedN": r["cn"] or 0,

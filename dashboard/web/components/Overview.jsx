@@ -138,7 +138,7 @@ export function Overview({ ov }) {
                   <div className="contrib-lane-title"><span className="dot" style={{ background: "var(--green)" }} /> 赚钱贡献</div>
                   {winners.length === 0 ? <div className="contrib-empty">暂无正贡献</div> : winners.map(w => (
                     <div className="contrib-row" key={"win-" + w.address}>
-                      <span>{w.rank != null ? "#" + w.rank : "脱榜"}</span>
+                      <span>{w.rank != null ? "#" + w.rank : "已脱榜"}</span>
                       <b className="addr">{short(w.address)}</b>
                       <strong className="up">{fSign(w.netPnl, 1)}</strong>
                       <em>{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"} · {w.closedN} 笔</em>
@@ -149,7 +149,7 @@ export function Overview({ ov }) {
                   <div className="contrib-lane-title"><span className="dot" style={{ background: draggerNet < 0 ? "var(--red)" : "var(--gray)" }} /> 亏损拖累</div>
                   {draggers.length === 0 ? <div className="contrib-empty">暂无负贡献</div> : draggers.map(w => (
                     <div className="contrib-row" key={"drag-" + w.address}>
-                      <span>{w.rank != null ? "#" + w.rank : "脱榜"}</span>
+                      <span>{w.rank != null ? "#" + w.rank : "已脱榜"}</span>
                       <b className="addr">{short(w.address)}</b>
                       <strong className="down">{fSign(w.netPnl, 1)}</strong>
                       <em>{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"} · {w.closedN} 笔</em>

@@ -346,6 +346,51 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertEqual([x["netPnl"] for x in insights["walletContrib"]], [40, 30, 20, 10, 0, -30, -40, -50])
         self.assertEqual([x["netPnl"] for x in insights["coinPnl"]], [40, 30, 20, 10, 0, -30, -40, -50])
 
+    def test_insights_uses_current_core_rank_and_leaves_retired_wallet_unranked(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,source,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g-current','scan','published',1,1,1,'now','now')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selection_rank,selected_at) "
+                "VALUES ('g-current','0xcore','core',1,2,'now')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selection_rank,selected_at) "
+                "VALUES ('g-current','0xretired','core',1,1,'now')"
+            )
+            db.execute(
+                "INSERT INTO target_controls (addr,enabled,intent,updated_at) "
+                "VALUES ('0xretired',1,'requalify','now')"
+            )
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (90,'0xcore',0.8,'now')"
+            )
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (40,'0xretired',0.8,'now')"
+            )
+            db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
+                "VALUES ('0xcore','BTC','long','closed',20,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
+                "VALUES ('0xretired','ETH','short','closed',-10,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+            )
+            db.commit()
+
+            insights = api_overview.ep_insights(db)
+
+        by_address = {row["address"]: row for row in insights["walletContrib"]}
+        self.assertEqual(by_address["0xcore"]["rank"], 2)
+        self.assertIsNone(by_address["0xretired"]["rank"])
+
     def test_equity_curve_samples_large_series_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
