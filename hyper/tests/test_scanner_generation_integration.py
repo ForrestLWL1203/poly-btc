@@ -269,7 +269,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner, "form_quality_prefix", return_value=formation) as form, \
                     patch.object(scanner.strategy_revision, "active_revision_id", return_value="r0"), \
                     patch.object(scanner.strategy_revision, "create_revision", return_value={"revision": "r1"}) as create, \
-                    patch.object(scanner, "_apply_formation_params", return_value=True) as apply_params:
+                    patch.object(scanner, "_apply_formation_params", return_value=True) as apply_params, \
+                    patch.object(
+                        scanner.effective_replay, "certify_and_store",
+                        return_value={"status": "ok", "dynamicReturn30d": 1.25},
+                    ) as certify:
                 result = scanner.calibrate_current_core_margins(db, apply=True)
 
             self.assertEqual(result["status"], "applied")
@@ -282,6 +286,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(form.call_args.kwargs["_margin_calibration_only"])
             apply_params.assert_called_once()
             create.assert_called_once()
+            certify.assert_called_once_with(db, "g-current")
+            self.assertEqual(result["portfolioReplay"]["dynamicReturn30d"], 1.25)
 
     def test_current_core_margin_calibration_rejects_member_loss_before_apply(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2553,7 +2559,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xbbb'"
             ).fetchone(), ("rejected", None))
 
-    def test_final_parameter_policy_promotes_watch_sector_for_selected_core(self):
+    def test_final_parameter_policy_replay_uses_allowed_sector_for_selected_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -2648,7 +2654,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 json.loads(rows[0].replay_score_detail_json)["economicScore"], .88,
             )
             self.assertEqual(rows[0].replayed_at, "now")
-            self.assertTrue(window_fills.call_args.kwargs["include_watch"])
+            self.assertFalse(window_fills.call_args.kwargs["include_watch"])
             final_replay.assert_called_once()
             self.assertIsNotNone(final_replay.call_args.kwargs["path_rows"])
 

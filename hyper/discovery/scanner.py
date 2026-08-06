@@ -51,6 +51,7 @@ from hyper.selection import (
     core_formation,
     follow_score,
     pre_strict,
+    effective_replay,
     state as selection,
     strategy_revision,
     wallet_risk,
@@ -5480,6 +5481,10 @@ def calibrate_current_core_margins(db, *, stamp=None, apply=False) -> dict:
             },
         )
         db.commit()
+    portfolio_replay = (
+        effective_replay.certify_and_store(db, generation_id)
+        if apply else None
+    )
     _set_scan_progress(
         db, state="idle", stage="current_core_margin_calibration_complete",
         candidates_scanned=len(expected_core), candidates_total=len(expected_core),
@@ -5499,6 +5504,7 @@ def calibrate_current_core_margins(db, *, stamp=None, apply=False) -> dict:
         "quickReplayCount": calibration.get("quick_replay_count"),
         "strictFinalistCount": len(calibration.get("finalists") or ()),
         "resourcePeak": search.get("resourcePeak") or {},
+        "portfolioReplay": portfolio_replay,
     }
 
 
@@ -6337,8 +6343,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         "dynamicReturn30d": 0.0, "dynamicReturn7d": 0.0,
     }
     if desired:
+        # The final published estimate must describe the immutable execution policy. Watch-only sectors
+        # may participate in qualification research above, but Paper/Live cannot open them.
         window_fills = auto_tune._portfolio_window_fills(
-            db, list(desired), int(now_ms), include_watch=True,
+            db, list(desired), int(now_ms), include_watch=False,
         )
         if window_fills is None or not any(window_fills.values()):
             raise RuntimeError("quality_prefix_replay_unavailable")

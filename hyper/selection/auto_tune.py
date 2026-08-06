@@ -1067,7 +1067,7 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
             >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95)) else "unverified"
         ),
         "estimateKind": "trade_ohlc_conservative_proxy",
-        "validationSource": "final_strict_copy",
+        "validationSource": strict.get("validationSource") or "final_strict_copy",
         "effectiveParams": effective_params,
         "maintenanceMarginCoverage30": f(strict.get("maintenanceMarginCoverage30d")),
     }
