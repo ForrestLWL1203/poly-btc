@@ -132,8 +132,15 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('label = running ? (live ? "LIVE" : "PAPER") : "STOP"', rings)
         self.assertIn('label = draining ? "DRAIN" : "PAUSE"', rings)
         self.assertIn('<MagicRingsCanvas active={running}', rings)
+        self.assertIn('gl.uniform1f(uniforms.baseRadius, 0.35)', rings)
+        self.assertIn('gl.uniform1f(uniforms.radiusStep, 0.1)', rings)
+        self.assertIn('let color = "#55d5b2"', rings)
         self.assertIn('timer = window.setTimeout(tick, 1000 / 30)', rings)
         self.assertIn('if (shouldAnimate()) tick();\n      else draw();', rings)
+        for retired_interaction in (
+            "mousemove", "mouseenter", "mouseleave", "clickBurst", "followMouse", "uMouse",
+        ):
+            self.assertNotIn(retired_interaction, rings)
         self.assertNotIn("LIVE · ${execution?.state", jsx)
         self.assertIn('api.cmd("scan_stop", {})', jsx)
         self.assertIn("紧急终止采集", mask)

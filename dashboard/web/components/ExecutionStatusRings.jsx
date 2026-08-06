@@ -49,6 +49,9 @@ float ring(vec2 p, float radius, float cut, float timeOffset, float px) {
 void main() {
   float px = 1.0 / min(uResolution.x, uResolution.y);
   vec2 p = (gl_FragCoord.xy - 0.5 * uResolution.xy) * px;
+  // Preserve the source demo's ~1.9:1 composition inside this wider status slot.
+  // Without this fit, the circles collapse into one tiny central halo.
+  p.x *= min(1.0, 1.9 / (uResolution.x / uResolution.y));
   vec3 color = vec3(0.0);
   float ringCount = max(float(uRingCount) - 1.0, 1.0);
 
@@ -185,16 +188,17 @@ function MagicRingsCanvas({ active, color, colorTwo }) {
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.useProgram(program);
       gl.uniform1f(uniforms.time, elapsed);
-      gl.uniform1f(uniforms.attenuation, 12.5);
-      gl.uniform1f(uniforms.lineThickness, 1.55);
-      gl.uniform1f(uniforms.baseRadius, 0.17);
-      gl.uniform1f(uniforms.radiusStep, 0.055);
-      gl.uniform1f(uniforms.scaleRate, 0.115);
-      gl.uniform1f(uniforms.opacity, 0.82);
-      gl.uniform1f(uniforms.noiseAmount, 0.012);
-      gl.uniform1f(uniforms.ringGap, 1.32);
-      gl.uniform1f(uniforms.fadeIn, 0.62);
-      gl.uniform1f(uniforms.fadeOut, 0.52);
+      // Keep the React Bits source defaults; only frame rate and colors are adapted.
+      gl.uniform1f(uniforms.attenuation, 10);
+      gl.uniform1f(uniforms.lineThickness, 2);
+      gl.uniform1f(uniforms.baseRadius, 0.35);
+      gl.uniform1f(uniforms.radiusStep, 0.1);
+      gl.uniform1f(uniforms.scaleRate, 0.1);
+      gl.uniform1f(uniforms.opacity, 1);
+      gl.uniform1f(uniforms.noiseAmount, 0.1);
+      gl.uniform1f(uniforms.ringGap, 1.5);
+      gl.uniform1f(uniforms.fadeIn, 0.7);
+      gl.uniform1f(uniforms.fadeOut, 0.5);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
       gl.uniform3fv(uniforms.color, firstColor);
       gl.uniform3fv(uniforms.colorTwo, secondColor);
@@ -216,7 +220,7 @@ function MagicRingsCanvas({ active, color, colorTwo }) {
       stop();
       if (!shouldAnimate()) return;
       const now = performance.now();
-      elapsed += Math.min(now - previous, 100) * 0.001 * 0.72;
+      elapsed += Math.min(now - previous, 100) * 0.001;
       previous = now;
       draw();
       timer = window.setTimeout(tick, 1000 / 30);
@@ -265,8 +269,8 @@ export function ExecutionStatusRings({ status, executionState, live }) {
   let state = running ? (live ? "live" : "paper") : "stopped";
   let label = running ? (live ? "LIVE" : "PAPER") : "STOP";
   let detail = running ? (live ? "实盘跟单运行中" : "模拟跟单运行中") : "跟单已停止";
-  let color = running && live ? "#ff8a8a" : "#91e7cf";
-  let colorTwo = running && live ? "#a23f50" : "#46adbc";
+  let color = "#55d5b2";
+  let colorTwo = "#46adbc";
   let icon = null;
 
   if (paused || draining) {
