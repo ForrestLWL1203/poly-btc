@@ -131,6 +131,9 @@ Leaderboard staging
   Ambiguous automation, temporary economic weakness, heavy-DCA behavior, and data failures remain recoverable.
 - Core, Challenger, Exit-only, and current-mode held-position wallets may bypass cheap recall for refresh/safe
   exit, but receive no privilege at final qualification.
+- A fresh, explicit zero-equity and zero-position source snapshot is excluded before Rough Copy and checked
+  again before final formation/publication. It is a recoverable availability failure, not a permanent blacklist;
+  missing equity evidence is deferred and must never be coerced into the zero-equity decision.
 - Each generation freezes its candidate order, fill evidence, market snapshot, and as-of time. Recovery must not
   splice in a later market surface or refetch already complete wallets.
 

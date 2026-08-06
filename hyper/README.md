@@ -318,9 +318,11 @@ snapshots, one Canonical/actual Copy liquidation losing at least 8% of its recor
 cumulative conservative actual-Copy loss reaching at least 8% of the opening-equity reference.
 The cumulative case may recover through later profits; the single-event cases remain durable. Legacy
 positions with no opening-equity value cannot prove that threshold. A zero-equity/no-position wallet without
-liquidation evidence is recoverable unavailable; structural HFT/DCA/hedge/unexecutable-market failures use a
-separate system block. Missing data/path/valuation evidence never advances risk confirmation and prevents
-publication. An economic-only shared replay failure retains the current membership and parameters as
+liquidation evidence is recoverable unavailable: the fresh snapshot excludes it before Rough Copy, and the
+finalizer checks the same condition again before formation/publication. It is eligible to requalify after a later
+deposit and is not permanently blacklisted. Missing equity is not treated as zero. Structural HFT/DCA/hedge/
+unexecutable-market failures use a separate system block. Missing data/path/valuation evidence never advances
+risk confirmation and prevents publication. An economic-only shared replay failure retains the current membership and parameters as
 `operator_review_degraded`, pauses promotions/tuning, and appears as a Dashboard warning.
 
 Previously known wallets remain history-incremental, and only complete discovery runs bootstrap or repair 37

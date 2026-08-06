@@ -1913,6 +1913,104 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             {"frozenRoughCopyPassed": True},
         )
 
+    def test_zero_equity_no_positions_gate_is_recoverable_and_does_not_coerce_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation(generation,started_at,status) "
+                "VALUES ('g-empty','scan-start','profiling')"
+            )
+            db.executemany(
+                "INSERT INTO profile "
+                "(addr,status,reason,profile_generation,data_status,evidence_status,"
+                "acct_value,open_position_count,score) VALUES (?,?,?,?,?,?,?,?,?)",
+                [
+                    ("0xzero", "active", "source_structure_passed", "g-empty", "valid",
+                     "source_qualified", 0.0, 0, .9),
+                    ("0xfunded", "active", "source_structure_passed", "g-empty", "valid",
+                     "source_qualified", 100.0, 0, .8),
+                    ("0xmissing", "active", "source_structure_passed", "g-empty",
+                     "deferred_data_error", "missing", None, 0, .7),
+                    ("0xstructural", "rejected", "source_hft", "g-empty", "valid",
+                     "economically_disqualified", 0.0, 0, .1),
+                ],
+            )
+            db.commit()
+
+            gated = scanner._apply_zero_equity_no_positions_gate(db, "g-empty")
+            db.commit()
+
+            self.assertEqual(gated, {"0xzero"})
+            rows = {
+                addr: (status, reason, evidence)
+                for addr, status, reason, evidence in db.execute(
+                    "SELECT addr,status,reason,evidence_status FROM profile"
+                ).fetchall()
+            }
+            self.assertEqual(
+                rows["0xzero"],
+                ("rejected", "source_zero_equity_no_positions", "economically_disqualified"),
+            )
+            self.assertEqual(rows["0xfunded"][0], "active")
+            self.assertEqual(rows["0xmissing"][1], "source_structure_passed")
+            self.assertEqual(rows["0xstructural"][1], "source_hft")
+            audit = db.execute(
+                "SELECT status,reason,payload_json FROM pipeline_audit "
+                "WHERE generation='g-empty' AND stage='source_account_state'"
+            ).fetchall()
+            self.assertEqual(len(audit), 1)
+            self.assertEqual(audit[0][0:2], ("rejected", "source_zero_equity_no_positions"))
+            self.assertEqual(
+                json.loads(audit[0][2])["action"], "exclude_from_candidate_pool",
+            )
+
+    def test_quality_profiles_defensively_exclude_empty_account(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            for rank, (addr, account_value) in enumerate(
+                (("0xzero", 0.0), ("0xfunded", 100.0)), 1,
+            ):
+                profile = {key: None for key in cols}
+                profile.update(
+                    addr=addr, status="active", reason="rough_copy_qualified",
+                    profile_generation="g-account", data_status="valid",
+                    evidence_status="qualified", rough_copy_score=.9,
+                    acct_value=account_value, open_position_count=0,
+                )
+                db.execute(
+                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    [profile.get(column) for column in cols],
+                )
+                db.execute(
+                    "INSERT INTO pre_strict_evidence "
+                    "(generation,addr,policy_version,model_version,status,queue_rank,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "g-account", addr, scanner.pre_strict.POLICY_VERSION,
+                        scanner.pre_strict.SELECTION_MODEL_VERSION, "passed", rank, "now",
+                    ),
+                )
+            db.commit()
+
+            ranked = scanner._quality_core_profiles(
+                db, "g-account", core_only=False,
+            )
+
+        self.assertEqual([row["addr"] for row in ranked], ["0xfunded"])
+
+    def test_profiled_finalizer_rechecks_empty_accounts_before_formation(self):
+        source = inspect.getsource(scanner.finalize_profiled_generation)
+
+        gate_at = source.index("_apply_zero_equity_no_positions_gate(")
+        counts_at = source.index("pre_strict_counts = _pre_strict_counts(")
+        formation_at = source.index("formation = form_quality_prefix(")
+        self.assertLess(gate_at, counts_at)
+        self.assertLess(counts_at, formation_at)
+        self.assertIn("db.commit()", source[gate_at:counts_at])
+
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 

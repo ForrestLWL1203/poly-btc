@@ -558,6 +558,29 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(snap["open_unrealized"], 100)
         self.assertAlmostEqual(snap["cur_leverage"], 0.61)
 
+    def test_open_snapshot_requires_standard_equity_state_when_builder_dex_is_present(self):
+        builder = {
+            "marginSummary": {"accountValue": "0"},
+            "assetPositions": [],
+        }
+
+        def clearinghouse_state(_addr, dex=None):
+            return builder if dex == "xyz" else None
+
+        with patch.object(
+            scanner.rest, "clearinghouse_state", side_effect=clearinghouse_state,
+        ) as clearinghouse:
+            snap = scanner._open_snapshot(
+                "0xwallet", {None, "xyz"}, [], scanner._DAY_MS,
+                10_000, universe={"xyz:AAPL"},
+            )
+
+        self.assertIsNone(snap)
+        self.assertEqual(
+            {call.kwargs.get("dex") for call in clearinghouse.call_args_list},
+            {None, "xyz"},
+        )
+
     def test_harvest_clears_stale_candidate_flags_before_current_leaderboard(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

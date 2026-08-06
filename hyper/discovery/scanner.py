@@ -1437,7 +1437,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct, *, universe):
       score guard."""
     open_ms = {e["coin"]: e["open_ms"] for e in (open_eps or [])}    # coin -> when the live run started
     types, worst_uw = set(), 0.0
-    tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
+    tot_ntl, acct_val, answered, equity_answered, has_pos = 0.0, 0.0, False, False, False
     up_loss, up_win, bag_n, max_bag_d, max_win_d = 0.0, 0.0, 0, 0.0, 0.0
     open_position_count = material_open_count = 0
     perp_short, perp_notl = {}, 0.0                              # for spot-hedge detection
@@ -1447,6 +1447,8 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct, *, universe):
         if not isinstance(cs, dict):
             continue
         answered = True
+        if dex is None:
+            equity_answered = True
         ms = cs.get("marginSummary", {})
         acct_val = max(acct_val, f(ms.get("accountValue")))      # standard dex carries the real equity
         for pp in cs.get("assetPositions", []) or []:
@@ -1482,7 +1484,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct, *, universe):
                     max_bag_d = max(max_bag_d, days)   # a material carried LOSS = a bag
             elif upnl > 0:
                 up_win += upnl;   max_win_d = max(max_win_d, days)               # a carried WIN = trend value
-    if not answered:
+    if not answered or (None in dexes and not equity_answered):
         return None
     # SPOT-HEDGE ratio: a perp SHORT offset by a spot LONG of the same token is a hedge (its perp PnL is
     # cancelled by spot → the naked perp leg we'd copy is a loss). Only fetch spot when there ARE shorts.
@@ -1800,7 +1802,12 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
     # realized+unrealized roi, then re-judge: held position = ACTIVE, 扛单 bags drag roi_total negative,
     # trend holders kept. Only structural survivors pay the extra clearinghouse call.
     if ok:
-        dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
+        # Always include the standard clearinghouse state: it carries current Perp account equity even for a
+        # wallet whose recent executable fills are exclusively on a builder DEX. Daily refreshes reuse a
+        # frozen Leaderboard snapshot, so that live state is the authoritative withdrawal/re-funding signal.
+        dexes = {None} | {
+            (c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}
+        }
         snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value, universe=universe)
         if snap is None:
             return _defer_profile(
@@ -1808,6 +1815,12 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
                 generation_id=getattr(p, "scan_generation", None),
                 persist=persist,
             )
+        acct_value = f(snap.get("account_value"))
+        m["acct_value"] = acct_value
+        m["roi_equity"] = (m["net_pnl"] / acct_value) if acct_value else 0.0
+        m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0
+        m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0
+        m["liq_count"], m["liq_worst_pct"] = _self_liquidations(perp, addr, acct_value)
         m["margin_type"] = snap["margin_type"]
         m["cur_leverage"] = snap["cur_leverage"]
         m["open_underwater"] = snap["worst_underwater"]
@@ -1820,7 +1833,7 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
         # PnL/volume/drawdown must never enter this product's quality path.  Keep only current account
         # equity as a denominator; profitability and execution edge come exclusively from scoped fills
         # and our fee-paid canonical Copy replay below.
-        m["pf_equity"] = acct_value or snap.get("account_value")
+        m["pf_equity"] = acct_value
         m["pf_week_pnl"] = m["pf_week_vlm"] = None
         m["pf_mon_pnl"] = m["pf_mon_vlm"] = None
         m["pf_turnover"] = None
@@ -2487,7 +2500,7 @@ def _quality_core_profiles(
         "p.copy_bt_gross_profit,p.copy_bt_gross_loss,p.copy_bt_profit_factor,p.copy_bt_payoff_ratio,"
         "p.copy_bt_top3_profit_share,p.copy_bt_body_after_top3_n,"
         "p.copy_bt_body_after_top3_win_rate,p.copy_bt_body_after_top3_net_pnl,"
-        "p.sector_copy_json,p.sector_policy_json,p.acct_value,"
+        "p.sector_copy_json,p.sector_policy_json,p.acct_value,p.open_position_count,"
         "pse.activity_json AS pre_strict_activity_json,pse.policy_version AS pre_strict_policy_version,"
         "pse.status AS pre_strict_status,pse.first_failure AS pre_strict_first_failure,"
         "pse.tier AS pre_strict_tier,pse.queue_rank AS pre_strict_queue_rank,"
@@ -2539,6 +2552,15 @@ def _quality_core_profiles(
         row["addr"] = addr
         row["retention_lane"] = addr in current_core
         row.update(forward_risk.get(addr) or {})
+        # A current, explicit empty-account snapshot is an availability failure, not historical evidence
+        # that may be traded from later. Keep NULL distinct from zero: missing account evidence is handled
+        # by the data-status gates, while a proven zero-equity/zero-position wallet cannot enter formation.
+        if (
+            row.get("acct_value") is not None
+            and f(row.get("acct_value")) <= max(float(config.FLAT), 1e-6)
+            and int(row.get("open_position_count") or 0) == 0
+        ):
+            continue
         try:
             row["pre_strict_activity"] = json.loads(
                 row.get("pre_strict_activity_json") or "{}"
@@ -2827,9 +2849,56 @@ def _parallel_effective_follow_replays(
     )
 
 
+def _apply_zero_equity_no_positions_gate(db, generation_id: str) -> set[str]:
+    """Exclude fresh, explicitly empty source accounts before replay or Core formation.
+
+    This is generation-scoped and recoverable. It does not create a durable wallet-risk event: a wallet that
+    is funded again may qualify in a later scan. NULL equity is not zero and remains governed by the existing
+    incomplete-data path.
+    """
+    floor = max(float(config.FLAT), 1e-6)
+    rows = db.execute(
+        "SELECT lower(addr) FROM profile "
+        "WHERE profile_generation=? AND status IN ('active','qualified') AND data_status='valid' "
+        "AND acct_value IS NOT NULL AND acct_value<=? "
+        "AND COALESCE(open_position_count,0)=0 "
+        "AND NOT (status='rejected' AND reason='source_zero_equity_no_positions') "
+        "ORDER BY lower(addr)",
+        (generation_id, floor),
+    ).fetchall()
+    gated = {str(row[0] or "").lower() for row in rows if row[0]}
+    if not gated:
+        return set()
+
+    placeholders = ",".join("?" for _ in gated)
+    db.execute(
+        "UPDATE profile SET status='rejected',reason='source_zero_equity_no_positions',"
+        "score=0,evidence_status='economically_disqualified' "
+        f"WHERE profile_generation=? AND lower(addr) IN ({placeholders})",
+        (generation_id, *sorted(gated)),
+    )
+    stamp_row = db.execute(
+        "SELECT started_at FROM scan_generation WHERE generation=?",
+        (generation_id,),
+    ).fetchone()
+    stamp = str(stamp_row[0] or now_iso()) if stamp_row else now_iso()
+    for addr in sorted(gated):
+        pipeline_audit._insert_event(
+            db, generation=generation_id, stamp=stamp, source="scan",
+            stage="source_account_state", addr=addr, status="rejected",
+            reason="source_zero_equity_no_positions",
+            payload={
+                "action": "exclude_from_candidate_pool",
+                "accountState": "zero_equity_no_positions",
+            },
+        )
+    return gated
+
+
 def _source_quality_pool(db, generation_id: str) -> tuple[list[str], list[str]]:
     """Return every structurally valid deep-fill profile for fills-only pre-strict evaluation."""
     _apply_historical_major_liquidation_gate(db, generation_id)
+    _apply_zero_equity_no_positions_gate(db, generation_id)
     rows = db.execute(
         "SELECT lower(addr),COALESCE(source_quality_score,0) FROM profile "
         "WHERE profile_generation=? AND status='active' AND data_status='valid' "
@@ -8112,6 +8181,13 @@ def finalize_profiled_generation(
     repair_summary["marketSnapshotCoins"] = int(market_snapshot.get("coins") or 0)
     if repair_summary.get("repaired"):
         profile_coverage = _profiled_generation_coverage(db, generation_id, meta[5])
+    # The profiler that handed this generation to a fresh finalizer may have been an older process. Reapply
+    # the current account-availability invariant immediately before selection so an already-profiled empty
+    # wallet cannot be published during a rolling code deployment.
+    repair_summary["zeroEquityNoPositionsExcluded"] = len(
+        _apply_zero_equity_no_positions_gate(db, generation_id)
+    )
+    db.commit()
     pre_strict_counts = _pre_strict_counts(db, generation_id)
     _set_scan_progress(
         db, state="scanning", stage="prepare_selection_candidates",
