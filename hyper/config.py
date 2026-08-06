@@ -80,6 +80,14 @@ PRE_STRICT_ACTIVITY_MAX_OPEN_GAP_DAYS = 10.0
 CORE_MIN_DYNAMIC_COPY_RETURN_30D = 0.10
 CORE_MIN_DYNAMIC_COPY_RETURN_7D = 0.03
 CORE_COPY_MIN_WIN_RATE = 0.60        # legacy compatibility; not an admission gate.
+# Core is a shared-capital portfolio, so an otherwise-qualified source that creates an unusually dense
+# seven-day stream receives a small ranking haircut.  This is deliberately a recoverable soft penalty:
+# it neither rejects nor blacklists the wallet, and disappears automatically after refreshed evidence
+# falls back below the start line.  Use source episodes rather than copied closes so congestion pressure
+# is measured before our own capacity skips hide it.
+CORE_HIGH_FREQ_PENALTY_START_7D = 60
+CORE_HIGH_FREQ_PENALTY_FULL_7D = 120
+CORE_HIGH_FREQ_PENALTY_MAX = 0.01
 # The shared final account, after all wallets are jointly tuned, still needs material rolling returns.
 CORE_PORTFOLIO_MIN_RETURN_30D = 0.10
 CORE_PORTFOLIO_MIN_RETURN_7D = 0.03

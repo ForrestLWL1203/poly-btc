@@ -175,6 +175,9 @@ together. The current broad contract is:
   the bounded strict pool.
 - Strict individual and shared formation require positive recent windows, current sample depth, capacity/open
   coverage, acceptable open loss/drawdown/cost, complete price paths, and bounded isolated liquidations.
+- Strict Core ordering applies a small, bounded penalty to unusually dense seven-day source opening activity.
+  It is ranking-only: the wallet remains eligible/Challenger, is never blacklisted by this rule, and the penalty
+  automatically disappears after a full scan or daily refresh observes its recent frequency below the start line.
 - Exchange-labelled self-liquidation plus a fresh zero-equity/no-position account snapshot is a hard safety
   failure. Canonical Copy liquidation losing at least 8% of episode-opening dynamic equity is also hard safety.
   Ordinary losses, recent decline, or sub-8% isolated liquidation are not automatic daily removals.

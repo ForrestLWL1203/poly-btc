@@ -182,6 +182,55 @@ class FollowScoreTests(unittest.TestCase):
             "stage": "rough", "profitComponent": .50, "reliability": .90,
         }))
 
+    def test_strict_high_frequency_penalty_is_soft_bounded_and_recoverable(self):
+        below_score, below = compute_follow_score(evidence(
+            source_episode_n_7d=60,
+        ), stage="strict")
+        middle_score, middle = compute_follow_score(evidence(
+            source_episode_n_7d=90,
+        ), stage="strict")
+        high_score, high = compute_follow_score(evidence(
+            source_episode_n_7d=123,
+        ), stage="strict")
+        capped_score, capped = compute_follow_score(evidence(
+            source_episode_n_7d=500,
+        ), stage="strict")
+
+        self.assertEqual(below["frequencyPenalty"], 0.0)
+        self.assertAlmostEqual(middle["frequencyPenalty"], .005)
+        self.assertAlmostEqual(high["frequencyPenalty"], .01)
+        self.assertAlmostEqual(capped["frequencyPenalty"], .01)
+        self.assertAlmostEqual(below_score - middle_score, .005)
+        self.assertAlmostEqual(below_score - high_score, .01)
+        self.assertAlmostEqual(high_score, capped_score)
+        self.assertTrue(high["frequencyPenaltyDetail"]["active"])
+        self.assertIn("Core高频排序 -1.0分", high["reasons"][-1])
+
+        recovered_score, recovered = compute_follow_score(evidence(
+            source_episode_n_7d=18,
+        ), stage="strict")
+        self.assertAlmostEqual(recovered_score, below_score)
+        self.assertFalse(recovered["frequencyPenaltyDetail"]["active"])
+
+    def test_high_frequency_penalty_does_not_change_rough_candidate_recall(self):
+        normal_score, normal = compute_follow_score(evidence(
+            source_episode_n_7d=18,
+        ), stage="rough")
+        frequent_score, frequent = compute_follow_score(evidence(
+            source_episode_n_7d=500,
+        ), stage="rough")
+
+        self.assertAlmostEqual(normal_score, frequent_score)
+        self.assertEqual(normal["frequencyPenalty"], 0.0)
+        self.assertEqual(frequent["frequencyPenalty"], 0.0)
+
+    def test_projected_strict_score_includes_frozen_frequency_penalty(self):
+        projected = project_strict_score_detail({
+            "stage": "strict", "profitComponent": .50, "reliability": .90,
+            "frequencyPenalty": .01,
+        })
+        self.assertAlmostEqual(projected, .60 + .35 * .50 + .05 * .90 - .01)
+
     def test_final_sort_is_monotonic_with_displayed_score(self):
         rows = []
         for index, metrics in enumerate((

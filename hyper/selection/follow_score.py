@@ -24,7 +24,7 @@ from . import pre_strict
 PROFIT_PRIORITY_30_WEIGHT = 0.70
 PROFIT_PRIORITY_7_WEIGHT = 0.30
 PROFIT_PRIORITY_MODE = "conservative_realized_profit_70_30"
-FOLLOW_SCORE_MODE = "strict_qualification_anchor_profit_confidence_v3"
+FOLLOW_SCORE_MODE = "strict_qualification_anchor_profit_confidence_frequency_v4"
 FOLLOW_SCORE_PROFIT_SCALE = 0.35
 FOLLOW_SCORE_CONFIDENCE_FLOOR = 0.85
 STRICT_SCORE_QUALIFICATION_BASE = 0.60
@@ -69,6 +69,12 @@ def strict_score_formula() -> dict:
         "qualificationBase": STRICT_SCORE_QUALIFICATION_BASE,
         "profitWeight": STRICT_SCORE_PROFIT_WEIGHT,
         "reliabilityWeight": STRICT_SCORE_RELIABILITY_WEIGHT,
+        "highFrequencyPenalty": {
+            "metric": "sourceEpisodeN7d",
+            "start": int(config.CORE_HIGH_FREQ_PENALTY_START_7D),
+            "full": int(config.CORE_HIGH_FREQ_PENALTY_FULL_7D),
+            "max": float(config.CORE_HIGH_FREQ_PENALTY_MAX),
+        },
     }
 
 
@@ -84,7 +90,30 @@ def project_strict_score_detail(detail: Mapping | None) -> float | None:
         formula["qualificationBase"]
         + formula["profitWeight"] * _clamp(_num(detail.get("profitComponent")))
         + formula["reliabilityWeight"] * _clamp(_num(detail.get("reliability")))
+        - _clamp(
+            _num(detail.get("frequencyPenalty")),
+            0.0,
+            float(config.CORE_HIGH_FREQ_PENALTY_MAX),
+        )
     )
+
+
+def _strict_frequency_penalty(metrics: Mapping) -> tuple[float, dict]:
+    """Return a recoverable Core-ranking haircut for unusually dense recent source activity."""
+    episodes7d = max(0, int(_num(metrics.get("source_episode_n_7d"))))
+    start = max(0, int(config.CORE_HIGH_FREQ_PENALTY_START_7D))
+    full = max(start + 1, int(config.CORE_HIGH_FREQ_PENALTY_FULL_7D))
+    maximum = max(0.0, float(config.CORE_HIGH_FREQ_PENALTY_MAX))
+    progress = _clamp((episodes7d - start) / float(full - start))
+    return maximum * progress, {
+        "metric": "sourceEpisodeN7d",
+        "sourceEpisodeN7d": episodes7d,
+        "start": start,
+        "full": full,
+        "max": maximum,
+        "progress": progress,
+        "active": progress > 0.0,
+    }
 
 
 def _quality_above_floor(value: float, floor: float, span: float) -> float:
@@ -615,6 +644,7 @@ def compute_follow_score(
         FOLLOW_SCORE_CONFIDENCE_FLOOR
         + (1.0 - FOLLOW_SCORE_CONFIDENCE_FLOOR) * reliability
     )
+    frequency_penalty, frequency_detail = _strict_frequency_penalty(scoped)
     if strict:
         # A final-Strict wallet has already passed the complete source, activity, PF, execution, path and
         # liquidation contract.  Give that certification a visible baseline, then preserve profit-led order
@@ -625,6 +655,7 @@ def compute_follow_score(
             STRICT_SCORE_QUALIFICATION_BASE
             + STRICT_SCORE_PROFIT_WEIGHT * profit_component
             + STRICT_SCORE_RELIABILITY_WEIGHT * reliability
+            - frequency_penalty
         )
         score_formula = strict_score_formula()
     else:
@@ -643,6 +674,8 @@ def compute_follow_score(
         "profitComponent": profit_component,
         "reliability": reliability,
         "confidenceMultiplier": confidence_multiplier,
+        "frequencyPenalty": frequency_penalty if strict else 0.0,
+        "frequencyPenaltyDetail": frequency_detail,
         "scoreFormula": score_formula,
         "profitabilityBasis": PROFITABILITY_BASIS,
         "economicReturns": {"30d": return30, "7d": return7},
@@ -668,5 +701,7 @@ def compute_follow_score(
             f"（30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%）",
             f"可信度 {reliability * 100:.1f}% / 系数 {confidence_multiplier:.3f}",
             f"PF {profit_factor:.2f} / 开仓跟随率 {open_rate * 100:.1f}%",
-        ],
+        ] + ([
+            f"近7日源开仓 {frequency_detail['sourceEpisodeN7d']} 次，Core高频排序 -{frequency_penalty * 100:.1f}分"
+        ] if strict and frequency_penalty > 0.0 else []),
     }
