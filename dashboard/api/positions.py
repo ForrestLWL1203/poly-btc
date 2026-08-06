@@ -48,7 +48,7 @@ def ep_positions(db, qs):
         rows = qall(db, _follow_set_cte() +
                     ", closed_base AS ("
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
-                    "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
+                    "cp.entry_px,cp.leverage,cp.notional,cp.peak_size,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
                     "cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id "
                     f"FROM {position_table} cp WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
@@ -67,7 +67,12 @@ def ep_positions(db, qs):
             o, c = iso_epoch(r["opened_at"]), iso_epoch(r["closed_at"])
             pnl = r["realized_pnl"] or 0.0
             entry = r["entry_px"]
-            notl = r["notional"] or 0.0
+            # ``notional`` is deliberately rebased after every partial reduce,
+            # so at terminal close it can describe only the last few dollars of
+            # residue.  Closed history represents the position at its maximum
+            # deployed entry basis instead: peak quantity × weighted entry.
+            peak_size = r["peak_size"] or 0.0
+            notl = peak_size * entry if (peak_size > 0.0 and entry) else (r["notional"] or 0.0)
             size = (notl / entry) if entry else 0.0
             close_px = r["exit_px"]
             if close_px is None:
@@ -80,7 +85,7 @@ def ep_positions(db, qs):
                         "walletRank": r["wrank"],
                         "followPos": r["follow_pos"],
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
-                        "leverage": r["leverage"], "notional": r["notional"] or 0.0,
+                        "leverage": r["leverage"], "notional": notl,
                         "masterEntry": r["master_open_px"],
                         "masterLeverage": r["master_leverage"],
                         "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
@@ -170,7 +175,7 @@ def ep_positions(db, qs):
 def ep_position_detail(db, pos_id):
     tables = execution_copy_tables(db)
     position_table, action_table = tables["position"], tables["action"]
-    p = q1(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.entry_px,cp.leverage,cp.margin,cp.size,cp.rem_size,cp.master_open_px,cp.master_leverage,"
+    p = q1(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.entry_px,cp.leverage,cp.margin,cp.size,cp.rem_size,cp.peak_size,cp.master_open_px,cp.master_leverage,"
                "cp.realized_pnl,cp.unrealized_pnl,cp.was_liq,cp.opened_at,cp.closed_at,cp.strategy_revision_id "
                f"FROM {position_table} cp WHERE cp.pos_id=?", (pos_id,))
     if not p:
@@ -228,6 +233,14 @@ def ep_position_detail(db, pos_id):
             "capitalKind": "投入" if entry else "返还",
             "pnl": pnl,
         })
+    historical_notional = (
+        (p["peak_size"] or 0.0) * (p["entry_px"] or 0.0)
+        if p["status"] != "open" and p["peak_size"] and p["entry_px"]
+        else None
+    )
+    display_margin = (
+        historical_notional / lev if historical_notional is not None and lev else (p["margin"] or 0.0)
+    )
     return {
         "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"],
         "closeType": _close_type(p),
@@ -235,7 +248,7 @@ def ep_position_detail(db, pos_id):
         "masterEntry": p["master_open_px"], "masterLeverage": p["master_leverage"],
         "ourEntry": p["entry_px"], "ourLeverage": lev,
         "strategyRevision": p["strategy_revision_id"],
-        "ourMargin": p["margin"] or 0.0,
+        "ourMargin": display_margin,
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
         "fills": fills,
     }

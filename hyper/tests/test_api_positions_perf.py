@@ -136,6 +136,23 @@ class ApiPositionsPerfTests(unittest.TestCase):
 
         self.assertAlmostEqual(res["positions"][0]["closePx"], 91.5)
 
+    def test_closed_position_uses_peak_entry_basis_not_final_dust_notional(self):
+        db = self._db()
+        pos_id = db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,realized_pnl,entry_px,leverage,margin,notional,size,rem_size,peak_size,"
+            "opened_at,closed_at) "
+            "VALUES ('0xaaa','XYZ100','short','gap_closed',0.01,29450,10,.2945,2.945,.0001,0,.0261,"
+            "'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+        ).lastrowid
+        db.commit()
+
+        res = api_positions.ep_positions(db, {"status": ["closed"], "coin": ["XYZ100"]})
+        detail = api_positions.ep_position_detail(db, pos_id)
+
+        self.assertAlmostEqual(res["positions"][0]["notional"], 768.645)
+        self.assertAlmostEqual(detail["ourMargin"], 76.8645)
+
     def test_positions_endpoints_are_split_from_api_module(self):
         self.assertIsNotNone(util.find_spec("dashboard.api.positions"))
         api_positions = import_module("dashboard.api.positions")
