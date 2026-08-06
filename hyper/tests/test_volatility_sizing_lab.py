@@ -44,6 +44,26 @@ class VolatilitySizingLabTests(unittest.TestCase):
             .85,
         )
 
+    def test_strict_shortlist_fills_three_distinct_slots_when_champions_overlap(self):
+        candidates = []
+        for index, pnl in enumerate((130.0, 125.0, 121.0, 80.0)):
+            candidates.append({
+                "name": f"candidate_{index}",
+                "windows": {
+                    "30": {
+                        "netPnl": pnl, "liquidations": index,
+                        "maxDrawdown": .05 + index * .01, "capacityFit": .90 - index * .01,
+                    },
+                    "14": {"netPnl": 10.0},
+                    "7": {"netPnl": 5.0},
+                },
+            })
+
+        shortlisted = lab._strict_shortlist(candidates, limit=3)
+
+        self.assertEqual(len(shortlisted), 3)
+        self.assertEqual(len({row["name"] for row in shortlisted}), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

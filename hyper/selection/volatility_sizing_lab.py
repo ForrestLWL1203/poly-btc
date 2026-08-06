@@ -195,6 +195,16 @@ def _strict_shortlist(experimental: list[dict], limit: int = 3) -> list[dict]:
         out.append(item)
         if len(out) >= limit:
             break
+    # Profit, liquidation and capacity champions can legitimately be the same surface. Fill the remaining
+    # strict slots from the risk-aware ordering so "at most three" does not accidentally become one and hide
+    # a nearby trade-off that only the full price path can reveal.
+    for item in ordered:
+        if len(out) >= limit:
+            break
+        if item["name"] in seen:
+            continue
+        seen.add(item["name"])
+        out.append(item)
     return out
 
 
