@@ -1106,6 +1106,37 @@ class LiveExecutor:
             reducible = signed_size if signed_size > 1e-8 else 0.0
         return min(max(0.0, _float(requested)), max(0.0, reducible))
 
+    def _fresh_rest_projection(self) -> dict | None:
+        """Reuse the periodic REST audit for reduce-only order preflight.
+
+        A venue-enforced reduce-only order cannot increase exposure. Requiring
+        another nine-call full audit for every queued exit only creates a REST
+        storm; the 15-second fallback loop remains the account-wide authority.
+        """
+        with self._lock:
+            checkpoint = self.db.execute(
+                "SELECT status,created_at FROM execution_reconcile_checkpoint "
+                "WHERE session_id=? ORDER BY checkpoint_id DESC LIMIT 1",
+                (self.session["session_id"],),
+            ).fetchone()
+            if not checkpoint or str(checkpoint[0]) != "ok":
+                return None
+            max_age_ms = max(
+                5_000,
+                int(float(config.ACCOUNT_REST_FALLBACK_INTERVAL_S) * 2_000),
+            )
+            if now_ms() - _iso_ms(checkpoint[1]) > max_age_ms:
+                return None
+            positions = [
+                {"coin": str(row[0]), "signed_size": _float(row[1])}
+                for row in self.db.execute(
+                    "SELECT coin,COALESCE(SUM(signed_size),0) "
+                    "FROM execution_position_projection WHERE session_id=? GROUP BY coin",
+                    (self.session["session_id"],),
+                ).fetchall()
+            ]
+        return {"ok": True, "status": "ok", "positions": positions, "cachedRestAudit": True}
+
     def _increase_margin_cap(self, coin: str, planned_margin: float) -> float:
         state = self._refresh_session_state()
         if state not in INCREASE_STATES:
@@ -1552,10 +1583,13 @@ class LiveExecutor:
                     if size <= 1e-12:
                         raise RuntimeError("live_reduce_not_proven_by_exchange")
             else:
-                reconcile = self.reconcile(usage_category="account_fallback")
+                reconcile = self._fresh_rest_projection() if reduce_only else None
+                if reconcile is None:
+                    reconcile = self.reconcile(usage_category="account_fallback")
                 if not reconcile.get("ok"):
                     if not reduce_only:
                         raise RuntimeError("live_reconcile_required")
+                if reduce_only:
                     size = self._safe_reduce_size(
                         reconcile, coin=coin, is_buy=is_buy, requested=size,
                     )
@@ -1630,7 +1664,8 @@ class LiveExecutor:
             if not self.account_ws_healthy():
                 with self._broker_request_category("account_fallback"):
                     self._sync_fills()
-                self.reconcile(usage_category="account_fallback")
+                if not reduce_only:
+                    self.reconcile(usage_category="account_fallback")
             cloids = tuple(cloid for item in results for cloid in item.cloids)
             confirmed_fee, confirmed_closed_pnl = self._confirmed_fill_totals(cloids)
             return LiveExecutionResult(

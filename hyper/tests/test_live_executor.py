@@ -26,6 +26,7 @@ class FakeLiveBroker:
         self.orders = []
         self.fills = []
         self.submit_calls = 0
+        self.account_snapshot_calls = 0
         self.leverage_calls = []
         self.statuses = {}
         self.book_failures = 0
@@ -110,6 +111,7 @@ class FakeLiveBroker:
         return ActionResult(len(self.orders) < before)
 
     def account_snapshot(self):
+        self.account_snapshot_calls += 1
         rows = []
         for coin, size in self.positions.items():
             rows.append({"position": {
@@ -446,6 +448,34 @@ class LiveExecutorTests(unittest.TestCase):
             self.db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()[0],
             "reconcile_required",
         )
+
+    def test_reduce_only_reuses_fresh_successful_rest_projection(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.2)
+        broker.positions["BTC"] = -0.2
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_position_projection "
+            "(session_id,dex,coin,signed_size,observed_at) "
+            "VALUES ('live-test','','BTC',-.2,?)",
+            (stamp,),
+        )
+        self.db.execute(
+            "INSERT INTO execution_reconcile_checkpoint(session_id,status,created_at) "
+            "VALUES ('live-test','ok',?)",
+            (stamp,),
+        )
+        self.db.commit()
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(
+            executor, is_buy=True, size=0.2, reduce_only=True, action="close",
+            source_fill_id="cached-close", source_order_id="8", action_seq=2,
+        )
+
+        self.assertAlmostEqual(result.filled_size, 0.2)
+        self.assertEqual(broker.account_snapshot_calls, 0)
+        self.assertNotIn("BTC", broker.positions)
 
     def test_increase_stays_blocked_during_unrelated_drift(self):
         broker = FakeLiveBroker()
