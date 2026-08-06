@@ -45,6 +45,71 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
             self.assertEqual(generation_market.load(db, "g1")[1]["BTC"]["mark_px"], 50_000.0)
             self.assertEqual(generation_market.summary(db, "g1")["hash"], sealed["hash"])
 
+    def test_daily_candles_are_incremental_across_generations_and_bounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            day = 86_400_000
+            asof = (4_000_000_000_000 // day) * day
+            requests = []
+
+            def candles(_coin, interval, start_ms, end_ms):
+                self.assertEqual(interval, "1d")
+                requests.append((int(start_ms), int(end_ms)))
+                cursor = (int(start_ms) // day) * day
+                rows = []
+                while cursor < int(end_ms):
+                    rows.append({
+                        "t": cursor, "T": cursor + day - 1,
+                        "o": "100", "h": "102", "l": "100", "c": "101",
+                    })
+                    cursor += day
+                return rows
+
+            with patch.object(
+                generation_market.volatility.price_path.time, "time",
+                side_effect=[asof / 1000, (asof + day) / 1000, (asof + day) / 1000],
+            ), patch.object(
+                generation_market.volatility.price_path.rest,
+                "candle_snapshot_range", side_effect=candles,
+            ):
+                first = generation_market.Resolver(
+                    db, "daily-g1", asof, {"BTC"}, {"BTC": context()},
+                )
+                first.ensure({"BTC"})
+                second = generation_market.Resolver(
+                    db, "daily-g2", asof + day, {"BTC"}, {"BTC": context()},
+                )
+                second.ensure({"BTC"})
+                db.execute(
+                    "INSERT INTO coin_price_candle VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        "OLD", "1d", asof - 40 * day, asof - 39 * day - 1,
+                        1, 1, 1, 1, asof - 40 * day,
+                    ),
+                )
+                db.commit()
+                same_day = generation_market.Resolver(
+                    db, "daily-g3", asof + day, {"BTC"}, {"BTC": context()},
+                )
+                same_day.ensure({"BTC"})
+
+            self.assertEqual(len(requests), 2)
+            self.assertLessEqual(requests[1][1] - requests[1][0], 2 * day)
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM coin_price_candle "
+                    "WHERE coin='OLD' AND interval='1d'"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertLessEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM coin_price_candle "
+                    "WHERE coin='BTC' AND interval='1d'"
+                ).fetchone()[0],
+                generation_market.volatility.price_path.RETENTION_DAYS["1d"],
+            )
+
     def test_missing_terminal_mark_retries_independent_bulk_price_source(self):
         replay = {30: {
             "valuation_status": "missing_marks",

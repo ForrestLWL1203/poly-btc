@@ -6,11 +6,13 @@ asymmetric on purpose: de-risk FAST when recent vol rises above the baseline, re
 once calm is sustained into the long window). σ lives in the coin_vol TABLE (one row/coin), refreshed
 periodically off the signal hot path; the sizing code just reads the latest value.
 """
+from __future__ import annotations
+
 import time
 
 from hyper import config
 from hyper.util import f, now_iso
-from . import rest
+from . import price_path, rest
 
 
 def _daily_range(candles: list):
@@ -26,7 +28,27 @@ def _daily_range(candles: list):
     return sum(rs) / len(rs)
 
 
-def compute_at(coin: str, asof_ms: int) -> dict:
+def _cached_daily_candles(db, coin: str, asof_ms: int) -> tuple[list[dict] | None, dict]:
+    """Incrementally fill and read the bounded shared daily-candle cache."""
+    start_ms = int(asof_ms) - (int(config.VOL_SLOW_DAYS) + 2) * 86_400_000
+    result = price_path.ensure_coins(
+        db, [coin], start_ms, int(asof_ms), interval="1d", force_retry=True,
+    )
+    if result.get("failed") or result.get("deferred"):
+        return None, result
+    rows = db.execute(
+        "SELECT open_time,close_time,open_px,high_px,low_px,close_px "
+        "FROM coin_price_candle WHERE coin=? AND interval='1d' "
+        "AND close_time>=? AND open_time<=? ORDER BY open_time",
+        (coin, start_ms, int(asof_ms)),
+    ).fetchall()
+    return [
+        {"t": row[0], "T": row[1], "o": row[2], "h": row[3], "l": row[4], "c": row[5]}
+        for row in rows
+    ], result
+
+
+def compute_at(coin: str, asof_ms: int, *, db=None) -> dict:
     """Fetch one as-of volatility sample while distinguishing transport failure from a young market.
 
     Scanner qualification treats those outcomes differently: an API failure is a real data error, while a
@@ -34,7 +56,10 @@ def compute_at(coin: str, asof_ms: int) -> dict:
     is fixed at generation start so a scan crossing UTC midnight cannot mix candle regimes.
     """
     start_ms = int(asof_ms) - (int(config.VOL_SLOW_DAYS) + 2) * 86_400_000
-    cs = rest.candle_snapshot_range(coin, "1d", start_ms, int(asof_ms))
+    if db is None:
+        cs = rest.candle_snapshot_range(coin, "1d", start_ms, int(asof_ms))
+    else:
+        cs, _cache_result = _cached_daily_candles(db, coin, int(asof_ms))
     if cs is None:
         return {"status": "request_failed", "sigma": None, "fast": None, "slow": None, "n": 0}
     if not isinstance(cs, list):

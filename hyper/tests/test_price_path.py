@@ -104,6 +104,50 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual([False, False], transaction_state)
         self.assertEqual(2, result["fetched"])
 
+    def test_daily_cache_ignores_forming_candle_and_refreshes_after_utc_close(self):
+        day = 86_400_000
+        midnight = (4_000_000_000_000 // day) * day
+        now = midnight + 12 * 3_600_000
+        next_day = midnight + day + 3_600_000
+        first_rows = [
+            {"t": midnight - day, "T": midnight - 1,
+             "o": "100", "h": "102", "l": "99", "c": "101"},
+            {"t": midnight, "T": midnight + day - 1,
+             "o": "101", "h": "103", "l": "100", "c": "102"},
+        ]
+        second_rows = [
+            {"t": midnight, "T": midnight + day - 1,
+             "o": "101", "h": "104", "l": "100", "c": "103"},
+            {"t": midnight + day, "T": midnight + 2 * day - 1,
+             "o": "103", "h": "105", "l": "102", "c": "104"},
+        ]
+        with mock.patch(
+            "hyper.market.price_path.time.time",
+            side_effect=[now / 1000, now / 1000, next_day / 1000],
+        ), mock.patch(
+            "hyper.market.price_path.rest.candle_snapshot_range",
+            side_effect=[first_rows, second_rows],
+        ) as fetch:
+            price_path.ensure_coins(
+                self.db, ["BTC"], midnight - 32 * day, now, interval="1d",
+            )
+            price_path.ensure_coins(
+                self.db, ["BTC"], midnight - 32 * day, now, interval="1d",
+            )
+            price_path.ensure_coins(
+                self.db, ["BTC"], midnight - 31 * day, next_day, interval="1d",
+            )
+
+        self.assertEqual(fetch.call_count, 2)
+        rows = self.db.execute(
+            "SELECT open_time,close_time,close_px FROM coin_price_candle "
+            "WHERE coin='BTC' AND interval='1d' ORDER BY open_time"
+        ).fetchall()
+        self.assertEqual(rows, [
+            (midnight - day, midnight - 1, 101.0),
+            (midnight, midnight + day - 1, 103.0),
+        ])
+
     def test_finer_path_only_replaces_fully_covered_candle(self):
         coarse = [{"coin": "BTC", "time": 900, "open_time": 1, "close_time": 900,
                    "low": 90, "high": 110, "close": 100, "interval": "15m"}]

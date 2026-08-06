@@ -4,12 +4,27 @@ from __future__ import annotations
 import time
 import bisect
 
+from hyper import config
 from . import rest
 from hyper.copy.copy_data import normalize_copyable_fills
 from hyper.util import f, now_iso
 
-INTERVAL_MS = {"1m": 60_000, "3m": 3 * 60_000, "5m": 5 * 60_000, "15m": 15 * 60_000}
-RETENTION_DAYS = {"1m": 4, "3m": 12, "5m": 19, "15m": 39}
+INTERVAL_MS = {
+    "1m": 60_000,
+    "3m": 3 * 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "1d": 86_400_000,
+}
+RETENTION_DAYS = {
+    "1m": 4,
+    "3m": 12,
+    "5m": 19,
+    "15m": 39,
+    # The volatility model needs 30 closed days plus a small boundary buffer.
+    # Raw daily candles remain shared across scanner generations but bounded.
+    "1d": int(config.VOL_SLOW_DAYS) + 5,
+}
 REFINEMENT_INTERVALS = ("5m", "3m", "1m")
 BASE_INTERVAL = "15m"
 
@@ -91,21 +106,21 @@ def _upsert(db, coin: str, interval: str, rows, fetched_at: int) -> int:
     return len(values)
 
 
-def ensure(
+def ensure_coins(
     db,
-    fills,
+    coins,
     start_ms: int,
     end_ms: int,
     *,
     interval: str = BASE_INTERVAL,
     force_retry: bool = False,
 ) -> dict:
-    """Incrementally ensure a shared path for the markets present in fills."""
+    """Incrementally ensure a bounded shared candle range for explicit coins."""
     step = INTERVAL_MS[interval]
     now_ms = int(time.time() * 1000)
     end_ms = min(int(end_ms), now_ms)
     start_ms = max(int(start_ms), now_ms - RETENTION_DAYS[interval] * 86_400_000)
-    coins = coins_for_fills(fills)
+    coins = sorted({str(coin) for coin in coins if coin})
     fetched, failed, deferred = 0, [], 0
     for coin in coins:
         state = db.execute(
@@ -126,9 +141,19 @@ def ensure(
         ).fetchone()
         latest_close = int((row[0] if row else 0) or 0)
         latest_fetch = int((row[1] if row else 0) or 0)
+        if interval == "1d":
+            # Only closed UTC days feed volatility.  Do not let a recently
+            # fetched forming candle suppress the first refresh after midnight.
+            required_close = (end_ms // step) * step - 1
+            if latest_close >= required_close:
+                continue
         # A scanner finalization and its generation-bound tuner commonly run back-to-back. Reuse the
         # just-fetched forming candle instead of issuing one request per market twice.
-        if latest_close >= end_ms - 2 * step and latest_fetch >= now_ms - step // 2:
+        if (
+            interval != "1d"
+            and latest_close >= end_ms - 2 * step
+            and latest_fetch >= now_ms - step // 2
+        ):
             continue
         cursor = max(start_ms, latest_close + 1)
         # Refresh the forming candle and bridge a possible boundary gap.
@@ -154,6 +179,17 @@ def ensure(
             )
             db.commit()
             continue
+        if interval == "1d":
+            # Hyperliquid may include today's still-forming daily candle.  It
+            # is mutable and therefore cannot be shared as immutable evidence
+            # by the next scanner generation.
+            candles = [
+                row for row in candles
+                if int(
+                    row.get("T")
+                    or (int(row.get("t") or 0) + step - 1)
+                ) <= end_ms
+            ]
         fetched += _upsert(db, coin, interval, candles, now_ms)
         db.execute(
             "INSERT INTO coin_price_path_state "
@@ -167,6 +203,22 @@ def ensure(
     db.commit()
     return {"coins": len(coins), "fetched": fetched, "failed": failed,
             "deferred": deferred, "deleted": deleted}
+
+
+def ensure(
+    db,
+    fills,
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval: str = BASE_INTERVAL,
+    force_retry: bool = False,
+) -> dict:
+    """Incrementally ensure a shared path for the markets present in fills."""
+    return ensure_coins(
+        db, coins_for_fills(fills), start_ms, end_ms,
+        interval=interval, force_retry=force_retry,
+    )
 
 
 def load(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL) -> list[dict]:

@@ -265,7 +265,7 @@ class Resolver:
         # Never source qualification from Observer's mutable ``coin_vol`` cache.  This explicit as-of fetch
         # is de-duplicated by the generation resolver and therefore gives every wallet/replay one identical
         # closed-candle sample without preloading hundreds of markets.
-        sample = volatility.compute_at(coin, self.asof_ms)
+        sample = volatility.compute_at(coin, self.asof_ms, db=self.db)
         if sample["status"] == "request_failed":
             raise MarketSnapshotError(f"sigma_request_failed:{coin}")
         if sample["status"] == "insufficient_history":
