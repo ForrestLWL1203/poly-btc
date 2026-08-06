@@ -122,6 +122,20 @@ class VolatilitySizingLabTests(unittest.TestCase):
         self.assertEqual(recommendation["status"], "keep_current")
         self.assertIn("no_economic_or_risk_improvement", candidate["rejectionReasons"])
 
+    def test_window_summary_uses_conservative_qualification_pnl(self):
+        summary = lab._window_summary({
+            30: {
+                "window_start_equity": 100.0,
+                "copy_net_pnl": 80.0,
+                "closed_net_pnl": 50.0,
+                "unrealized_pnl": 30.0,
+            },
+        })["30"]
+
+        self.assertEqual(summary["netPnl"], 50.0)
+        self.assertEqual(summary["markedNetPnl"], 80.0)
+        self.assertEqual(summary["roi"], .5)
+
 
 if __name__ == "__main__":
     unittest.main()

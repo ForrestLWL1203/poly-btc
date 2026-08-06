@@ -14,6 +14,7 @@ from hyper import config, params
 from hyper.copy.copy_backtest import prepare_price_path, prepare_replay_fills
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_engine import volatility_target_margin_pct
+from hyper.copy.economics import replay_result_profitability
 from hyper.market import price_path
 from hyper.ops import resource_guard
 from hyper.selection import auto_tune, state as selection
@@ -173,9 +174,15 @@ def _window_summary(windows: dict) -> dict:
     out = {}
     for days, result in sorted(windows.items(), reverse=True):
         start = max(1.0, f(result.get("window_start_equity")))
-        pnl = f(result.get("copy_net_pnl"))
+        economics = replay_result_profitability(result, start_equity=start)
+        pnl = f(economics.get("qualificationPnl"))
         out[str(days)] = {
             "netPnl": pnl,
+            "markedNetPnl": f(result.get("copy_net_pnl")),
+            "closedNetPnl": f(economics.get("closedPnl")),
+            "openProfitReference": f(economics.get("openProfitReference")),
+            "openLoss": f(economics.get("openLoss")),
+            "profitabilityBasis": economics.get("basis"),
             "roi": pnl / start,
             "startEquity": start,
             "endEquity": f(result.get("window_end_equity")),
