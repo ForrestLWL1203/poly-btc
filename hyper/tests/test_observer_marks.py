@@ -516,6 +516,63 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "reconcile_required",
         )
 
+    def test_explicit_exchange_liquidation_settles_live_ledger_once(self):
+        db = self._db()
+        session_id = self._activate_live(db)
+        fill_time = now_ms()
+        db.execute(
+            "INSERT INTO live_copy_position "
+            "(addr,coin,side,status,master_open_ms,master_open_px,master_peak_sz,leverage,margin,"
+            "notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,num_actions,opened_at,"
+            "strategy_revision_id) VALUES "
+            "('0xsource','CASHCAT','short','open',1,.15,2707,6,67.68,406.05,.15,2707,2707,"
+            "2707,.14164,0,0,?,'revision-one')",
+            (now_iso(),),
+        )
+        db.execute(
+            "INSERT INTO execution_fill "
+            "(network,tid,session_id,oid,coin,side,size,px,fee,closed_pnl,fill_time_ms,raw_json,created_at) "
+            "VALUES ('mainnet','cashcat-liq',?,9001,'CASHCAT','B',2707,.14164,.17,-87,?,?,?)",
+            (
+                session_id, fill_time,
+                json.dumps({"dir": "Liquidated Isolated Short"}), now_iso(),
+            ),
+        )
+        db.commit()
+        async def settle():
+            obs = Observer(db, [], {})
+            obs.live_executor = Mock(
+                equity=112.83, available=112.83, session={"sizing_anchor": 200.0},
+            )
+            obs._load_account(obs.taker)
+            obs._reload_open(obs.taker)
+            first = obs._settle_forced_liquidations()
+            second = obs._settle_forced_liquidations()
+            return obs, first, second
+
+        obs, first, second = asyncio.run(settle())
+
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)
+        self.assertNotIn(("0xsource", "CASHCAT"), obs.open_ep)
+        position = db.execute(
+            "SELECT status,rem_size,realized_pnl,was_liq,num_actions "
+            "FROM live_copy_position WHERE coin='CASHCAT'"
+        ).fetchone()
+        self.assertEqual(position["status"], "liquidated")
+        self.assertAlmostEqual(position["rem_size"], 0.0)
+        self.assertAlmostEqual(position["realized_pnl"], -87.17)
+        self.assertEqual(position["was_liq"], 1)
+        self.assertEqual(position["num_actions"], 1)
+        action = db.execute(
+            "SELECT action,our_qty_delta,our_px,realized_pnl FROM live_copy_action "
+            "WHERE coin='CASHCAT'"
+        ).fetchone()
+        self.assertEqual(action["action"], "close")
+        self.assertAlmostEqual(action["our_qty_delta"], 2707)
+        self.assertAlmostEqual(action["our_px"], 0.14164)
+        self.assertAlmostEqual(action["realized_pnl"], -87.17)
+
     def test_running_live_observer_fails_closed_on_mode_change(self):
         db = self._db()
         self._activate_live(db)

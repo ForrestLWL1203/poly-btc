@@ -171,6 +171,21 @@ class LiveExecutorTests(unittest.TestCase):
         values.update(changes)
         return executor.execute(**values)
 
+    def _insert_filled_intent(self, *, coin="BTC", side="sell", size=0.2, cloid=None, oid=77):
+        cloid = cloid or ("0x" + "7" * 32)
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_order_intent "
+            "(cloid,session_id,strategy_revision,source_address,source_fill_id,source_order_id,"
+            "source_time_ms,action_seq,action,coin,side,reduce_only,leverage,requested_size,"
+            "requested_limit_px,state,oid,filled_size,average_px,created_at,updated_at) "
+            "VALUES (?,'live-test','revision-one','0xsource','prior-fill','6',123456000,1,"
+            "'open',?,?,0,10,?,100,'filled',?,?,100,?,?)",
+            (cloid, coin, side, size, oid, size, stamp, stamp),
+        )
+        self.db.commit()
+        return cloid
+
     def test_full_fill_is_durable_and_same_logical_action_does_not_resubmit(self):
         broker = FakeLiveBroker()
         executor = LiveExecutor(self.db, self.session.copy(), broker)
@@ -380,6 +395,67 @@ class LiveExecutorTests(unittest.TestCase):
             self.db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()[0],
             "reconcile_required",
         )
+
+    def test_explicit_unlinked_liquidation_reconciles_managed_position_to_flat(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.2)
+        broker.fills.append({
+            "tid": "self-liq-1", "oid": 9001, "coin": "BTC", "side": "B",
+            "sz": "0.2", "px": "90", "fee": "0.01", "closedPnl": "-2",
+            "dir": "Liquidated Isolated Short", "time": now_ms(),
+        })
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = executor.reconcile()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["unknownPositions"], 0)
+        self.assertEqual(executor.unmatched_ws_fill_count(), 0)
+        self.assertAlmostEqual(result["positions"] and 1.0 or 0.0, 0.0)
+
+    def test_unlinked_manual_fill_remains_unknown(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.2)
+        broker.fills.append({
+            "tid": "manual-1", "oid": 9002, "coin": "BTC", "side": "B",
+            "sz": "0.2", "px": "90", "fee": "0.01", "closedPnl": "-2",
+            "dir": "Close Short", "time": now_ms(),
+        })
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = executor.reconcile()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(executor.unmatched_ws_fill_count(), 1)
+
+    def test_reduce_only_uses_coin_exchange_position_during_unrelated_drift(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.2)
+        broker.positions.update({"BTC": -0.2, "ETH": 1.0})
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(
+            executor, is_buy=True, size=0.2, reduce_only=True, action="close",
+            source_fill_id="close-btc", source_order_id="8", action_seq=2,
+        )
+
+        self.assertAlmostEqual(result.filled_size, 0.2)
+        self.assertEqual(broker.submit_calls, 1)
+        self.assertNotIn("BTC", broker.positions)
+        self.assertEqual(
+            self.db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()[0],
+            "reconcile_required",
+        )
+
+    def test_increase_stays_blocked_during_unrelated_drift(self):
+        broker = FakeLiveBroker()
+        broker.positions["ETH"] = 1.0
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        with self.assertRaisesRegex(RuntimeError, "live_reconcile_required"):
+            self.execute(executor)
+
+        self.assertEqual(broker.submit_calls, 0)
 
     def test_reconcile_does_not_add_unrealized_pnl_to_unified_total_equity(self):
         broker = FakeLiveBroker()

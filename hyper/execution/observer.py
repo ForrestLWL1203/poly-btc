@@ -549,6 +549,130 @@ class Observer:
             )
         self.db.commit()
 
+    def _settle_forced_liquidations(self) -> int:
+        """Apply explicit self-account liquidation fills to the strategy ledger.
+
+        Hyperliquid liquidations are account-level facts without our strategy
+        CLOID, so attribution is necessarily deterministic rather than sourced
+        from a target wallet. Only the position-side/size discrepancy proven by
+        the latest exchange projection is settled; unrelated manual fills stay
+        unmatched and frozen.
+        """
+        if self.execution_mode != "live" or self.live_executor is None:
+            return 0
+        exchange_sizes = {
+            str(coin): float(size or 0.0)
+            for coin, size in self.db.execute(
+                "SELECT coin,COALESCE(SUM(signed_size),0) FROM execution_position_projection "
+                "WHERE session_id=? GROUP BY coin",
+                (self.execution_session_id,),
+            ).fetchall()
+        }
+        rows = self.db.execute(
+            "SELECT f.tid,f.coin,f.side,f.size,f.px,f.fee,f.closed_pnl,f.fill_time_ms,f.raw_json "
+            "FROM execution_fill f WHERE f.session_id=? AND NOT EXISTS ("
+            "SELECT 1 FROM execution_order_intent i WHERE i.session_id=f.session_id AND ("
+            "(f.cloid IS NOT NULL AND lower(i.cloid)=lower(f.cloid)) OR "
+            "(f.oid IS NOT NULL AND i.oid=f.oid))) ORDER BY f.fill_time_ms,f.tid",
+            (self.execution_session_id,),
+        ).fetchall()
+        settled = 0
+        for tid, coin, side, fill_size, px, fee, closed_pnl, fill_time_ms, raw_json in rows:
+            if not LiveExecutor._is_forced_liquidation(raw_json):
+                continue
+            side = str(side or "").upper()
+            fill_sign = 1.0 if side == "B" else -1.0 if side == "A" else 0.0
+            if not fill_sign:
+                continue
+            candidates = [
+                (addr, ep) for (addr, ep_coin), ep in self.taker.open_ep.items()
+                if ep_coin == str(coin)
+                and ((fill_sign > 0 and ep.get("side") == "short")
+                     or (fill_sign < 0 and ep.get("side") == "long"))
+                and int(fill_time_ms or 0) >= int(ep.get("master_open_ms") or 0)
+                and float(ep.get("rem_size") or 0.0) > config.FLAT
+            ]
+            if not candidates:
+                continue
+            ledger_signed = sum(
+                float(ep.get("rem_size") or 0.0) * float(ep.get("sign") or 0.0)
+                for (addr, ep_coin), ep in self.taker.open_ep.items()
+                if ep_coin == str(coin)
+            )
+            correction = exchange_sizes.get(str(coin), 0.0) - ledger_signed
+            if correction * fill_sign <= 1e-8:
+                continue
+            candidate_total = sum(float(ep.get("rem_size") or 0.0) for _addr, ep in candidates)
+            apply_total = min(abs(correction), abs(float(fill_size or 0.0)), candidate_total)
+            if apply_total <= config.FLAT:
+                continue
+            net_pnl = (float(closed_pnl or 0.0) - abs(float(fee or 0.0))) * (
+                apply_total / max(abs(float(fill_size or 0.0)), 1e-12)
+            )
+            remaining = apply_total
+            pnl_remaining = net_pnl
+            for index, (addr, ep) in enumerate(candidates):
+                if remaining <= config.FLAT:
+                    break
+                old_rem = float(ep.get("rem_size") or 0.0)
+                if index + 1 == len(candidates):
+                    close_size = min(old_rem, remaining)
+                    allocated_pnl = pnl_remaining
+                else:
+                    close_size = min(old_rem, apply_total * old_rem / max(candidate_total, 1e-12))
+                    allocated_pnl = net_pnl * close_size / max(apply_total, 1e-12)
+                if close_size <= config.FLAT:
+                    continue
+                remaining -= close_size
+                pnl_remaining -= allocated_pnl
+                ep["rem_size"] = max(0.0, old_rem - close_size)
+                ep["realized_pnl"] = float(ep.get("realized_pnl") or 0.0) + allocated_pnl
+                closing = ep["rem_size"] <= config.FLAT
+                if not closing:
+                    basis = rebase_isolated_position(
+                        ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+                        ep.get("maintenance_leverage"),
+                    )
+                    ep.update(
+                        size=basis["size"], margin=basis["margin"],
+                        notional=basis["notional"], liq_px=basis["liq_px"],
+                    )
+                self._record_action(
+                    ep, addr, str(coin), int(fill_time_ms or now_ms()),
+                    "close" if closing else "reduce", None, float(px or 0.0), 0.0,
+                    float(ep.get("master_current") or 0.0),
+                    -close_size * float(ep.get("sign") or 0.0), float(px or 0.0),
+                    allocated_pnl, 0.0, book=self.taker,
+                )
+                self.db.execute(
+                    "UPDATE live_copy_position SET size=?,rem_size=?,margin=?,notional=?,liq_px=?,"
+                    "realized_pnl=?,was_liq=1,status=?,closed_at=?,mark_px=?,unrealized_pnl=? "
+                    "WHERE pos_id=? AND status='open'",
+                    (
+                        ep.get("size"), ep["rem_size"], ep.get("margin"), ep.get("notional"),
+                        ep.get("liq_px"), ep["realized_pnl"], "liquidated" if closing else "open",
+                        now_iso() if closing else None, float(px or 0.0), 0.0 if closing else None,
+                        ep["pos_id"],
+                    ),
+                )
+                ep["was_liq"] = 1
+                if closing:
+                    if self.taker.stats_loaded:
+                        self.taker.closed_n += 1
+                        self.taker.wins_n += 1 if ep["realized_pnl"] > 0 else 0
+                    self.taker.open_ep.pop((addr, str(coin)), None)
+                    self._resolve_draining_intent(addr)
+                settled += 1
+                _log(
+                    f"[live] EXCHANGE-LIQUIDATION {addr[:10]} {coin} {ep['side']} "
+                    f"qty={close_size:g} tid={str(tid)[:16]} pnl=${allocated_pnl:+,.2f}"
+                )
+            self.db.commit()
+        if settled:
+            self._sync_live_account()
+            self._finish_live_session_if_drained()
+        return settled
+
     def _verify_live_ledger_projection(self) -> bool:
         """Require the managed Live ledger to net to the exchange projection.
 
@@ -657,6 +781,7 @@ class Observer:
                 self.live_reconcile_error_at = now_iso()
                 raise
             self._sync_live_account()
+            self._settle_forced_liquidations()
             if not self._verify_live_ledger_projection():
                 raise RuntimeError("live_ledger_projection_drift")
             self.live_reconcile_error = None
@@ -672,6 +797,7 @@ class Observer:
             raise
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
+        self._settle_forced_liquidations()
         if result.get("ok") and not self._verify_live_ledger_projection():
             raise RuntimeError("live_ledger_projection_drift")
         if not result.get("ok"):
@@ -1396,8 +1522,10 @@ class Observer:
                 mid = ((ba[0] + ba[1]) / 2) if ba else ep["entry_px"]
                 await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
                                          closing=True, liq=False, gap=True, forced_px=mid, book=book)
-                _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
-                     f"pnl=${ep['realized_pnl']:+,.1f}  bal=${book.balance:,.0f} (master no longer holds it)")
+                if (addr, coin) not in book.open_ep:
+                    _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
+                         f"pnl=${ep['realized_pnl']:+,.1f}  bal=${book.balance:,.0f} "
+                         "(master no longer holds it)")
             self.db.commit()
 
     async def reconcile_loop(self):
@@ -2064,6 +2192,7 @@ class Observer:
             return None
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
+        self._settle_forced_liquidations()
         if result.get("ok") and not self._verify_live_ledger_projection():
             result = dict(result)
             result.update(ok=False, status="reconcile_required", ledgerProjectionDrift=True)
@@ -2081,6 +2210,7 @@ class Observer:
                 if monitor is not None and monitor.is_healthy():
                     await asyncio.to_thread(self.live_executor.heartbeat_lease)
                     self._sync_live_account()
+                    self._settle_forced_liquidations()
                     last_audit = float(monitor.last_rest_audit_at or 0.0)
                     if time.time() - last_audit >= float(config.ACCOUNT_REST_AUDIT_INTERVAL_S):
                         result = await self._reconcile_live_once(usage_category="account_audit")
@@ -2973,6 +3103,7 @@ class Observer:
         self._reload_open(self.taker)
         ledger_projection_ok = True
         if self.execution_mode == "live":
+            self._settle_forced_liquidations()
             ledger_projection_ok = self._verify_live_ledger_projection()
         self._resolve_all_draining_intents()
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)

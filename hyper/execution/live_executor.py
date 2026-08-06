@@ -120,17 +120,48 @@ class LiveExecutor:
             self._freeze_reconcile(str(error_code))
             self.db.commit()
 
+    @staticmethod
+    def _is_forced_liquidation(raw_json: str | None) -> bool:
+        """Accept only an explicit self-account liquidation marker from Hyperliquid.
+
+        Liquidation fills are exchange-authored reductions and normally have no
+        strategy CLOID.  They must not be treated like arbitrary manual fills,
+        which continue to freeze reconciliation.
+        """
+        try:
+            payload = json.loads(str(raw_json or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return str(payload.get("dir") or "").strip().lower().startswith("liquidated ")
+
+    def _unmatched_fill_rows(self) -> list[tuple]:
+        return self.db.execute(
+            "SELECT f.coin,f.side,f.size,f.raw_json FROM execution_fill f WHERE f.session_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM execution_order_intent i "
+            "WHERE i.session_id=f.session_id AND ("
+            "(f.cloid IS NOT NULL AND lower(i.cloid)=lower(f.cloid)) "
+            "OR (f.oid IS NOT NULL AND i.oid=f.oid)))",
+            (self.session["session_id"],),
+        ).fetchall()
+
     def unmatched_ws_fill_count(self) -> int:
         with self._lock:
-            row = self.db.execute(
-                "SELECT COUNT(*) FROM execution_fill f WHERE f.session_id=? "
-                "AND NOT EXISTS (SELECT 1 FROM execution_order_intent i "
-                "WHERE i.session_id=f.session_id AND ("
-                "(f.cloid IS NOT NULL AND lower(i.cloid)=lower(f.cloid)) "
-                "OR (f.oid IS NOT NULL AND i.oid=f.oid)))",
-                (self.session["session_id"],),
-            ).fetchone()
-            return int(row[0] or 0) if row else 0
+            return sum(
+                1 for _coin, _side, _size, raw_json in self._unmatched_fill_rows()
+                if not self._is_forced_liquidation(raw_json)
+            )
+
+    def _forced_liquidation_deltas(self) -> dict[str, float]:
+        deltas: dict[str, float] = {}
+        for coin, side, size, raw_json in self._unmatched_fill_rows():
+            if not self._is_forced_liquidation(raw_json):
+                continue
+            normalized_side = str(side or "").upper()
+            if normalized_side not in {"A", "B"}:
+                continue
+            signed = abs(_float(size)) if normalized_side == "B" else -abs(_float(size))
+            deltas[str(coin)] = deltas.get(str(coin), 0.0) + signed
+        return deltas
 
     def pending_confirmation_count(self) -> int:
         with self._lock:
@@ -952,6 +983,12 @@ class LiveExecutor:
                         (session_id,),
                     ).fetchall()
                 }
+                # A self-account liquidation has no strategy CLOID, but it is an
+                # authoritative exchange reduction. Include only fills carrying
+                # Hyperliquid's explicit ``Liquidated ...`` direction marker;
+                # arbitrary/manual fills remain unknown and fail closed.
+                for coin, delta in self._forced_liquidation_deltas().items():
+                    expected_sizes[coin] = expected_sizes.get(coin, 0.0) + delta
                 actual_sizes = {str(item["coin"]): _float(item["signed_size"]) for item in positions}
                 managed = set(expected_sizes)
                 known_cloids = {
@@ -1049,6 +1086,25 @@ class LiveExecutor:
         if row[3] != self.session["strategy_revision"]:
             raise RuntimeError("live_strategy_revision_changed")
         return row[0]
+
+    @staticmethod
+    def _safe_reduce_size(reconcile: dict, *, coin: str, is_buy: bool, requested: float) -> float:
+        """Clamp a reduction to fresh exchange truth during account-wide drift.
+
+        This exception never permits an exposure increase: buys require an
+        official short, sells require an official long, and the order remains
+        reduce-only at the venue.
+        """
+        signed_size = sum(
+            _float(position.get("signed_size"))
+            for position in reconcile.get("positions", [])
+            if str(position.get("coin") or "") == str(coin)
+        )
+        if is_buy:
+            reducible = -signed_size if signed_size < -1e-8 else 0.0
+        else:
+            reducible = signed_size if signed_size > 1e-8 else 0.0
+        return min(max(0.0, _float(requested)), max(0.0, reducible))
 
     def _increase_margin_cap(self, coin: str, planned_margin: float) -> float:
         state = self._refresh_session_state()
@@ -1487,11 +1543,24 @@ class LiveExecutor:
             if ws_primary:
                 if self.unmatched_ws_fill_count():
                     self.freeze_from_monitor("UNMATCHED_ACCOUNT_FILL")
-                    raise RuntimeError("live_reconcile_required")
+                    if not reduce_only:
+                        raise RuntimeError("live_reconcile_required")
+                    reconcile = self.reconcile(usage_category="order_recovery")
+                    size = self._safe_reduce_size(
+                        reconcile, coin=coin, is_buy=is_buy, requested=size,
+                    )
+                    if size <= 1e-12:
+                        raise RuntimeError("live_reduce_not_proven_by_exchange")
             else:
                 reconcile = self.reconcile(usage_category="account_fallback")
                 if not reconcile.get("ok"):
-                    raise RuntimeError("live_reconcile_required")
+                    if not reduce_only:
+                        raise RuntimeError("live_reconcile_required")
+                    size = self._safe_reduce_size(
+                        reconcile, coin=coin, is_buy=is_buy, requested=size,
+                    )
+                    if size <= 1e-12:
+                        raise RuntimeError("live_reduce_not_proven_by_exchange")
             mark = self._mid(coin)
             recovery_cloids = {
                 attempt_index: self._logical_cloid(
