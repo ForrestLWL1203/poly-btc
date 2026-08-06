@@ -379,6 +379,7 @@ Run from repository root with `.venv/bin/python` when available:
 .venv/bin/python -m hyper.cli.discover --db data/hl.db optimize
 .venv/bin/python -m hyper.cli.discover --db data/hl.db calibrate-current-core
 .venv/bin/python -m hyper.cli.reform_current_core --db data/hl.db
+.venv/bin/python -m hyper.cli.optimize_current_core --db data/hl.db
 .venv/bin/python -m hyper.cli.discover --db data/hl.db finalize-profiled --generation GENERATION_ID
 .venv/bin/python -m hyper.cli.discover --db data/hl.db storage-maintenance --dry-run
 .venv/bin/python -m hyper.cli.discover --db data/hl.db storage-maintenance
@@ -401,6 +402,9 @@ Important command semantics:
   `--apply` only when the user authorized publication.
 - `reform_current_core` re-ranks frozen current-generation evidence, publishes membership on the unchanged
   active parameter surface, and then certifies/stores the resulting shared strict replay for Dashboard display.
+- `optimize_current_core` is an explicit migration/repair path for membership published on a fixed surface.
+  It freezes the exact current Core, full-tunes that set once, runs the standard bounded final margin
+  calibration, and refreshes the shared Dashboard replay. Use `--apply` only with operator authorization.
 - `finalize-profiled` resumes an already profiled unpublished generation without redoing network collection.
 - `reset-paper --yes` is the supported Paper reset and requires Scanner/Observer stopped. It must not touch Live
   ledgers or credentials. `--factory-params` additionally resets operator parameters.
