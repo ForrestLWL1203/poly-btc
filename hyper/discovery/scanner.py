@@ -2772,6 +2772,19 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     }
 
 
+def _rescore_cached_effective_replay(effective, follow_surface):
+    """Refresh model-derived Strict score while preserving cached path economics."""
+    effective = dict(effective or {})
+    score, detail = follow_score.compute_follow_score(
+        effective.get("metrics") or {},
+        policy_values=follow_surface,
+        stage="strict",
+    )
+    effective["score"] = score
+    effective["scoreDetail"] = detail
+    return effective
+
+
 def _init_strict_replay_process(context: dict) -> None:
     global _STRICT_REPLAY_PROCESS_CONTEXT
     db_path = str(context["db_path"])
@@ -4684,6 +4697,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         },
                     },
                 )
+            effective = _rescore_cached_effective_replay(
+                effective, follow_surface,
+            )
             qualification = dict(effective.get("qualification") or {})
             formation = _formation_entry_eligibility(
                 effective.get("metrics") or {}, effective.get("score"),
