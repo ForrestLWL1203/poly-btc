@@ -155,6 +155,7 @@ class ApiScannerStatusTests(unittest.TestCase):
             set(res["funnel"]),
             {
                 "leaderboard", "candidates", "perpPrefilter", "structurePassed",
+                "profileValid", "selectionPool", "funnelConsistent", "funnelPublishedAt",
                 "roughCompleted", "persistentActivity", "pfLotteryPassed",
                 "primary", "reserve", "top32", "strict", "challenger",
                 "core", "finalCore", "watchlist",
@@ -174,11 +175,12 @@ class ApiScannerStatusTests(unittest.TestCase):
             params.seed_params(db)
             db.execute(
                 "INSERT INTO scan_generation "
-                "(generation,source,status,complete,publishable,is_current,started_at,published_at,metrics_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "(generation,source,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_rows,profile_valid,metrics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    "g-published", "challenger_daily", "published", 1, 1, 1,
+                    "g-published", "scan", "published", 1, 1, 1,
                     "2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z",
+                    41111, 8,
                     json.dumps({
                         "coarseRecallPassed": 2061,
                         "perpPrefilterPassed": 2061,
@@ -196,9 +198,71 @@ class ApiScannerStatusTests(unittest.TestCase):
             res = api_discovery.ep_discovery(db)
 
         self.assertEqual(res["funnel"]["perpPrefilter"], 2061)
+        self.assertEqual(res["funnel"]["profileValid"], 8)
+        self.assertEqual(res["funnel"]["selectionPool"], 1)
         self.assertEqual(res["funnel"]["pfLotteryPassed"], 8)
         self.assertEqual(res["funnel"]["strict"], 7)
         self.assertEqual(res["funnel"]["finalCore"], 1)
+        self.assertTrue(res["funnel"]["funnelConsistent"])
+
+    def test_discovery_funnel_uses_one_full_generation_not_daily_refresh_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,source,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_rows,profile_valid,metrics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "g-full", "scan", "published", 1, 1, 0,
+                    "2026-08-03T00:00:00Z", "2026-08-03T04:00:00Z", 41111, 158,
+                    json.dumps({
+                        "coarseRecallPassed": 2061,
+                        "perpPrefilterPassed": 2061,
+                        "preStrictPassed": 32,
+                        "strictQualified": 16,
+                        "selectionCore": 10,
+                        "selectionChallenger": 6,
+                    }),
+                ),
+            )
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,source,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_rows,profile_valid,metrics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "g-daily", "challenger_daily", "published", 1, 1, 1,
+                    "2026-08-05T00:00:00Z", "2026-08-05T01:00:00Z", 0, 8,
+                    json.dumps({
+                        "preStrictPassed": 8,
+                        "strictQualified": 7,
+                        "selectionCore": 10,
+                    }),
+                ),
+            )
+            db.executemany(
+                "INSERT INTO follow_selection (generation,addr,role,selected_at) VALUES (?,?,?,?)",
+                [
+                    ("g-full", f"0xfull{index:02d}", "core" if index < 10 else "challenger", "full")
+                    for index in range(16)
+                ] + [
+                    ("g-daily", f"0xdaily{index:02d}", "core", "daily")
+                    for index in range(10)
+                ],
+            )
+            db.commit()
+
+            res = api_discovery.ep_discovery(db)
+
+        funnel = res["funnel"]
+        self.assertEqual(
+            [funnel["leaderboard"], funnel["perpPrefilter"], funnel["profileValid"],
+             funnel["selectionPool"], funnel["finalCore"]],
+            [41111, 2061, 158, 16, 10],
+        )
+        self.assertEqual(funnel["core"], 10)
+        self.assertTrue(funnel["funnelConsistent"])
 
     def test_scan_runs_exposes_profiled_count_not_legacy_probed_new_name(self):
         with tempfile.TemporaryDirectory() as td:

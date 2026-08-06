@@ -29,8 +29,8 @@ const NAV = [
   ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览", positions: "持仓中", history: "历史持仓", wallets: "跟踪钱包", discovery: "采集 Discovery", settings: "策略参数 Settings" };
-const ACCENT_TITLE_PAGES = new Set(["overview", "positions", "history", "wallets"]);
+const TITLES = { overview: "总览", positions: "持仓中", history: "历史持仓", wallets: "跟踪钱包", discovery: "采集", settings: "策略参数" };
+const ACCENT_TITLE_PAGES = new Set(["overview", "positions", "history", "wallets", "discovery", "settings"]);
 const fStorage = bytes => {
   const value = Number(bytes || 0);
   if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(2) + " GB";
@@ -237,7 +237,8 @@ function Dashboard({ onLogout }) {
         {page === "positions" && <Positions confirm={setConfirmCfg} streamOpen={livePositions} />}
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} onDataChanged={refreshModeData} />}
-        {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
+        {page === "discovery" && <Discovery scanning={scanning} scanStatus={scanStatus}
+          startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab}
           observerState={obs} onModeDataChanged={refreshModeData} />}
       </main>

@@ -44,4 +44,8 @@ export const IC = {
   bolt: "M13 2 3 14h7l-1 8 10-12h-7z",
   close: "M18 6 6 18M6 6l12 12",
   plus: "M12 5v14M5 12h14",
+  arrowRight: "M5 12h14M13 6l6 6-6 6",
+  checkCircle: "M22 11.1V12a10 10 0 1 1-5.9-9.1M22 4L12 14.01l-3-3",
+  xCircle: "M15 9l-6 6M9 9l6 6M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0",
+  progress: "M12 2a10 10 0 1 0 10 10",
 };

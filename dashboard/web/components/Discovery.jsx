@@ -1,7 +1,7 @@
 import { api } from "../lib/api.js";
 import { useApiResource } from "../lib/refresh.js";
 import { DiscoveryFunnel } from "./discovery/DiscoveryFunnel.jsx";
-import { ScanControls, ScanStatusCard } from "./discovery/ScanStatusCard.jsx";
+import { ScanStatusCard } from "./discovery/ScanStatusCard.jsx";
 import { ScanHistoryTable } from "./discovery/ScanHistoryTable.jsx";
 
 export { ScanMask } from "./discovery/ScanMask.jsx";
@@ -9,7 +9,7 @@ export { scanStageLabel } from "./discovery/ScanMask.jsx";
 
 const { useEffect, useCallback, useRef } = React;
 
-export function Discovery({ scanning, startRescan, confirm }) {
+export function Discovery({ scanning, scanStatus, startRescan, confirm }) {
   const load = useCallback(async () => {
     const [discovery, scanRuns] = await Promise.all([
       api.get("/api/discovery"),
@@ -36,9 +36,9 @@ export function Discovery({ scanning, startRescan, confirm }) {
   if (!d) return <div className="content"><div className="loading">加载中…</div></div>;
   const busy = ((d.scanner || {}).mode === "scanning") || scanning;
   return (
-    <div className="content">
-      <ScanControls busy={busy} doRescan={doRescan} />
-      <ScanStatusCard discovery={d} scanning={scanning} />
+    <div className="content discovery-page">
+      <ScanStatusCard discovery={d} scanning={scanning} scanStatus={scanStatus}
+        busy={busy} doRescan={doRescan} />
       <DiscoveryFunnel funnel={d.funnel} />
 
       <ScanHistoryTable runs={runs} />

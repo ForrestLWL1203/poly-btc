@@ -20,9 +20,15 @@ def scanner_status(db):
     try:
         progress = q1(
             db,
-            "SELECT state,stage,candidates_scanned,candidates_total,updated_at "
+            "SELECT state,started_at,stage,candidates_scanned,candidates_total,updated_at "
             "FROM scan_progress WHERE id=1",
         )
+        if progress is None:  # compact legacy test/status databases omit started_at
+            progress = q1(
+                db,
+                "SELECT state,stage,candidates_scanned,candidates_total,updated_at "
+                "FROM scan_progress WHERE id=1",
+            )
     except Exception:  # noqa: BLE001 - compatibility with compact/old status databases
         progress = None
     progress_active = bool(progress and progress["state"] == "scanning")
@@ -55,6 +61,8 @@ def scanner_status(db):
             "scanned": progress["candidates_scanned"],
             "total": progress["candidates_total"],
         })
+        if "started_at" in progress.keys():
+            detail["startedAt"] = progress["started_at"]
     hb = iso_epoch(heartbeat_at)
     mode = "scanning" if progress_active else (r["state"] or "unknown")
     stale = bool(
@@ -101,26 +109,48 @@ def ep_discovery(db):
     leaderboard = (q1(db, "SELECT COUNT(*) c FROM leaderboard") or {"c": 0})["c"]
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
     watchlist = followed_count(db)
-    generation = q1(
+    current_generation = q1(
         db,
         "SELECT generation,metrics_json FROM scan_generation "
         "WHERE status='published' AND complete=1 AND is_current=1 ORDER BY id DESC LIMIT 1",
     )
+    # Challenger refresh generations intentionally cover only a small daily workset while carrying the
+    # existing Core forward.  Mixing their 8/7-wallet qualification counts with the carried 10-wallet Core
+    # made the Dashboard's so-called funnel grow at the final step.  The funnel must describe one complete
+    # scan generation; current membership remains available separately through ``core``/``watchlist``.
+    try:
+        full_generation = q1(
+            db,
+            "SELECT generation,metrics_json,leaderboard_rows,profile_valid,published_at "
+            "FROM scan_generation WHERE source='scan' AND status='published' AND complete=1 "
+            "ORDER BY published_at DESC,id DESC LIMIT 1",
+        )
+    except Exception:  # noqa: BLE001 - compatibility with compact/old read replicas
+        full_generation = None
+    funnel_generation = full_generation or current_generation
     challenger = 0
     core = watchlist
     performance = {}
     pre_strict_counts = {}
-    if generation:
+    if current_generation:
         roles = qall(
             db,
             "SELECT role,COUNT(*) n FROM follow_selection WHERE generation=? AND enabled=1 GROUP BY role",
-            (generation["generation"],),
+            (current_generation["generation"],),
         )
         role_counts = {r["role"]: r["n"] for r in roles}
         challenger = role_counts.get("challenger", 0)
         core = role_counts.get("core", 0)
+    funnel_role_counts = {}
+    if funnel_generation:
+        funnel_roles = qall(
+            db,
+            "SELECT role,COUNT(*) n FROM follow_selection WHERE generation=? AND enabled=1 GROUP BY role",
+            (funnel_generation["generation"],),
+        )
+        funnel_role_counts = {r["role"]: r["n"] for r in funnel_roles}
         try:
-            performance = json.loads(generation["metrics_json"] or "{}")
+            performance = json.loads(funnel_generation["metrics_json"] or "{}")
         except (TypeError, ValueError):
             performance = {}
         try:
@@ -135,7 +165,7 @@ def ep_discovery(db):
                 "SUM(CASE WHEN queue_rank IS NOT NULL THEN 1 ELSE 0 END) top32_n,"
                 "SUM(CASE WHEN strict_status='qualified' THEN 1 ELSE 0 END) strict_n "
                 "FROM pre_strict_evidence WHERE generation=?",
-                (generation["generation"],),
+                (funnel_generation["generation"],),
             )
             # Successful publication deliberately removes generation-scoped
             # ``pre_strict_evidence`` workspace.  SQLite aggregate queries still
@@ -149,11 +179,48 @@ def ep_discovery(db):
                 }
         except Exception:  # noqa: BLE001 - old read replicas may not have the new evidence table yet
             pre_strict_counts = {}
+    funnel_leaderboard = leaderboard
+    profile_valid = performance.get("profileValid")
+    funnel_published_at = None
+    if full_generation:
+        if int(full_generation["leaderboard_rows"] or 0) > 0:
+            funnel_leaderboard = int(full_generation["leaderboard_rows"])
+        if full_generation["profile_valid"] is not None:
+            profile_valid = int(full_generation["profile_valid"] or 0)
+        funnel_published_at = full_generation["published_at"]
+    if profile_valid is None:
+        profile_valid = performance.get(
+            "structurePassed", pre_strict_counts.get("rough_completed")
+        )
+    funnel_core = int(funnel_role_counts.get(
+        "core", performance.get("selectionCore", core)
+    ) or 0)
+    selection_pool = (
+        funnel_role_counts.get("core", 0) + funnel_role_counts.get("challenger", 0)
+        if funnel_role_counts
+        else int(performance.get("selectionCore", funnel_core) or 0)
+             + int(performance.get("selectionChallenger", 0) or 0)
+    )
+    monotonic_counts = [
+        funnel_leaderboard,
+        performance.get("perpPrefilterPassed", candidates),
+        profile_valid,
+        selection_pool,
+        funnel_core,
+    ]
+    funnel_consistent = all(
+        left is not None and right is not None and int(left) >= int(right)
+        for left, right in zip(monotonic_counts, monotonic_counts[1:])
+    )
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     funnel = {
-        "leaderboard": leaderboard,
+        "leaderboard": funnel_leaderboard,
         "candidates": performance.get("coarseRecallPassed", candidates),
         "perpPrefilter": performance.get("perpPrefilterPassed", candidates),
+        "profileValid": profile_valid,
+        "selectionPool": selection_pool,
+        "funnelConsistent": funnel_consistent,
+        "funnelPublishedAt": funnel_published_at,
         "structurePassed": performance.get(
             "structurePassed", pre_strict_counts.get("rough_completed")
         ),
@@ -180,7 +247,7 @@ def ep_discovery(db):
         ),
         "challenger": challenger,
         "core": core,
-        "finalCore": core,
+        "finalCore": funnel_core,
         "watchlist": watchlist,
     }
     return {"funnel": funnel,
