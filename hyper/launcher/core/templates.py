@@ -5,8 +5,6 @@ parameterized). Keeping them here as templates — not shell heredocs buried in 
 deployed system auditable and lets `ops.update` diff/re-push a unit without touching the pipeline.
 """
 
-from .model import account_monitor_mode
-
 # Long-lived services plus the two mutually-exclusive scanner jobs and their timers. `observe` is the copy
 # engine — installed but NOT started at deploy (the operator starts copy-trading from the dashboard).
 UNITS = (
@@ -40,8 +38,7 @@ WantedBy=multi-user.target
 """
 
 
-def observe_unit(app_dir, py, db, monitor_mode="rest_only"):
-    monitor_mode = account_monitor_mode(monitor_mode)
+def observe_unit(app_dir, py, db):
     return f"""[Unit]
 Description=Hyperliquid copy-trade observer + paper sim
 After=network-online.target
@@ -49,7 +46,6 @@ Wants=network-online.target
 
 [Service]
 Environment=PYTHONUNBUFFERED=1
-Environment=HL_LIVE_ACCOUNT_MONITOR_MODE={monitor_mode}
 LoadCredential=hl-credential-wrap-private.pem:{app_dir}/secret/credential-wrap-private.pem
 Environment=HL_CREDENTIAL_PRIVATE_KEY_FILE=%d/hl-credential-wrap-private.pem
 WorkingDirectory={app_dir}
@@ -195,9 +191,7 @@ def render_all(cfg):
     caddyfile is omitted when no domain is set (dashboard is then reached via IP:port / SSH tunnel)."""
     out = {
         "/etc/systemd/system/hl-dashboard.service": dashboard_unit(cfg.app_dir, cfg.py, cfg.db, cfg.port),
-        "/etc/systemd/system/hl-observe.service": observe_unit(
-            cfg.app_dir, cfg.py, cfg.db, cfg.account_monitor_mode,
-        ),
+        "/etc/systemd/system/hl-observe.service": observe_unit(cfg.app_dir, cfg.py, cfg.db),
         "/etc/systemd/system/hl-execution-control.service": execution_control_unit(
             cfg.app_dir, cfg.py, cfg.db,
         ),

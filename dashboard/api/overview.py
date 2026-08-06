@@ -188,31 +188,7 @@ def ep_overview(db):
                            if mode == "live" else (q1(db, "SELECT MAX(ts) m FROM account_stats") or {"m": None})["m"]),
         }
 
-    obs = q1(db, "SELECT state,heartbeat_at,detail_json FROM process_status WHERE name='observer'")
-    try:
-        observer_detail = json.loads(obs["detail_json"] or "{}") if obs else {}
-    except (TypeError, ValueError):
-        observer_detail = {}
-    account_monitor = observer_detail.get("accountMonitor")
-    if not isinstance(account_monitor, dict):
-        account_monitor = {
-            "mode": "rest_only",
-            "state": "rest_fallback" if mode == "live" and obs else "stopped",
-            "connectedAt": None,
-            "lastMessageAt": None,
-            "lastPongAt": None,
-            "lastOrderUpdateAt": None,
-            "lastFillAt": None,
-            "lastPositionAt": None,
-            "lastRestAuditAt": None,
-            "queueDepth": 0,
-            "queueLagMs": 0,
-            "reconnectCount": 0,
-            "fallbackCount": 0,
-            "unmatchedFillCount": 0,
-            "pendingConfirmationCount": 0,
-            "lastError": None,
-        }
+    obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = scanner_status(db)
     scan_progress = q1(db, "SELECT state,stage FROM scan_progress WHERE id=1")
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
@@ -241,9 +217,6 @@ def ep_overview(db):
         "observer": obs_state,
         "observerStale": _stale(obs),
         "observerHeartbeatAt": (obs["heartbeat_at"] if obs else None),
-        "accountMonitor": account_monitor,
-        "observerRestUsage": observer_detail.get("restUsage", {}),
-        "targetPollRoundP95Ms": observer_detail.get("targetPollRoundP95Ms"),
         "scanner": ss["mode"],
         "scannerStale": ss["stale"],
         "scannerHeartbeatAt": ss["heartbeatAt"],

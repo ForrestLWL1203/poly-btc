@@ -3,8 +3,8 @@
 Two decoupled data planes, by design:
   • SIGNAL (who traded what) — a continuous REST poll over the FULL watchlist (per-wallet
     userFillsByTime, cursor + small overlap, idempotent by tid). REST has no 10-user cap, so we
-    can follow the whole watchlist; our targets are low-freq long-hold, so a few-seconds poll
-    latency is fine. This is the primary engine.
+    can follow the whole watchlist; our targets are low-freq long-hold, so a bounded tens-of-seconds
+    poll latency is acceptable. This is the primary engine.
   • PRICING (what we'd fill at) — a WS bbo subscription PER COIN plus a size-aware L2 check at
     each new exposure. bbo subs are
     per-coin, NOT subject to the 10-user cap (only the 1000-sub cap, and we touch a few dozen
@@ -17,7 +17,6 @@ Open copies reload after restart. New exposure is equity- and volatility-tier-si
 price-spaced and capped, and target reductions are mirrored by percentage with profitable-tail protection.
 """
 import asyncio
-from collections import deque
 import contextvars
 import json
 import logging
@@ -39,11 +38,9 @@ from hyper.copy.fill_transition import classify_fill_transition
 from hyper.copy.sector import parse_json_obj, policy_allows_coin
 from hyper.market import rest, volatility, ws
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
-from hyper.market.rate_usage import USAGE
 from hyper.selection import state as selection, strategy_revision, wallet_risk
 from hyper.ops import storage_guard
 from hyper.util import f, now_iso, now_ms
-from .account_monitor import LiveAccountMonitor
 from .liquidity import assess_order_book
 from .live_executor import LiveExecutor
 
@@ -207,7 +204,6 @@ class Observer:
         #                                  reset each _announce. Answers "why no trades".
         self.sub_coins: set = set()      # executable coins with WS bbo + activeAssetCtx subscriptions
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
-        self._target_poll_round_ms = deque(maxlen=120)
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
         execution = self.db.execute(
@@ -229,7 +225,6 @@ class Observer:
             self.execution_session_id = "paper"
             self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
         self.live_executor = None
-        self.account_monitor = None
         self.live_reconcile_error = None
         self.live_reconcile_error_at = None
         self.selection_generation = None
@@ -537,26 +532,20 @@ class Observer:
             return
         self.taker.balance = max(0.0, float(self.live_executor.equity))
         self.taker.available_balance = max(0.0, float(self.live_executor.available))
-        row = self.db.execute(
-            "SELECT balance,available FROM live_copy_account WHERE id=1",
-        ).fetchone()
-        if row is None or abs(float(row[0] or 0.0) - self.taker.balance) > 1e-12 \
-                or abs(float(row[1] or 0.0) - self.taker.available_balance) > 1e-12:
-            self.db.execute(
-                "UPDATE live_copy_account SET balance=?,available=?,equity_projection_version=2,"
-                "updated_at=? WHERE id=1",
-                (self.taker.balance, self.taker.available_balance, now_iso()),
-            )
+        self.db.execute(
+            "UPDATE live_copy_account SET balance=?,available=?,equity_projection_version=2,"
+            "updated_at=? WHERE id=1",
+            (self.taker.balance, self.taker.available_balance, now_iso()),
+        )
         self.db.commit()
 
     def _settle_forced_liquidations(self) -> int:
-        """Apply explicit self-account liquidation fills to the strategy ledger.
+        """Apply explicit self-account liquidation fills to the Live ledger.
 
-        Hyperliquid liquidations are account-level facts without our strategy
-        CLOID, so attribution is necessarily deterministic rather than sourced
-        from a target wallet. Only the position-side/size discrepancy proven by
-        the latest exchange projection is settled; unrelated manual fills stay
-        unmatched and frozen.
+        Hyperliquid liquidation fills have no strategy CLOID. Attribution is
+        therefore limited to the exact same-side ledger discrepancy proven by
+        the latest REST account projection. Unrelated manual fills remain
+        unmatched and fail closed through normal reconciliation.
         """
         if self.execution_mode != "live" or self.live_executor is None:
             return 0
@@ -596,7 +585,7 @@ class Observer:
                 continue
             ledger_signed = sum(
                 float(ep.get("rem_size") or 0.0) * float(ep.get("sign") or 0.0)
-                for (addr, ep_coin), ep in self.taker.open_ep.items()
+                for (_addr, ep_coin), ep in self.taker.open_ep.items()
                 if ep_coin == str(coin)
             )
             correction = exchange_sizes.get(str(coin), 0.0) - ledger_signed
@@ -740,24 +729,15 @@ class Observer:
             token in str(exc).lower() for token in ("locked", "busy")
         )
 
-    async def _reconcile_live_with_retry(
-        self, *, attempts: int, retry_all: bool, usage_category: str = "account_audit",
-    ) -> dict:
+    async def _reconcile_live_with_retry(self, *, attempts: int, retry_all: bool) -> dict:
         """Reconcile exchange truth and mirror it to the Observer book as one recoverable operation."""
         for attempt in range(max(1, int(attempts))):
             try:
-                if isinstance(self.live_executor, LiveExecutor):
-                    result = await asyncio.to_thread(
-                        self.live_executor.reconcile, usage_category=usage_category,
-                    )
-                else:  # narrow test/development adapters retain the legacy no-argument contract
-                    result = await asyncio.to_thread(self.live_executor.reconcile)
+                result = await asyncio.to_thread(self.live_executor.reconcile)
                 self._sync_live_account()
                 return result
             except Exception as exc:  # noqa: BLE001 - caller decides whether the terminal error pauses work
-                rollback = getattr(self.live_executor, "rollback_after_error", None)
-                if callable(rollback):
-                    rollback()
+                self.live_executor.rollback_after_error()
                 self._rollback_db()
                 if attempt + 1 >= attempts or (not retry_all and not self._is_db_contention(exc)):
                     raise
@@ -768,29 +748,8 @@ class Observer:
         """Refresh authoritative Mainnet equity before calculating any exposure increase."""
         if self.execution_mode != "live" or self.live_executor is None:
             return
-        ws_health = getattr(type(self.live_executor), "account_ws_healthy", None)
-        if callable(ws_health) and bool(ws_health(self.live_executor)):
-            try:
-                await asyncio.to_thread(
-                    self.live_executor.refresh_authoritative_equity,
-                    usage_category="market_safety",
-                )
-                await asyncio.to_thread(self.live_executor.heartbeat_lease)
-            except Exception as exc:
-                self.live_reconcile_error = str(exc)[:120]
-                self.live_reconcile_error_at = now_iso()
-                raise
-            self._sync_live_account()
-            self._settle_forced_liquidations()
-            if not self._verify_live_ledger_projection():
-                raise RuntimeError("live_ledger_projection_drift")
-            self.live_reconcile_error = None
-            self.live_reconcile_error_at = None
-            return
         try:
-            result = await self._reconcile_live_with_retry(
-                attempts=4, retry_all=True, usage_category="account_fallback",
-            )
+            result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
         except Exception as exc:
             self.live_reconcile_error = str(exc)[:120]
             self.live_reconcile_error_at = now_iso()
@@ -955,11 +914,9 @@ class Observer:
             and f(position.get("rem_size")) > config.FLAT
             for position in book.open_ep.values()
         ):
-            # Hyperliquid currently exposes one net position per account and
-            # market, not independent hedge-mode long/short legs.  Preserve a
-            # deterministic first-direction-wins policy: later source wallets
-            # taking the opposite side are observed but never copied until the
-            # existing direction is fully flat.
+            # Hyperliquid maintains one net position per account/market, not
+            # independent hedge-mode legs. Use deterministic first-direction-
+            # wins semantics until the existing copied direction is flat.
             return "coin_direction_conflict"
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
@@ -2167,20 +2124,17 @@ class Observer:
             except Exception as exc:  # noqa: BLE001
                 _log(f"stats snapshot failed: {exc}")
 
-    async def _reconcile_live_once(self, *, usage_category: str = "account_audit"):
+    async def _reconcile_live_once(self):
         """Refresh exchange truth without turning a transient error into a hidden permanent pause.
 
-        WS-primary orders use fresh streamed state; REST fallback still performs
-        mandatory pre/post reconciliation. Only a successful exchange response
-        proving drift enters persistent ``reconcile_required``;
-        transport/SQLite errors remain visible and retry automatically.
+        Every exposure increase performs its own mandatory reconciliation, so a failed background refresh is
+        already fail-closed for the next order. Only a successful exchange response proving drift enters
+        persistent ``reconcile_required``; transport/SQLite errors remain visible and retry automatically.
         """
         try:
             # A writer that commits between retries is not an exchange-health failure. Keep this recovery
             # inside the attempt so a normal WAL collision never becomes a false red Live control-plane state.
-            result = await self._reconcile_live_with_retry(
-                attempts=3, retry_all=False, usage_category=usage_category,
-            )
+            result = await self._reconcile_live_with_retry(attempts=3, retry_all=False)
         except Exception as exc:  # noqa: BLE001
             self.live_reconcile_error = str(exc)[:120]
             self.live_reconcile_error_at = now_iso()
@@ -2203,33 +2157,16 @@ class Observer:
         return result
 
     async def live_reconcile_loop(self):
-        """Use WS projections normally, five-minute REST audits, and 15s REST fallback."""
+        """Continuously refresh exchange truth and freeze increases on drift."""
         while not self.stop and self.execution_mode == "live":
             try:
-                monitor = self.account_monitor
-                if monitor is not None and monitor.is_healthy():
-                    await asyncio.to_thread(self.live_executor.heartbeat_lease)
-                    self._sync_live_account()
-                    self._settle_forced_liquidations()
-                    last_audit = float(monitor.last_rest_audit_at or 0.0)
-                    if time.time() - last_audit >= float(config.ACCOUNT_REST_AUDIT_INTERVAL_S):
-                        result = await self._reconcile_live_once(usage_category="account_audit")
-                        if result is not None:
-                            monitor.note_rest_audit(result)
-                        else:
-                            monitor.mark_degraded("account_rest_audit_failed")
-                    elif not self._verify_live_ledger_projection():
-                        monitor.mark_reconcile_required("live_ledger_projection_drift")
-                else:
-                    result = await self._reconcile_live_once(usage_category="account_fallback")
-                    if monitor is not None and result is not None:
-                        monitor.restore_after_rest(result)
+                await self._reconcile_live_once()
             except Exception as exc:  # noqa: BLE001 - a short SQLite writer race is recoverable
                 if not self._is_db_contention(exc):
                     raise
                 self._rollback_db()
                 _log("live reconcile database busy; rolled back and will retry")
-            await asyncio.sleep(float(config.ACCOUNT_REST_FALLBACK_INTERVAL_S))
+            await asyncio.sleep(config.LIVE_ACCOUNT_RECONCILE_INTERVAL_S)
 
     async def prune_live_fills(self):
         """Bound replaceable execution diagnostics; business ledgers are never pruned."""
@@ -2256,21 +2193,6 @@ class Observer:
                     (self.execution_session_id,),
                 ).fetchall()
             }
-        poll_samples = sorted(float(value) for value in self._target_poll_round_ms)
-        poll_p95 = (
-            poll_samples[min(len(poll_samples) - 1, max(0, int(len(poll_samples) * 0.95)))]
-            if poll_samples else None
-        )
-        target_poll_limit_ms = max(5000.0, len(self.addrs) * 1500.0 + 5000.0)
-        account_monitor = (
-            self.account_monitor.snapshot()
-            if self.account_monitor is not None
-            else {
-                "mode": "rest_only", "state": "rest_fallback",
-                "accelerationEligible": False,
-            }
-        )
-        rest_usage = USAGE.snapshot()
         self.db.execute(
             "INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
             "('observer',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
@@ -2283,13 +2205,7 @@ class Observer:
                          "reconcileHealthy": self.live_reconcile_error is None,
                          "reconcileError": self.live_reconcile_error,
                          "reconcileErrorAt": self.live_reconcile_error_at,
-                         "signalStates": signal_states,
-                         "accountMonitor": account_monitor,
-                         "restUsage": rest_usage,
-                         "targetPollRoundP95Ms": poll_p95,
-                         "targetPollDegraded": bool(
-                             poll_p95 is not None and poll_p95 > target_poll_limit_ms
-                         )})))
+                         "signalStates": signal_states})))
         self.db.commit()
 
     def _interrupt_ws_for_stop(self):
@@ -2514,9 +2430,8 @@ class Observer:
             exit_px = self._mark_px(coin, ep["entry_px"])
         full = frac >= 0.999
         # LiveExecutor already owns bounded IOC attempts and deterministic
-        # recovery.  Re-entering it six times here repeated full REST
-        # pre/post reconciliation after a verified rejection or 429, creating
-        # a request storm without making the operator close more likely.
+        # recovery. Re-entering it here repeats full account reconciliation
+        # after a verified failure without making the close safer.
         attempts = 1
         last_error = None
         for attempt in range(attempts):
@@ -2836,41 +2751,50 @@ class Observer:
 
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
     async def poll_loop(self):
-        """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − a few-second
-        overlap so a fill landing between rounds isn't missed; tid-dedup absorbs the re-fetch),
-        replaying each through the idempotent process_fill. No fixed period — the REST pacer sets the
-        cadence; a full round over ~tens of wallets takes a few seconds. A newly-added target starts
-        at now; an active Live session resumes its durable cursor after a worker restart. Re-reads
-        the watchlist periodically so rolling discovery flows in without a restart."""
-        last_reload = now_ms()
-        sem = asyncio.Semaphore(config.POLL_CONCURRENCY)
+        """Poll targets sequentially, starting at most one REST request every five seconds.
 
-        async def _poll_one(addr):                 # CONCURRENT fetch — the pacer serializes each POST's SPAWN,
-            since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS   # but the network RTTs overlap
-            async with sem:
-                try:
-                    cursor = await self._poll_fills(
-                        addr, since, persist_cursor=self.execution_mode != "live",
-                    )
-                    return (addr, cursor) if cursor is not None else None
-                except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
-                    self._rollback_db()
-                    self._tally("poll_error")
-                    _log(f"poll_fills {addr[:10]} error: {exc}")
-                    return None
+        Cursor overlap and TID dedup retain the same no-miss/restart guarantees.
+        The lower cadence deliberately trades sub-minute copy latency for stable
+        REST headroom: ten wallets take roughly 50 seconds per healthy round.
+        """
+        last_reload = now_ms()
+
+        async def _poll_one(addr):
+            since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS
+            try:
+                cursor = await self._poll_fills(
+                    addr, since, persist_cursor=self.execution_mode != "live",
+                )
+                return (addr, cursor) if cursor is not None else None
+            except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
+                self._rollback_db()
+                self._tally("poll_error")
+                _log(f"poll_fills {addr[:10]} error: {exc}")
+                return None
 
         while not self.stop:
-            round_started = time.monotonic()
             self._assert_mode_binding()
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_strategy()
                 last_reload = now_ms()
-            updates = await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
+            addresses = list(self.addrs)
+            if not addresses:
+                await asyncio.sleep(config.TARGET_POLL_START_INTERVAL_S)
+                continue
+            updates = []
+            for addr in addresses:
+                started = time.monotonic()
+                update = await _poll_one(addr)
+                if update is not None:
+                    updates.append(update)
+                if self.stop:
+                    break
+                elapsed = time.monotonic() - started
+                await asyncio.sleep(max(0.0, config.TARGET_POLL_START_INTERVAL_S - elapsed))
             if self.execution_mode == "live":
-                cursor_updates = [item for item in updates if item is not None]
-                if cursor_updates:
+                if updates:
                     try:
-                        self._persist_live_cursors(cursor_updates)
+                        self._persist_live_cursors(updates)
                     except sqlite3.OperationalError as exc:
                         message = str(exc).lower()
                         if "locked" not in message and "busy" not in message:
@@ -2878,8 +2802,6 @@ class Observer:
                         # The previous durable cursor remains a safe replay point.  The next round retries a
                         # newer batch, while live_fills/execution_signal dedup any already-journalled receipts.
                         self._rollback_db()
-            self._target_poll_round_ms.append((time.monotonic() - round_started) * 1000.0)
-            await asyncio.sleep(1)                 # small breath between rounds
 
     async def signal_retry_loop(self):
         """Resume journalled Live target fills until strategy handling is terminal.
@@ -3068,25 +2990,14 @@ class Observer:
     # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
-        rest.set_default_request_category("market_safety")
         strategy_recovery_requested = False
         if self.execution_mode == "live":
             strategy_recovery_requested = self._strategy_revision_recovery_requested()
             self._live_executor_db = self._open_live_executor_db()
             self.live_executor = LiveExecutor.from_db(self._live_executor_db)
-            result = None
-            if config.LIVE_ACCOUNT_MONITOR_MODE == "ws_primary":
-                self.account_monitor = LiveAccountMonitor(self.live_executor)
-                self._spawn_background(
-                    self.account_monitor.run(), "account_monitor", critical=True,
-                )
-                result = await self.account_monitor.wait_initial_sync()
-            # If WS cannot establish its buffered baseline promptly, start in the exact REST safety mode that
-            # existed before WS-primary. The account stream keeps reconnecting in the background.
-            if result is None:
-                result = await self._reconcile_live_with_retry(
-                    attempts=4, retry_all=True, usage_category="account_fallback",
-                )
+            # Startup uses the same recoverable exchange+ledger boundary as steady-state Live. A harmless
+            # Dashboard/maintenance commit during systemd restart must not crash-loop the real-position owner.
+            result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
             if not result.get("ok"):
                 self.paused = True
                 self.execution_state = "reconcile_required"
@@ -3129,6 +3040,7 @@ class Observer:
             # revision binding has advanced.  Only this fresh, fully consistent state may
             # reopen exposure after a lineage-only restart failure.
             recovery_result = await self._reconcile_live_with_retry(attempts=4, retry_all=True)
+            self._settle_forced_liquidations()
             ledger_projection_ok = (
                 bool(recovery_result.get("ok")) and self._verify_live_ledger_projection()
             )
@@ -4545,11 +4457,8 @@ class Observer:
         order = one record (not N), and (b) it isn't mis-counted as N scale-ins. Live persists the
         last successfully journalled API window and resumes it after a worker restart; the durable
         signal inbox then decides whether a recovered fill is executable, policy-skipped or retried."""
-        with rest.request_category("target_fills"):
-            page = await asyncio.to_thread(rest.post_soft, {
-                "type": "userFillsByTime", "user": addr,
-                "startTime": int(max(0, since)), "aggregateByTime": True,
-            })
+        page = await asyncio.to_thread(rest.post_soft, {
+            "type": "userFillsByTime", "user": addr, "startTime": int(max(0, since)), "aggregateByTime": True})
         if not isinstance(page, list):
             # post_soft deliberately returns None after its bounded transport retries. Treat that as a real
             # polling failure: leave the cursor untouched and make degradation visible in Observer logs.

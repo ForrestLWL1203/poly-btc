@@ -237,6 +237,8 @@ together. The current broad contract is:
 - A newly observed target starts at the current time; do not backfill old fills into a new copy book.
 - Target fills come from REST `userFillsByTime`. Cursor movement and the complete batch commit are atomic. On
   SQLite/row failure, restore the old cursor and refetch the overlap; `tid` dedup prevents double execution.
+- Target requests are sequential and start no faster than one wallet every five seconds. Ten tracked wallets
+  therefore complete a healthy round in roughly 50 seconds; copying does not require sub-ten-second latency.
 - Every Live fill is journaled in `execution_signal` before strategy mutation. Signals move through durable
   pending/processing/retryable/terminal states and survive worker or SQLite failures.
 - The ordered signal worker owns strategy and execution mutation. Do not spawn competing per-fill book writers.
@@ -257,18 +259,15 @@ together. The current broad contract is:
 ### Live execution and reconciliation
 
 - Live is Paper strategy plus a real execution adapter; it is not a separate strategy engine.
-- The self-account WebSocket is opt-in. Service templates default to `rest_only`; enabling `ws_primary` requires
-  a separate explicit production decision. Scanner WS acceleration has its own default-off gate.
-- When account WS is enabled, immutable order/fill facts retain FIFO order. Full account, spot, and open-order
-  snapshots are replaceable state and keep only the newest pending value per channel/DEX; they must not create an
-  unbounded FIFO or append one historical account row per server push.
-- Account WS handlers never launch a full REST reconcile. They may only degrade health; the Observer's single
-  reconciliation loop owns REST baseline, audit, fallback, and recovery so one WS delay cannot fan out into
-  concurrent account pulls.
-- Every exposure increase reads fresh exchange equity/available balance from the lightweight REST
-  `spotClearinghouseState`, verifies the current WS position projection against the Live ledger, then sizes and
-  executes. Dashboard equity/available values stream from WS `spotState`; the five-minute full REST audit remains
-  the independent account-wide backstop.
+- Self-account orders, fills, positions, open orders, equity, and available collateral are reconciled through
+  REST only. There are no self-account user WebSocket subscriptions, account-WS modes, or account-WS health
+  gates. Public BBO/mark WebSockets remain the independent pricing plane.
+- Run a complete authoritative account reconcile at startup and every 15 seconds. Every exposure increase also
+  requires a fresh complete reconcile before sizing and another after submission. A venue-enforced reduction
+  may reuse a successful projection no older than 30 seconds, is clamped to the proven official per-coin size,
+  and still synchronizes official fills; the periodic reconcile remains the independent backstop.
+- Every exposure increase reads fresh exchange equity/available balance, reconciles exchange positions/orders
+  against the Live ledger, then sizes and executes. Dashboard equity/available values come from the real account.
 - LiveExecutor uses a dedicated WAL connection. Observer must commit its signal transition before LiveExecutor
   writes, and no coroutine/thread may borrow another owner's connection.
 - Market execution is a bounded marketable IOC/taker flow, not an unbounded “market” assumption. Validate current
@@ -287,6 +286,12 @@ together. The current broad contract is:
 
 ### Position-management semantics
 
+- Hyperliquid exposes one net position per account and market. If copied positions already own one direction,
+  later opposite-direction opens/adds are skipped until that direction is flat; never represent simultaneous
+  hedge-mode legs in the local Live ledger.
+- An explicit exchange `Liquidated ...` self-account fill is an authoritative reduction even without our CLOID.
+  Settle only the same-side ledger discrepancy proven by the fresh REST projection. Arbitrary/manual unmatched
+  fills remain fail-closed and must never be silently attributed to a strategy position.
 - Smart-add gaps compare target transaction prices. Our BBO is for execution/PnL, never mixed into target-motion
   qualification. One target add OID can execute at most one followed add.
 - Target reductions accumulate until the configured mirrored threshold; a target full close always closes.

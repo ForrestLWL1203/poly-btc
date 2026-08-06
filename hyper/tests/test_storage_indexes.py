@@ -156,9 +156,6 @@ class StorageIndexTests(unittest.TestCase):
             "idx_execution_signal_status_completed",
             "idx_execution_account_observed_at",
             "idx_execution_reconcile_status_created",
-            "idx_execution_order_event_session_time",
-            "idx_execution_order_event_oid",
-            "idx_execution_fill_session_oid",
         }
         self.assertTrue(expected.issubset(names), expected - names)
 

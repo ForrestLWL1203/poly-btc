@@ -611,38 +611,13 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None,
 
 
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
-def _scanner_rate_status() -> dict:
-    request_stats = rest.request_stats()
-    usage = rest.USAGE.snapshot() if hasattr(rest, "USAGE") else {}
-    alerts = []
-    if usage.get("last429At"):
-        alerts.append("scanner_rate_limited")
-    if float(request_stats.get("budget_paused_s") or 0.0) > 1800.0:
-        alerts.append("scanner_budget_paused_over_30m")
-    return {
-        "weightBudgetPerMin": request_stats.get("budget_weight_per_min"),
-        "budgetMode": request_stats.get("budget_mode"),
-        "observerWeightPeak": request_stats.get("observer_peak_weight", 0.0),
-        "accelerated": request_stats.get("budget_mode") == "ws_released",
-        "budgetPaused": bool(request_stats.get("budget_paused")),
-        "reason": request_stats.get("budget_reason"),
-        "last429At": usage.get("last429At"),
-        "budgetPausedSec": request_stats.get("budget_paused_s", 0.0),
-        "alerts": alerts,
-    }
-
-
 def _set_scanner_proc(db, state, detail=None):
     try:
-        detail = {
-            **(detail or {}),
-            **_scanner_rate_status(),
-        }
         with _db_lock:
             db.execute("INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
                        "('scanner',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
                        "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
-                       (state, os.getpid(), now_iso(), json.dumps(detail)))
+                       (state, os.getpid(), now_iso(), json.dumps(detail or {})))
             db.commit()
     except Exception:  # noqa: BLE001
         pass
@@ -680,7 +655,6 @@ def _write_scanner_heartbeat(db_path) -> bool:
             "stage": progress[1],
             "scanned": int(progress[2] or 0),
             "total": int(progress[3] or 0),
-            **_scanner_rate_status(),
         }
         changed = conn.execute(
             "UPDATE process_status SET pid=?,heartbeat_at=?,detail_json=? "
@@ -7237,17 +7211,13 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
                 reason=None, api_stats=None, retention_metrics=None, commit=True):
     api_stats = dict(api_stats or {})
     retention_metrics = dict(retention_metrics or {})
-    duration_s = round(time.time() - t0, 1)
-    rest_wait_s = max(0.0, float(api_stats.get("budget_wait_s") or 0.0))
     db.execute(
         "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,profiled,probed_new,added,"
         "retired,kept,rejected,n_active,full,failed,complete,kind,generation,api_requests,api_weight,"
         "outcome_reason,core_added,core_removed,core_probation,core_recovered,"
-        "core_confirmed_demotion,core_safety_exit,replacement_blocked,rest_wait_s,local_compute_s,"
-        "avg_weight_budget,min_weight_budget,accelerated_s,budget_paused_s,observer_peak_weight,"
-        "rate_limit_count) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (started, now_iso(), duration_s, candidates, profiled, profiled, added, retired,
+        "core_confirmed_demotion,core_safety_exit,replacement_blocked) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (started, now_iso(), round(time.time() - t0, 1), candidates, profiled, profiled, added, retired,
          kept, rejected, n_active, 1 if full else 0, failed, 1 if complete else 0,
          str(kind or "complete"), generation_id, int(api_stats.get("requests") or 0),
          int(api_stats.get("estimated_weight") or 0), str(reason)[:300] if reason else None,
@@ -7257,14 +7227,7 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
          int(retention_metrics.get("recovered") or 0),
          int(retention_metrics.get("confirmedDemotion") or 0),
          int(retention_metrics.get("safetyExit") or 0),
-         int(bool(retention_metrics.get("replacementBlocked"))),
-         rest_wait_s, max(0.0, duration_s - rest_wait_s),
-         max(0.0, float(api_stats.get("avg_weight_budget") or 0.0)),
-         max(0.0, float(api_stats.get("min_weight_budget") or 0.0)),
-         max(0.0, float(api_stats.get("accelerated_s") or 0.0)),
-         max(0.0, float(api_stats.get("budget_paused_s") or 0.0)),
-         max(0.0, float(api_stats.get("observer_peak_weight") or 0.0)),
-         int(api_stats.get("rate_limited") or 0)))
+         int(bool(retention_metrics.get("replacementBlocked")))))
     storage_guard.trim_scan_history(db)
     if commit:
         db.commit()
@@ -10518,7 +10481,6 @@ def scan(db, p):
             n_active = len(current_core)
             duration_s = time.time() - t0
             pre_strict_counts = _pre_strict_counts(db, generation_id)
-            final_api_stats = rest.request_stats()
             stage_metrics = {
                 "durationSec": round(duration_s, 3),
                 "leaderboardAndUniverseSec": round(harvest_done_at - harvest_started_at, 3),
@@ -10540,21 +10502,15 @@ def scan(db, p):
                     "leaderboard": harvest_api_stats,
                     "perpPrefilter": {
                         key: int(prefilter_api_stats.get(key, 0)) - int(harvest_api_stats.get(key, 0))
-                        for key, value in prefilter_api_stats.items()
-                        if isinstance(value, (int, float))
-                        and isinstance(harvest_api_stats.get(key, 0), (int, float))
+                        for key in prefilter_api_stats
                     },
                     "profile": {
                         key: int(profile_api_stats.get(key, 0)) - int(prefilter_api_stats.get(key, 0))
-                        for key, value in profile_api_stats.items()
-                        if isinstance(value, (int, float))
-                        and isinstance(prefilter_api_stats.get(key, 0), (int, float))
+                        for key in profile_api_stats
                     },
                     "formation": {
-                        key: int(final_api_stats.get(key, 0)) - int(profile_api_stats.get(key, 0))
-                        for key, value in profile_api_stats.items()
-                        if isinstance(value, (int, float))
-                        and isinstance(final_api_stats.get(key, 0), (int, float))
+                        key: int(rest.request_stats().get(key, 0)) - int(profile_api_stats.get(key, 0))
+                        for key in profile_api_stats
                     },
                 },
                 "coreRefreshSec": round((priority_done_at or time.time()) - t0, 3),
@@ -10580,7 +10536,7 @@ def scan(db, p):
                 "marketSnapshot": market_validation,
                 "marketSnapshotProfiled": market_snapshot_audit,
                 "operatorStarredRetention": len(pinned_core_order),
-                **final_api_stats,
+                **rest.request_stats(),
             }
             db.execute(
                 "UPDATE scan_generation SET metrics_json=? WHERE generation=?",

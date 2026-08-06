@@ -127,24 +127,6 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertEqual(guard["reasons"], ["db_growth_24h_warning"])
         self.assertEqual(guard["diskUsedPct"], 71.0)
 
-    def test_overview_exposes_observer_account_monitor_detail(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
-            db.row_factory = sqlite3.Row
-            db.execute(
-                "INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) "
-                "VALUES ('observer','running',1,'2026-08-05T12:00:00Z',?)",
-                ('{"accountMonitor":{"mode":"ws_primary","state":"healthy",'
-                 '"queueDepth":0,"queueLagMs":4},"restUsage":{"weight1m":25}}',),
-            )
-            db.commit()
-
-            overview = api_overview.ep_overview(db)
-
-        self.assertEqual(overview["system"]["accountMonitor"]["state"], "healthy")
-        self.assertEqual(overview["system"]["accountMonitor"]["mode"], "ws_primary")
-        self.assertEqual(overview["system"]["observerRestUsage"]["weight1m"], 25)
-
     def test_overview_aggregates_open_risk_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

@@ -7,7 +7,6 @@ procman change — spawns them locally when systemd is absent. So locally the la
 dashboard; the dashboard owns copy-trading. Status/logs still surface all three via procman pidfiles.
 """
 from . import templates
-from .model import account_monitor_mode
 from .ssh import _q
 
 SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.service",
@@ -42,17 +41,6 @@ class SystemdServices:
                 self.ex.put_text(path, text)
                 emit(f"写入 {path}")
         self.ex.run("systemctl daemon-reload", on_line=emit)
-
-    def sync_observer_unit(self, emit=None):
-        """Write only the Observer definition; never restart a live trading process implicitly."""
-        emit = emit or (lambda _message: None)
-        path = "/etc/systemd/system/hl-observe.service"
-        text = templates.observe_unit(
-            self.cfg.app_dir, self.cfg.py, self.cfg.db, self.cfg.account_monitor_mode,
-        )
-        self.ex.put_text(path, text)
-        emit(f"写入 {path}")
-        return self.ex.run("systemctl daemon-reload", on_line=emit)
 
     def install(self, emit):
         emit("准备 Dashboard 凭据包装密钥…")
@@ -136,11 +124,9 @@ class LocalServices:
             return self.ex.run("true")             # no-op: use the dashboard's 启动跟单/扫描 buttons
         pidfile = _q(f"{self.rd}/dashboard.pid")
         logfile = _q(f"{self.rd}/dashboard.log")
-        monitor_mode = _q(account_monitor_mode(self.cfg.account_monitor_mode))
         cmd = (f"cd {_q(self.cfg.app_dir)} && mkdir -p data/run && "
                f"if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
                f"then echo 'dashboard 已在运行'; else "
-               f"HL_LIVE_ACCOUNT_MONITOR_MODE={monitor_mode} "
                f"nohup {_q(self.cfg.py)} -m dashboard.server --db data/hl.db --static dashboard/web "
                f"--host 127.0.0.1 --port {int(self.cfg.port)} >> {logfile} 2>&1 & "
                f"echo $! > {pidfile}; echo 'dashboard 已启动 pid='$(cat {pidfile}); fi")

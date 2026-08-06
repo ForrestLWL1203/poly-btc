@@ -1,7 +1,5 @@
 """Shared constants — endpoints, hard limits, sim parameters. No logic here."""
 
-import os
-
 # Hyperliquid endpoints
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -12,10 +10,9 @@ UA = {"User-Agent": "hl-copytrade/0.3", "Accept": "application/json", "Content-T
 FLAT = 1e-6                 # |position| below this (coin units) counts as flat
 MIN_POST_INTERVAL = 1.1     # global REST pace (s/POST). HL /info budget = 1200 WEIGHT/min/IP, and
 #                             our heavy calls (userFillsByTime, frontendOpenOrders) cost weight 20
-#                             each (+1 per 20 results) — so the real ceiling is ~60 weight-20/min,
-#                             NOT a request count. 1.2s = 50/min ≈ 1000 weight/min: safely under
-#                             1200, leaving headroom for the 8s-trickle scanner (~150 weight/min)
-#                             on the same IP. (l2Book/clearinghouseState are only weight 2.)
+#                             each (+1 per 20 results), while l2Book/clearinghouseState cost 2.
+#                             Target polling has its own slower five-second start cadence; this
+#                             process-wide fallback pacer still protects all other historical calls.
 SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running — full speed (the observer
 #                             isn't competing for the IP's weight budget). Adaptive: the scan uses the
 #                             slow --scan-interval only while the observer is live; idle → this. ~15min sweep.
@@ -24,32 +21,6 @@ INFO_WEIGHT_BUDGET_PER_MIN = 1200.0
 SCAN_IDLE_WEIGHT_BUDGET_FRACTION = 0.95  # leave a small cushion for dashboard/ops reads on the same IP
 SCAN_IDLE_WEIGHT_BURST = 20.0            # at most one heavy wallet-history request may burst immediately
 SCAN_IDLE_MIN_REQUEST_INTERVAL = 0.02    # low-weight metadata calls need not inherit the weight-20 cadence
-LIVE_ACCOUNT_MONITOR_MODE = os.environ.get(
-    "HL_LIVE_ACCOUNT_MONITOR_MODE", "rest_only",
-).strip().lower()
-ACCOUNT_WS_ORDER_WAIT_S = float(os.environ.get("HL_ACCOUNT_WS_ORDER_WAIT_S", "2"))
-ACCOUNT_WS_POST_TIMEOUT_S = float(os.environ.get("HL_ACCOUNT_WS_POST_TIMEOUT_S", "3"))
-ACCOUNT_WS_POSITION_WAIT_S = float(os.environ.get("HL_ACCOUNT_WS_POSITION_WAIT_S", "5"))
-ACCOUNT_REST_AUDIT_INTERVAL_S = float(os.environ.get("HL_ACCOUNT_REST_AUDIT_INTERVAL_S", "300"))
-ACCOUNT_REST_FALLBACK_INTERVAL_S = float(os.environ.get("HL_ACCOUNT_REST_FALLBACK_INTERVAL_S", "15"))
-ACCOUNT_WS_QUEUE_MAX = 4096
-ACCOUNT_WS_ACK_TIMEOUT_S = 10.0
-ACCOUNT_WS_PING_INTERVAL_S = 30.0
-ACCOUNT_WS_STALE_S = 45.0
-ACCOUNT_WS_STATE_STALE_S = 90.0
-ACCOUNT_WS_SNAPSHOT_DEBOUNCE_S = 0.05
-ACCOUNT_WS_HISTORY_INTERVAL_S = float(os.environ.get("HL_ACCOUNT_WS_HISTORY_INTERVAL_S", "60"))
-SCANNER_WS_MAX_WEIGHT_PER_MIN = float(os.environ.get("HL_SCANNER_WS_MAX_WEIGHT_PER_MIN", "200"))
-SCANNER_429_MAX_WEIGHT_PER_MIN = float(os.environ.get("HL_SCANNER_429_MAX_WEIGHT_PER_MIN", "80"))
-SCANNER_WS_ACCELERATION_ENABLED = os.environ.get(
-    "HL_SCANNER_WS_ACCELERATION_ENABLED", "false",
-).strip().lower() in {"1", "true", "yes", "on"}
-SCANNER_GLOBAL_HEADROOM_WEIGHT = 100.0
-SCANNER_ACCOUNT_AUDIT_RESERVE_WEIGHT = 160.0
-SCANNER_TELEMETRY_STALE_S = 30.0
-SCANNER_WS_HEALTHY_MIN_S = 300.0
-SCANNER_429_PAUSE_S = 300.0
-SCANNER_429_COOLDOWN_S = 1800.0
 REPLAY_PROCESS_MAX_WORKERS = 4           # auto-scales 1→1, 2→2, 4+→4; replay stays bounded on small VPSes
 REPLAY_LOW_MEMORY_SERIAL_BYTES = 2 * 1024 * 1024 * 1024
 SCANNER_MIN_AVAILABLE_MEMORY_BYTES = 192 * 1024 * 1024
@@ -60,7 +31,8 @@ SCANNER_REPLAY_DECODE_MULTIPLIER = 6.0
 # Copy engine: SIGNAL via REST poll (per-wallet userFills — REST has no 10-user cap, so we can
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
-# long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
+# long-hold, so a roughly five-second-per-wallet round-robin is sufficient; execution still uses
+# the live book at detection.
 MAX_TARGETS = 40            # Observer compatibility cap; published Core remains independently capped at 16.
 SOURCE_QUALITY_MAX_N = 40   # legacy database compatibility; no longer an admission/ranking boundary.
 # A complete generation rough-replays every structurally valid recalled wallet, freezes at most 32
@@ -120,9 +92,10 @@ WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolli
 POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet cursor (tid-dedup absorbs it) so a fill
 #                            landing between poll rounds isn't missed. New targets start at now; active Live
 #                            sessions persist the cursor and durable signal inbox across worker restarts.
-POLL_CONCURRENCY = 10      # signal-poll fan-out: fetch this many wallets' fills concurrently. The global
-#                            pacer still spaces the SPAWN of each POST, but the network round-trips overlap
-#                            instead of running serially → a round's wall-time ≈ (N × pace), not (N × (pace+RTT)).
+TARGET_POLL_START_INTERVAL_S = 5.0  # start at most one Core/held-wallet fills request per interval. Copy
+#                                     latency is intentionally secondary to predictable REST headroom; ten
+#                                     wallets therefore take about 50 seconds per healthy polling round.
+LIVE_ACCOUNT_RECONCILE_INTERVAL_S = 15.0  # authoritative REST-only self-account reconcile cadence
 LIVE_SIGNAL_RETRY_BASE_S = 2.0   # durable Live signal inbox retry; exponential, capped below
 LIVE_SIGNAL_RETRY_MAX_S = 30.0
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap

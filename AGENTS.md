@@ -18,7 +18,11 @@ contract; `hyper/CLAUDE.md` must not duplicate or override product rules.
 - Keep product business logic out of `dashboard/`; Dashboard code may read product state and use each product's
   explicit command/parameter control plane.
 - Do not create root-level product scripts. Add module entry points under the owning product package and invoke
-  them with `python3 -m ...`.
+  them with `.venv/bin/python -m ...` from the repository root.
+- Always run repository Python commands, tests, compilation, and operational modules with `.venv/bin/python`.
+  Never use bare `python3`, `/usr/bin/python3`, or the macOS system Python as an initial attempt. If `.venv` is
+  missing or broken, stop and report or repair that environment instead of silently falling back to another
+  interpreter; a missing dependency in a non-venv interpreter is not a repository test failure.
 - Never expose, print, commit, or copy secrets, private keys, live databases, private target files, or private
   deployment values.
 - The active VPS is locally accessible. For every remote check, read the current connection from
@@ -44,5 +48,4 @@ dashboard/web/build.sh
 hyper/launcher/web/build.sh
 ```
 
-Use `python3` only when the repository virtual environment is unavailable and the required dependencies are
-installed in that interpreter.
+Do not substitute another Python interpreter for these commands unless the user explicitly authorizes it.

@@ -87,26 +87,6 @@ def update(cfg):
         ex.close()
 
 
-def configure_account_monitor(cfg):
-    """Persist the VPS Observer unit selection without restarting the live process."""
-    if cfg.mode != "vps":
-        return {"ok": False, "error": "本地模式请在部署向导中选择账户对账通道"}
-    ex, svc = _conn(cfg)
-    try:
-        observer_state = ex.run("systemctl is-active hl-observe.service").out.strip()
-        observing = observer_state in ("active", "running")
-        synced = svc.sync_observer_unit()
-        if not getattr(synced, "ok", True):
-            return {"ok": False, "error": "Observer 服务配置同步失败"}
-        return {
-            "ok": True,
-            "accountMonitorMode": cfg.account_monitor_mode,
-            "restartRequired": observing,
-        }
-    finally:
-        ex.close()
-
-
 def reset_params(cfg, category=None):
     """恢复默认参数 on the target — force-overwrite the params table to config defaults, then enqueue
     a follow-param reload command when relevant. category None = all; 'follow'/'scanner' = one tab."""

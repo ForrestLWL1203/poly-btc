@@ -34,15 +34,9 @@ class ScannerHeartbeatTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row[0], "scanning")
             self.assertNotEqual(row[1], "2000-01-01T00:00:00Z")
-            detail = json.loads(row[2])
-            self.assertEqual(
-                {key: detail[key] for key in ("scanned", "stage", "total")},
-                {"scanned": 8, "stage": "portfolio_tune_coarse", "total": 16},
-            )
-            self.assertIn("weightBudgetPerMin", detail)
-            self.assertIn("budgetMode", detail)
-            self.assertIn("budgetPaused", detail)
-            self.assertIn("observerWeightPeak", detail)
+            self.assertEqual(json.loads(row[2]), {
+                "scanned": 8, "stage": "portfolio_tune_coarse", "total": 16,
+            })
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM process_status WHERE name='scanner'").fetchone()[0],
                 1,

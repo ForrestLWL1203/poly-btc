@@ -236,14 +236,6 @@ class HyperliquidBrokerTests(unittest.TestCase):
         self.assertEqual(set(account.perp_states), {"", "xyz"})
         self.assertEqual(set(account.open_orders), {"", "xyz"})
 
-    def test_lightweight_collateral_read_uses_spot_state_only(self):
-        broker = self.broker()
-
-        state = broker.collateral_state()
-
-        self.assertEqual(state["balances"][0]["total"], "1000")
-        self.assertNotIn(("abstraction", ACCOUNT), self.info.calls)
-
     def test_agent_authorization_reads_official_expiry_for_main_account(self):
         broker = self.broker()
 

@@ -69,14 +69,6 @@ input.i:focus, select.i:focus { border-color: var(--accent); }
 .mode-c .em { font-size: 22px; margin-bottom: 8px; }
 .mode-c .t { font-weight: 650; font-size: 14px; margin-bottom: 4px; }
 .mode-c .d { color: var(--t3); font-size: 12px; line-height: 1.45; }
-.account-mode-block { margin-top: 16px; padding-top: 15px; border-top: 1px solid var(--glass-border); }
-.account-mode-title { color: var(--t1); font-size: 13px; font-weight: 650; margin-bottom: 5px; }
-.account-modes .mode-c { color: inherit; font: inherit; text-align: left; width: 100%; padding: 14px 15px; }
-.mode-tag { display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 999px;
-  color: var(--green-l); background: rgba(61, 214, 140, .1); font-size: 10px; font-weight: 600; vertical-align: 1px; }
-.mode-tag.warn { color: #ffc07a; background: rgba(255, 166, 82, .11); }
-.mode-warning { margin-top: 10px; padding: 9px 11px; border: 1px solid rgba(255, 166, 82, .24);
-  border-radius: 9px; background: rgba(255, 166, 82, .06); color: #ffc07a; font-size: 11.5px; line-height: 1.5; }
 
 /* target list */
 .tgt { display: flex; align-items: center; gap: 13px; padding: 13px 15px; border: 1px solid var(--glass-border);

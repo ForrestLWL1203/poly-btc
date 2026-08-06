@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -516,30 +517,43 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "reconcile_required",
         )
 
-    def test_explicit_exchange_liquidation_settles_live_ledger_once(self):
+    def test_running_live_observer_fails_closed_on_mode_change(self):
         db = self._db()
-        session_id = self._activate_live(db)
-        fill_time = now_ms()
+        self._activate_live(db)
+        obs = Observer(db, [], {})
         db.execute(
-            "INSERT INTO live_copy_position "
-            "(addr,coin,side,status,master_open_ms,master_open_px,master_peak_sz,leverage,margin,"
-            "notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,num_actions,opened_at,"
-            "strategy_revision_id) VALUES "
-            "('0xsource','CASHCAT','short','open',1,.15,2707,6,67.68,406.05,.15,2707,2707,"
-            "2707,.14164,0,0,?,'revision-one')",
-            (now_iso(),),
-        )
-        db.execute(
-            "INSERT INTO execution_fill "
-            "(network,tid,session_id,oid,coin,side,size,px,fee,closed_pnl,fill_time_ms,raw_json,created_at) "
-            "VALUES ('mainnet','cashcat-liq',?,9001,'CASHCAT','B',2707,.14164,.17,-87,?,?,?)",
-            (
-                session_id, fill_time,
-                json.dumps({"dir": "Liquidated Isolated Short"}), now_iso(),
-            ),
+            "UPDATE execution_control SET selected_mode='paper',state='paper',active_session_id=NULL "
+            "WHERE id=1"
         )
         db.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "execution_mode_changed"):
+            obs._assert_mode_binding()
+
+    def test_explicit_exchange_liquidation_settles_live_ledger_once(self):
         async def settle():
+            db = self._db()
+            session_id = self._activate_live(db)
+            fill_time = now_ms()
+            db.execute(
+                "INSERT INTO live_copy_position "
+                "(addr,coin,side,status,master_open_ms,master_open_px,master_peak_sz,leverage,margin,"
+                "notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,num_actions,opened_at,"
+                "strategy_revision_id) VALUES "
+                "('0xsource','CASHCAT','short','open',1,.15,2707,6,67.68,406.05,.15,2707,2707,"
+                "2707,.14164,0,0,?,'revision-one')",
+                (now_iso(),),
+            )
+            db.execute(
+                "INSERT INTO execution_fill "
+                "(network,tid,session_id,oid,coin,side,size,px,fee,closed_pnl,fill_time_ms,raw_json,created_at) "
+                "VALUES ('mainnet','cashcat-liq',?,9001,'CASHCAT','B',2707,.14164,.17,-87,?,?,?)",
+                (
+                    session_id, fill_time,
+                    json.dumps({"dir": "Liquidated Isolated Short"}), now_iso(),
+                ),
+            )
+            db.commit()
             obs = Observer(db, [], {})
             obs.live_executor = Mock(
                 equity=112.83, available=112.83, session={"sizing_anchor": 200.0},
@@ -548,9 +562,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs._reload_open(obs.taker)
             first = obs._settle_forced_liquidations()
             second = obs._settle_forced_liquidations()
-            return obs, first, second
+            return db, obs, first, second
 
-        obs, first, second = asyncio.run(settle())
+        db, obs, first, second = asyncio.run(settle())
 
         self.assertEqual(first, 1)
         self.assertEqual(second, 0)
@@ -572,19 +586,6 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertAlmostEqual(action["our_qty_delta"], 2707)
         self.assertAlmostEqual(action["our_px"], 0.14164)
         self.assertAlmostEqual(action["realized_pnl"], -87.17)
-
-    def test_running_live_observer_fails_closed_on_mode_change(self):
-        db = self._db()
-        self._activate_live(db)
-        obs = Observer(db, [], {})
-        db.execute(
-            "UPDATE execution_control SET selected_mode='paper',state='paper',active_session_id=NULL "
-            "WHERE id=1"
-        )
-        db.commit()
-
-        with self.assertRaisesRegex(RuntimeError, "execution_mode_changed"):
-            obs._assert_mode_binding()
 
     def test_close_all_never_reports_success_with_remaining_positions(self):
         async def run():
@@ -768,86 +769,6 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 "SELECT initial_balance,balance,available FROM live_copy_account WHERE id=1"
             ).fetchone()
             self.assertEqual(tuple(account), (8000.0, 204.0, 187.0))
-
-        asyncio.run(run())
-
-    def test_ws_live_sizing_uses_only_lightweight_rest_equity_refresh(self):
-        async def run():
-            db = self._db()
-            self._activate_live(db)
-            obs = Observer(db, [], {})
-            obs.execution_mode = "live"
-
-            class WsExecutor:
-                session = {"sizing_anchor": 200.0}
-                equity = 200.0
-                available = 180.0
-
-                def __init__(self):
-                    self.refresh_calls = 0
-                    self.reconcile_calls = 0
-                    self.heartbeat_calls = 0
-
-                def account_ws_healthy(self):
-                    return True
-
-                def refresh_authoritative_equity(self, *, usage_category):
-                    self.refresh_calls += 1
-                    self.equity = 207.0
-                    self.available = 191.0
-                    self.usage_category = usage_category
-
-                def heartbeat_lease(self):
-                    self.heartbeat_calls += 1
-
-                def reconcile(self, **_kwargs):
-                    self.reconcile_calls += 1
-                    raise AssertionError("full reconcile must not run on healthy WS sizing")
-
-            executor = WsExecutor()
-            obs.live_executor = executor
-            obs._load_account()
-
-            await obs._refresh_live_sizing_state()
-
-            self.assertEqual(executor.refresh_calls, 1)
-            self.assertEqual(executor.reconcile_calls, 0)
-            self.assertEqual(executor.heartbeat_calls, 1)
-            self.assertEqual(executor.usage_category, "market_safety")
-            self.assertEqual(obs.taker.balance, 207.0)
-            self.assertEqual(obs._risk_available(), 191.0)
-
-        asyncio.run(run())
-
-    def test_ws_equity_rest_failure_blocks_increase_without_full_reconcile(self):
-        async def run():
-            db = self._db()
-            self._activate_live(db)
-            obs = Observer(db, [], {})
-            obs.execution_mode = "live"
-
-            class FailingWsExecutor:
-                equity = 200.0
-                available = 180.0
-                reconcile_calls = 0
-
-                def account_ws_healthy(self):
-                    return True
-
-                def refresh_authoritative_equity(self, **_kwargs):
-                    raise RuntimeError("spot_equity_unavailable")
-
-                def reconcile(self, **_kwargs):
-                    self.reconcile_calls += 1
-
-            executor = FailingWsExecutor()
-            obs.live_executor = executor
-
-            with self.assertRaisesRegex(RuntimeError, "spot_equity_unavailable"):
-                await obs._refresh_live_sizing_state()
-
-            self.assertEqual(executor.reconcile_calls, 0)
-            self.assertFalse(obs.paused)
 
         asyncio.run(run())
 
@@ -1252,6 +1173,27 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_manual_close_uses_taker_ask_for_short(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+                "VALUES ('0xshort','ETH','short','open',200,5,100,200,1,1,'2026-01-01T00:00:00Z')"
+            ).lastrowid
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xshort", "ETH")] = self._live_ep(pos_id, "short", 200, 1)
+            self._set_bbo(obs, "ETH", 198.0, 202.0)
+
+            res = await obs._cmd_close(pos_id)
+
+            self.assertEqual(res["exit"], 202.0)
+            action = db.execute("SELECT our_px FROM copy_action WHERE pos_id=?", (pos_id,)).fetchone()
+            self.assertEqual(action["our_px"], 202.0)
+
+        asyncio.run(run())
+
     def test_opposite_coin_direction_is_blocked_until_existing_side_is_flat(self):
         async def run():
             db = self._db()
@@ -1278,27 +1220,6 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_manual_close_uses_taker_ask_for_short(self):
-        async def run():
-            db = self._db()
-            pos_id = db.execute(
-                "INSERT INTO copy_position "
-                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
-                "VALUES ('0xshort','ETH','short','open',200,5,100,200,1,1,'2026-01-01T00:00:00Z')"
-            ).lastrowid
-            db.commit()
-            obs = Observer(db, [], {})
-            obs.taker.open_ep[("0xshort", "ETH")] = self._live_ep(pos_id, "short", 200, 1)
-            self._set_bbo(obs, "ETH", 198.0, 202.0)
-
-            res = await obs._cmd_close(pos_id)
-
-            self.assertEqual(res["exit"], 202.0)
-            action = db.execute("SELECT our_px FROM copy_action WHERE pos_id=?", (pos_id,)).fetchone()
-            self.assertEqual(action["our_px"], 202.0)
-
-        asyncio.run(run())
-
     def test_live_manual_close_does_not_repeat_failed_executor_cycle(self):
         async def run():
             db = self._db()
@@ -1322,6 +1243,29 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             reduce.assert_awaited_once()
 
         asyncio.run(run())
+
+    def test_target_poll_loop_starts_wallets_at_configured_interval(self):
+        async def run():
+            obs = Observer(self._db(), [], {})
+            obs.addrs = ["0xone", "0xtwo", "0xthree"]
+            starts = []
+
+            async def poll(addr, _since, *, persist_cursor=True):
+                starts.append((addr, time.monotonic()))
+                if len(starts) == 3:
+                    obs.stop = True
+                return now_ms()
+
+            with patch.object(obs, "_poll_fills", side_effect=poll), \
+                    patch.object(config, "TARGET_POLL_START_INTERVAL_S", 0.03):
+                await obs.poll_loop()
+            return starts
+
+        starts = asyncio.run(run())
+
+        self.assertEqual([item[0] for item in starts], ["0xone", "0xtwo", "0xthree"])
+        self.assertGreaterEqual(starts[1][1] - starts[0][1], 0.02)
+        self.assertGreaterEqual(starts[2][1] - starts[1][1], 0.02)
 
     def test_near_full_target_reduce_closes_our_dust_position(self):
         async def run():

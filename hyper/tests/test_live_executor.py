@@ -131,11 +131,6 @@ class FakeLiveBroker:
             frontend_open_orders={"": list(self.orders), "xyz": []},
         )
 
-    def collateral_state(self):
-        return {
-            "balances": [{"coin": "USDC", "total": str(self.total_equity), "hold": "0"}],
-        }
-
 
 class LiveExecutorTests(unittest.TestCase):
     def setUp(self):
@@ -412,8 +407,8 @@ class LiveExecutorTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["unknownPositions"], 0)
-        self.assertEqual(executor.unmatched_ws_fill_count(), 0)
-        self.assertAlmostEqual(result["positions"] and 1.0 or 0.0, 0.0)
+        self.assertEqual(result["positions"], [])
+        self.assertEqual(executor.unmatched_account_fill_count(), 0)
 
     def test_unlinked_manual_fill_remains_unknown(self):
         broker = FakeLiveBroker()
@@ -428,7 +423,7 @@ class LiveExecutorTests(unittest.TestCase):
         result = executor.reconcile()
 
         self.assertFalse(result["ok"])
-        self.assertEqual(executor.unmatched_ws_fill_count(), 1)
+        self.assertEqual(executor.unmatched_account_fill_count(), 1)
 
     def test_reduce_only_uses_coin_exchange_position_during_unrelated_drift(self):
         broker = FakeLiveBroker()
