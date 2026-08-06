@@ -77,7 +77,7 @@ UMask=0077
 """
 
 
-def scan_service(app_dir, py, db, days=14, scan_interval=8):
+def scan_service(app_dir, py, db, days=14, scan_interval=6):
     return f"""[Unit]
 Description=Hyperliquid copy-trade incremental scanner / weekly candidate refresh
 After=network-online.target
@@ -110,7 +110,7 @@ WantedBy=timers.target
 """
 
 
-def challenger_refresh_service(app_dir, py, db, scan_interval=8):
+def challenger_refresh_service(app_dir, py, db, scan_interval=6):
     return f"""[Unit]
 Description=HL frozen Challenger evidence refresh
 After=network-online.target

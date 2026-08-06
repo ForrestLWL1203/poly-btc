@@ -570,7 +570,7 @@ class LiveExecutor:
 
         Venue-enforced reduce-only orders cannot increase exposure. Requiring
         another complete account audit for every queued exit creates avoidable
-        REST bursts; the 15-second periodic reconcile remains authoritative.
+        REST bursts; the 30-second periodic reconcile remains authoritative.
         """
         with self._lock:
             checkpoint = self.db.execute(
@@ -580,10 +580,7 @@ class LiveExecutor:
             ).fetchone()
             if not checkpoint or str(checkpoint[0]) != "ok":
                 return None
-            max_age_ms = max(
-                5_000,
-                int(float(config.LIVE_ACCOUNT_RECONCILE_INTERVAL_S) * 2_000),
-            )
+            max_age_ms = max(5_000, int(float(config.LIVE_REDUCE_PROJECTION_MAX_AGE_S) * 1_000))
             if now_ms() - _iso_ms(checkpoint[1]) > max_age_ms:
                 return None
             positions = [

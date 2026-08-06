@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -470,6 +471,34 @@ class LiveExecutorTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.filled_size, 0.2)
         self.assertEqual(broker.account_snapshot_calls, 0)
+        self.assertNotIn("BTC", broker.positions)
+
+    def test_reduce_only_refreshes_projection_older_than_thirty_seconds(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.2)
+        broker.positions["BTC"] = -0.2
+        stale_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 31))
+        self.db.execute(
+            "INSERT INTO execution_position_projection "
+            "(session_id,dex,coin,signed_size,observed_at) "
+            "VALUES ('live-test','','BTC',-.2,?)",
+            (stale_stamp,),
+        )
+        self.db.execute(
+            "INSERT INTO execution_reconcile_checkpoint(session_id,status,created_at) "
+            "VALUES ('live-test','ok',?)",
+            (stale_stamp,),
+        )
+        self.db.commit()
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(
+            executor, is_buy=True, size=0.2, reduce_only=True, action="close",
+            source_fill_id="stale-cached-close", source_order_id="8", action_seq=2,
+        )
+
+        self.assertAlmostEqual(result.filled_size, 0.2)
+        self.assertEqual(broker.account_snapshot_calls, 1)
         self.assertNotIn("BTC", broker.positions)
 
     def test_increase_stays_blocked_during_unrelated_drift(self):

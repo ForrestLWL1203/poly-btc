@@ -17,6 +17,16 @@ class LauncherTests(unittest.TestCase):
         cfg = DeployConfig()
         rendered = templates.render_all(cfg)
 
+        self.assertEqual(cfg.scan_interval, 6)
+        self.assertIn(
+            "scan --days 14 --scan-interval 6",
+            rendered["/etc/systemd/system/hl-scan.service"],
+        )
+        self.assertIn(
+            "challenger-refresh --scan-interval 6",
+            rendered["/etc/systemd/system/hl-challenger-refresh.service"],
+        )
+
         self.assertIn(
             "OnCalendar=Mon,Thu *-*-* 04:00:00 Asia/Shanghai",
             rendered["/etc/systemd/system/hl-scan.timer"],

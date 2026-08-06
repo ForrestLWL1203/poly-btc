@@ -95,7 +95,8 @@ POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet cursor (tid-de
 TARGET_POLL_START_INTERVAL_S = 5.0  # start at most one Core/held-wallet fills request per interval. Copy
 #                                     latency is intentionally secondary to predictable REST headroom; ten
 #                                     wallets therefore take about 50 seconds per healthy polling round.
-LIVE_ACCOUNT_RECONCILE_INTERVAL_S = 15.0  # authoritative REST-only self-account reconcile cadence
+LIVE_ACCOUNT_RECONCILE_INTERVAL_S = 30.0  # authoritative REST-only self-account reconcile cadence
+LIVE_REDUCE_PROJECTION_MAX_AGE_S = 30.0  # reductions never trust a projection for a whole 30s audit gap twice
 LIVE_SIGNAL_RETRY_BASE_S = 2.0   # durable Live signal inbox retry; exponential, capped below
 LIVE_SIGNAL_RETRY_MAX_S = 30.0
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap

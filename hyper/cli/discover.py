@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI entrypoint for the discovery scanner. Logic lives in :mod:`hyper`.
 
-  python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 8
+  python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 6
   python3 -m hyper.cli.discover --db data/hl.db watchlist
   python3 -m hyper.cli.discover --db data/hl.db harvest
 """
@@ -105,10 +105,10 @@ AUTO_SCAN_EVERY_H = 72.0          # local daemon fallback; VPS uses the Monday/T
 
 def _scan_ns():
     """A scan args-namespace with operational defaults (matches the `scan` subparser); gate/harvest
-    params get overlaid from the DB by params.apply_scanner_params. scan_interval 10s = conservative
-    pace that leaves HL rate headroom for the always-running observer (the priority)."""
+    params get overlaid from the DB by params.apply_scanner_params. The six-second heavy-request pace
+    retains REST headroom because the Observer polls targets sequentially and fully reconciles every 30s."""
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False, full_scan=False,
-                           workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
+                           workers=4, scan_interval=6.0, max_pages=5, min_crypto=0.3,
                            exclude_hft=True, hft_min_hold_min=3.0,
                            max_single_adds=config.MAX_SINGLE_ADDS_PER_EP)
 
@@ -274,9 +274,9 @@ def main() -> int:
     s.add_argument("--max-pages", type=int, default=5, help="cap fill pages/wallet (aggregateByTime -> "
                    "14d is ~1 page; >5 pages of trade-level fills = HFT/MM we reject anyway)")
     s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (rate is capped by --scan-interval)")
-    s.add_argument("--scan-interval", type=float, default=8.0,
+    s.add_argument("--scan-interval", type=float, default=6.0,
                    help="REST pace (s/request) for the scan PROCESS — slow trickle so it shares the IP "
-                        "rate limit with the always-on observer (8s = ~7.5/min, leaves ~67/min for copy)")
+                        "rate limit with the always-on observer (6s = 200 weight/min for weight-20 calls)")
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
     s.add_argument("--full", dest="full_scan", action="store_true", help=argparse.SUPPRESS)
@@ -288,7 +288,7 @@ def main() -> int:
     cr.add_argument("--days", type=int, default=14)
     cr.add_argument("--max-pages", type=int, default=5)
     cr.add_argument("--workers", type=int, default=4)
-    cr.add_argument("--scan-interval", type=float, default=8.0)
+    cr.add_argument("--scan-interval", type=float, default=6.0)
 
     w = sub.add_parser("watchlist", help="show our curated tiny leaderboard")
     w.add_argument("--top", type=int, default=40)

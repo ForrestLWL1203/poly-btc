@@ -32,7 +32,7 @@ class DeployConfig:
 
     # scanner cadence
     scan_days: int = 14
-    scan_interval: int = 8
+    scan_interval: int = 6
     # Stable membership matters more than a daily beauty contest. Monday/Thursday gives a predictable
     # alternating 3/4-day evidence refresh while live Observer risk controls remain continuous.
     scan_calendar: str = "Mon,Thu *-*-* 04:00:00 Asia/Shanghai"

@@ -262,7 +262,7 @@ together. The current broad contract is:
 - Self-account orders, fills, positions, open orders, equity, and available collateral are reconciled through
   REST only. There are no self-account user WebSocket subscriptions, account-WS modes, or account-WS health
   gates. Public BBO/mark WebSockets remain the independent pricing plane.
-- Run a complete authoritative account reconcile at startup and every 15 seconds. Every exposure increase also
+- Run a complete authoritative account reconcile at startup and every 30 seconds. Every exposure increase also
   requires a fresh complete reconcile before sizing and another after submission. A venue-enforced reduction
   may reuse a successful projection no older than 30 seconds, is clamped to the proven official per-coin size,
   and still synchronizes official fills; the periodic reconcile remains the independent backstop.
@@ -364,7 +364,7 @@ Run from repository root with `.venv/bin/python` when available:
 
 # Scanner / maintenance
 .venv/bin/python -m hyper.cli.discover --db data/hl.db serve-rescan
-.venv/bin/python -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
+.venv/bin/python -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 6
 .venv/bin/python -m hyper.cli.discover --db data/hl.db challenger-refresh
 .venv/bin/python -m hyper.cli.discover --db data/hl.db regate
 .venv/bin/python -m hyper.cli.discover --db data/hl.db optimize

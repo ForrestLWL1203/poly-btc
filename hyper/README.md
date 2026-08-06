@@ -72,7 +72,7 @@ of the target's notional; our order scales with actual account equity down to Hy
 Every Live startup reconciles current exchange equity/available collateral, and each exposure increase refreshes
 them again before sizing. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
 prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
-Self-account monitoring is REST-only: startup and the 15-second loop reconcile official fills, positions, open
+Self-account monitoring is REST-only: startup and the 30-second loop reconcile official fills, positions, open
 orders, equity and available collateral. Exposure increases perform complete pre/post account reconciliation.
 Reduce-only actions may reuse a successful projection no older than 30 seconds and are clamped to the official
 per-coin position before submission; the next periodic reconcile remains authoritative. Public BBO and mark
@@ -562,8 +562,8 @@ python3 -m dashboard.server --db data/hl.db --static dashboard/web --host 127.0.
 
 # Scanner daemon / manual commands
 python3 -m hyper.cli.discover --db data/hl.db serve-rescan
-python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 8
-python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
+python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 6
+python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 6
 python3 -m hyper.cli.discover --db data/hl.db regate
 python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
 python3 -m hyper.cli.discover --db data/hl.db storage-maintenance

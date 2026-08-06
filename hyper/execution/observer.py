@@ -3520,7 +3520,7 @@ class Observer:
         sigma = self._sigma(coin)
         async with book.acct_lock:                   # serialize margin allocation across opens
             # Paper reads its latest local balance here. Live first refreshes exchange-authoritative equity
-            # and available collateral so the sizing formula never starts from the 15-second projection cache.
+            # and available collateral so the sizing formula never starts from the 30-second projection cache.
             try:
                 await self._refresh_live_sizing_state()
             except Exception as exc:  # no order was submitted, so the placeholder is safe to remove
