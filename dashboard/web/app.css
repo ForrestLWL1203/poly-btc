@@ -171,10 +171,12 @@ body {
   background: linear-gradient(135deg, #E8CD82, #C9A34D);
   box-shadow: inset 0 1px rgba(255,255,255,.25), 0 5px 15px rgba(201,163,77,.16); }
 .observer-pause-btn:hover { background: linear-gradient(135deg, #F0D993, #D3AD59); }
-.observer-stop-btn { color: var(--red-l); border-color: rgba(255,92,92,.24);
-  background: linear-gradient(135deg, rgba(255,92,92,.16), rgba(180,45,54,.10)); }
-.observer-stop-btn:hover { color: #FFAAAA; border-color: rgba(255,92,92,.38);
-  background: linear-gradient(135deg, rgba(255,92,92,.23), rgba(180,45,54,.16)); }
+.observer-stop-btn { color: #351014; border-color: transparent;
+  background: linear-gradient(135deg, #EE7A82 0%, #D6535D 52%, #B23743 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.24), 0 5px 15px rgba(210,62,73,.22); }
+.observer-stop-btn:hover { color: #2B0B0F; border-color: transparent;
+  background: linear-gradient(135deg, #F58990 0%, #E15F68 52%, #C1414C 100%);
+  box-shadow: inset 0 1px rgba(255,255,255,.28), 0 6px 17px rgba(220,70,80,.28); }
 .observer-control-btn:disabled { opacity: .45; box-shadow: none; }
 .observer-stop-btn:disabled { color: var(--t4); border-color: rgba(255,255,255,.06);
   background: rgba(255,255,255,.035); opacity: .72; }

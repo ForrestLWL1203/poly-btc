@@ -263,6 +263,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn('role="menuitem"', shell)
         self.assertIn('cfg.danger ? "btn-stop" : "btn-accent"', confirm)
         self.assertIn(".observer-pause-btn {", css)
+        self.assertIn("background: linear-gradient(135deg, #EE7A82", css)
         self.assertIn(".observer-stop-btn:disabled {", css)
         self.assertIn(".btn-stop { background: linear-gradient(135deg, #FF4D57, #D72F3B)", css)
 
