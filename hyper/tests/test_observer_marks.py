@@ -1307,6 +1307,31 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_reduce_that_would_leave_sub_minimum_notional_closes_all(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            # A proportional mirror would leave $3.  The shared engine must
+            # upgrade it to a full close because Hyperliquid's minimum is $10.
+            await obs._apply_reduce(
+                "0xaaa", "BTC", ep, now_ms(), 100.0, -1.97, 0.03,
+                closing=False, liq=False, forced_px=100.0,
+            )
+
+            row = db.execute(
+                "SELECT status,rem_size FROM copy_position WHERE pos_id=?", (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "closed")
+            self.assertEqual(row["rem_size"], 0)
+
+        asyncio.run(run())
+
     def test_reload_closes_existing_open_dust_position(self):
         db = self._db()
         pos_id = db.execute(
@@ -1334,6 +1359,37 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(action["action"], "close")
             self.assertAlmostEqual(action["our_qty_delta"], -0.0001)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_reload_never_fake_closes_live_exchange_dust(self):
+        db = self._db()
+        self._activate_live(db)
+        pos_id = db.execute(
+            "INSERT INTO live_copy_position "
+            "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+            "VALUES ('0xaaa','BTC','short','open',30000,10,.3,3,.0001,.0001,?)",
+            (now_iso(),),
+        ).lastrowid
+        db.commit()
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._reload_open()
+
+            row = db.execute(
+                "SELECT status,rem_size FROM live_copy_position WHERE pos_id=?", (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "open")
+            self.assertEqual(row["rem_size"], 0.0001)
+            self.assertIn(("0xaaa", "BTC"), obs.taker.open_ep)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM live_copy_action WHERE pos_id=?", (pos_id,)).fetchone()[0],
+                0,
+            )
         finally:
             asyncio.set_event_loop(None)
             loop.close()

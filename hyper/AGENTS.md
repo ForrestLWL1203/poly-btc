@@ -299,6 +299,8 @@ together. The current broad contract is:
   qualification. One target add OID can execute at most one followed add.
 - Target reductions accumulate until the configured mirrored threshold; a target full close always closes.
   Percentage reductions use target episode/peak size, not our absolute source-vs-copy size.
+- A mirrored reduction that would leave less than Hyperliquid's executable minimum upgrades to a full close.
+  Legacy Live dust must be closed by a venue-confirmed reduce-only order; never mark it closed only in the ledger.
 - Manual 100% close creates the same-wallet/same-coin cooldown only for a losing realized episode. Partial manual
   close leaves the episode managed for later target add/reduce/close.
 - Isolated liquidation is charged to that position. There is no portfolio-wide hard PnL stop that flattens or

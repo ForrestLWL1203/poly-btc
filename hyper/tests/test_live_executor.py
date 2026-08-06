@@ -73,6 +73,11 @@ class FakeLiveBroker:
         self.submit_calls += 1
         outcome, fraction, error = self.outcomes.pop(0)
         filled = intent.size * fraction if outcome in {OrderOutcome.FILLED, OrderOutcome.PARTIAL} else 0.0
+        if intent.reduce_only:
+            current = self.positions.get(intent.coin, 0.0)
+            filled = min(filled, abs(current))
+            if filled + 1e-12 < intent.size and filled > 0.0:
+                outcome = OrderOutcome.PARTIAL
         oid = 1000 + self.submit_calls
         if filled:
             signed = filled if intent.is_buy else -filled
@@ -472,6 +477,30 @@ class LiveExecutorTests(unittest.TestCase):
         self.assertAlmostEqual(result.filled_size, 0.2)
         self.assertEqual(broker.account_snapshot_calls, 0)
         self.assertNotIn("BTC", broker.positions)
+
+    def test_reduce_only_dust_close_uses_venue_minimum_wire_size_without_flipping(self):
+        broker = FakeLiveBroker()
+        self._insert_filled_intent(side="sell", size=0.0001)
+        broker.positions["BTC"] = -0.0001
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(
+            executor, is_buy=True, size=0.000099999999999995,
+            reduce_only=True, action="close", source_fill_id="dust-close",
+            source_order_id="8", action_seq=2,
+        )
+
+        self.assertEqual(result.outcome, "filled")
+        self.assertAlmostEqual(result.filled_size, 0.0001)
+        self.assertEqual(broker.submit_calls, 1)
+        self.assertNotIn("BTC", broker.positions)
+        intent = self.db.execute(
+            "SELECT requested_size,filled_size,state FROM execution_order_intent "
+            "WHERE source_fill_id='dust-close'"
+        ).fetchone()
+        self.assertGreater(intent[0] * 100.0, 10.0)
+        self.assertAlmostEqual(intent[1], 0.0001)
+        self.assertEqual(intent[2], "partial")
 
     def test_reduce_only_refreshes_projection_older_than_thirty_seconds(self):
         broker = FakeLiveBroker()

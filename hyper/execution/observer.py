@@ -1292,7 +1292,13 @@ class Observer:
             rem = rem or 0.0
             sz = sz or 0.0
             dust_px = epx or ((notl or 0.0) / sz if sz else 0.0)
-            if dust_px > 0 and reduce_leaves_dust(rem, 0.0, dust_px):
+            # Paper dust can be settled locally because Paper is the ledger.
+            # A Live row is only a projection of a real exchange position: it
+            # must stay open until LiveExecutor submits a reduce-only close and
+            # authoritative reconciliation proves the venue position is flat.
+            live_exchange_dust = book is self.taker and self.execution_mode == "live"
+            if (dust_px > 0 and reduce_leaves_dust(rem, 0.0, dust_px)
+                    and not live_exchange_dust):
                 self._close_reloaded_dust(book, pid, addr, coin, side, rem, dust_px)
                 closed_dust += 1
                 continue

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_CEILING
 import json
 import os
 import threading
@@ -548,22 +549,61 @@ class LiveExecutor:
         return row[0]
 
     @staticmethod
-    def _safe_reduce_size(reconcile: dict, *, coin: str, is_buy: bool, requested: float) -> float:
-        """Clamp a reduce-only order to the latest official per-coin position.
-
-        This permits management of an existing position during unrelated
-        account drift without ever allowing exposure to increase.
-        """
+    def _official_reducible_size(reconcile: dict, *, coin: str, is_buy: bool) -> float:
         signed_size = sum(
             _float(position.get("signed_size"))
             for position in reconcile.get("positions", [])
             if str(position.get("coin") or "") == str(coin)
         )
         if is_buy:
-            reducible = -signed_size if signed_size < -1e-8 else 0.0
-        else:
-            reducible = signed_size if signed_size > 1e-8 else 0.0
+            return -signed_size if signed_size < -1e-8 else 0.0
+        return signed_size if signed_size > 1e-8 else 0.0
+
+    @classmethod
+    def _safe_reduce_size(cls, reconcile: dict, *, coin: str, is_buy: bool, requested: float) -> float:
+        """Clamp a reduce-only order to the latest official per-coin position.
+
+        This permits management of an existing position during unrelated
+        account drift without ever allowing exposure to increase.
+        """
+        reducible = cls._official_reducible_size(
+            reconcile, coin=coin, is_buy=is_buy,
+        )
+        requested = max(0.0, _float(requested))
+        # A sequence of proportional reductions can leave 0.000099999999999995
+        # in the Python ledger while the exchange reports the exact 0.0001 lot.
+        # Treat that sub-nanounit difference as the same full-close request so
+        # order quantization cannot round the final executable lot down to zero.
+        tolerance = max(1e-12, reducible * 1e-10)
+        if requested >= reducible - tolerance:
+            return max(0.0, reducible)
         return min(max(0.0, _float(requested)), max(0.0, reducible))
+
+    def _dust_reduce_wire_size(self, coin: str, reducible: float, mark: float) -> float:
+        """Return a venue-minimum reduce-only wire size for an exact dust close.
+
+        The exchange-confirmed position remains the economic target.  The wire
+        size may be larger only when that entire target is below the venue's
+        minimum order notional; ``reduceOnly`` makes any excess incapable of
+        opening the opposite direction.  This is the recovery path for legacy
+        dust.  New reductions are prevented from creating it by
+        ``DUST_CLOSE_NOTIONAL`` in the shared Paper/Live engine.
+        """
+        if reducible <= 0.0 or mark <= 0.0:
+            return reducible
+        minimum = Decimal(str(config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD))
+        if Decimal(str(reducible)) * Decimal(str(mark)) >= minimum:
+            return reducible
+        spec = self.broker.market_spec(coin)
+        quantum = Decimal(1).scaleb(-int(spec.sz_decimals))
+        # A long dust close sells below mark by at most the configured exit
+        # slippage.  Size against that worst permitted quote so the submitted
+        # reduce-only IOC still clears the venue minimum after price movement.
+        slippage = Decimal(str(config.LIVE_EXIT_SLIPPAGE_BPS)) / Decimal("10000")
+        minimum_size = (
+            minimum / (Decimal(str(mark)) * (Decimal("1") - slippage))
+        ).quantize(quantum, rounding=ROUND_CEILING)
+        return float(max(Decimal(str(reducible)), minimum_size))
 
     def _fresh_rest_projection(self) -> dict | None:
         """Reuse a recent successful periodic REST checkpoint for reductions.
@@ -861,13 +901,23 @@ class LiveExecutor:
             if not reconcile.get("ok"):
                 if not reduce_only:
                     raise RuntimeError("live_reconcile_required")
+            reducible = 0.0
             if reduce_only:
+                reducible = self._official_reducible_size(
+                    reconcile, coin=coin, is_buy=is_buy,
+                )
                 size = self._safe_reduce_size(
                     reconcile, coin=coin, is_buy=is_buy, requested=size,
                 )
                 if size <= 1e-12:
                     raise RuntimeError("live_reduce_not_proven_by_exchange")
             mark = self._mid(coin)
+            economic_target_size = size
+            dust_oversized_reduce = False
+            if reduce_only and size >= reducible - max(1e-12, reducible * 1e-10):
+                wire_size = self._dust_reduce_wire_size(coin, reducible, mark)
+                dust_oversized_reduce = wire_size > reducible + max(1e-12, reducible * 1e-10)
+                size = wire_size
             recovery_cloids = {
                 attempt_index: self._logical_cloid(
                     coin=coin, action=action, source_address=source_address,
@@ -921,6 +971,18 @@ class LiveExecutor:
                 )
                 results.append(result)
                 remaining = max(0.0, remaining - result.filled_size)
+                if dust_oversized_reduce and result.filled_size > 0.0:
+                    # Do not submit the unfilled oversized remainder.  A fresh
+                    # official reconcile proves whether the exact dust position
+                    # is now flat; if it is not, the caller receives a partial
+                    # result and the durable close retry remains active.
+                    post_reduce = self.reconcile()
+                    left = self._official_reducible_size(
+                        post_reduce, coin=coin, is_buy=is_buy,
+                    )
+                    if left <= 1e-12:
+                        remaining = 0.0
+                    break
                 if remaining <= 1e-12:
                     break
                 if result.error_code not in {None, "ioc_cancel", "no_liquidity"}:
@@ -945,7 +1007,7 @@ class LiveExecutor:
                 confirmed_closed_pnl if confirmed_closed_pnl is not None else sum(item.closed_pnl for item in results),
                 cloids,
                 tuple(oid for item in results for oid in item.oids),
-                "filled" if total + 1e-12 >= size else "partial" if total > 0 else "unfilled",
+                "filled" if total + 1e-12 >= economic_target_size else "partial" if total > 0 else "unfilled",
                 next((item.error_code for item in reversed(results) if item.error_code), None),
             )
 

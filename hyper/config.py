@@ -173,8 +173,10 @@ REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge 
 #                             (10% → at most ~10 partial reduces/position). Smaller unwinds accumulate; the next
 #                             reduce cuts the whole accumulated ratio (self-correcting proportional mirror), and
 #                             a FULL close always executes (exact flat). If he dumps it in 2 big fills, we follow both.
-DUST_CLOSE_NOTIONAL = 1.0    # after a mirrored reduce, if our leftover position is below this notional, close it
-#                             immediately instead of leaving a $0 open-row dust position on the dashboard.
+DUST_CLOSE_NOTIONAL = HYPERLIQUID_MIN_PERP_NOTIONAL_USD
+#                             A mirrored reduce must never leave less than the venue's executable minimum.
+#                             Upgrade that reduce to a full close before submission instead of creating a real
+#                             exchange position that later cannot be closed by a normally-sized order.
 TAIL_CLOSE_ENABLE = True     # protect already-earned episode profit after a mirrored partial reduce.
 TAIL_CLOSE_HARD_REMAIN_PCT = 0.20  # profitable tail at/below this share of our peak position exits outright.
 TAIL_CLOSE_RISK_REMAIN_PCT = 0.35  # larger tails are eligible when their asset-specific liq risk is material.
