@@ -6,7 +6,10 @@ export const SCAN_STAGES = [
   [["fetch_history"], "拉取/修复 37 天历史"],
   [["score_filter"], "结构与重大风险筛查"],
   [["rough_copy"], "Pre-strict 粗 Copy 与跨周活跃"],
-  [["rebuild_watchlist", "prepare_selection_candidates"], "冻结 Strict Top32"],
+  [[
+    "strict_market_snapshot", "retry_strict_market_snapshot",
+    "rebuild_watchlist", "prepare_selection_candidates",
+  ], "冻结 Strict Top32"],
   [[
     "prefetch_selection_paths", "portfolio_tune", "portfolio_prefix_strict",
     "portfolio_prefix_cache_hit", "selection_search",
@@ -23,6 +26,8 @@ export const scanStageLabel = (stage) => {
 // scanned/total ratio is 100%, but strict price-path preparation, portfolio search and publication still
 // remain. Keep the mask honest instead of showing 100% / 00:00 while those bounded phases are running.
 const POST_PROFILE_PROGRESS = {
+  strict_market_snapshot: 80,
+  retry_strict_market_snapshot: 80,
   rebuild_watchlist: 78,
   prepare_selection_candidates: 82,
   prefetch_selection_paths: 86,

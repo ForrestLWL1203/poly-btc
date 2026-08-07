@@ -143,6 +143,11 @@ class WebStaticAssetsTests(unittest.TestCase):
             self.assertNotIn(retired_interaction, rings)
         self.assertNotIn("LIVE · ${execution?.state", jsx)
         self.assertIn('api.cmd("scan_stop", {})', jsx)
+        self.assertIn(
+            '"strict_market_snapshot", "retry_strict_market_snapshot"', mask,
+        )
+        self.assertIn("strict_market_snapshot: 80", mask)
+        self.assertIn("retry_strict_market_snapshot: 80", mask)
         self.assertIn("紧急终止采集", mask)
         self.assertIn("确认紧急终止", mask)
 
