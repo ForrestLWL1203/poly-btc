@@ -168,6 +168,21 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("--bundle", build)
         self.assertIn("--format=iife", build)
 
+    def test_mobile_dashboard_has_pull_to_refresh(self):
+        jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
+        pull = (
+            ROOT / "dashboard" / "web" / "components" / "PullToRefresh.jsx"
+        ).read_text(encoding="utf-8")
+        css = (ROOT / "dashboard" / "web" / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn('<PullToRefresh scrollRef={mainRef} />', jsx)
+        self.assertIn('<main className="main" ref={mainRef}>', jsx)
+        self.assertIn('scroll.scrollTop > 0', pull)
+        self.assertIn('addEventListener("touchmove", onTouchMove, { passive: false })', pull)
+        self.assertIn('window.location.reload()', pull)
+        self.assertIn('"松开刷新"', pull)
+        self.assertIn('.pull-refresh.refreshing', css)
+
     def test_maker_shadow_ui_is_retired(self):
         jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
 

@@ -7,6 +7,7 @@ import { History } from "./components/History.jsx";
 import { ObsMask } from "./components/ObsMask.jsx";
 import { Overview } from "./components/Overview.jsx";
 import { Positions } from "./components/Positions.jsx";
+import { PullToRefresh } from "./components/PullToRefresh.jsx";
 import { Settings } from "./components/Settings.jsx";
 import { Wallets } from "./components/Wallets.jsx";
 import {
@@ -73,6 +74,7 @@ function Dashboard({ onLogout }) {
   const [scanStopError, setScanStopError] = useState(null);
   const [settingsTab, setSettingsTab] = useState(null);
   const [liveStarting, setLiveStarting] = useState(false);
+  const mainRef = useRef(null);
   const mobileNavRef = useRef(null);
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
@@ -168,6 +170,7 @@ function Dashboard({ onLogout }) {
 
   return (
     <div className="shell">
+      <PullToRefresh scrollRef={mainRef} />
       <aside className="side">
         <div className="brand">
           <img className="brand-mark" src="/hyper-echo-mark.svg" alt="" />
@@ -196,7 +199,7 @@ function Dashboard({ onLogout }) {
         <div className="logout" onClick={onLogout}><Ico d={IC.logout} /> 退出登录</div>
       </aside>
 
-      <main className="main">
+      <main className="main" ref={mainRef}>
         <div className="topbar">
           <div>
             {!ACCENT_TITLE_PAGES.has(page) && <div className={"crumb " + (liveMode ? "crumb-live" : "")}>{TITLES[page] && TITLES[page].split(" ")[1]} · {liveMode ? "实盘" : "模拟盘"}</div>}
