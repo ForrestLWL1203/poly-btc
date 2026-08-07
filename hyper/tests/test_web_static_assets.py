@@ -148,8 +148,10 @@ class WebStaticAssetsTests(unittest.TestCase):
         )
         self.assertIn("strict_market_snapshot: 80", mask)
         self.assertIn("retry_strict_market_snapshot: 80", mask)
-        self.assertIn("紧急终止采集", mask)
-        self.assertIn("确认紧急终止", mask)
+        self.assertIn('className="btn btn-accent btn-pill"', mask)
+        self.assertIn("强制终止", mask)
+        self.assertIn("确认强制终止", mask)
+        self.assertNotIn("页面已锁定 · 仅保留紧急终止操作", mask)
 
     def test_dashboard_build_bundles_source_modules(self):
         build = (ROOT / "dashboard" / "web" / "build.sh").read_text(encoding="utf-8")

@@ -84,8 +84,8 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
       </div>
       <div className="mask-stop-zone">
         {!confirmStop ? (
-          <button className="btn btn-stop" onClick={() => setConfirmStop(true)} disabled={stopping}>
-            <Ico d={IC.close} />紧急终止采集
+          <button className="btn btn-accent btn-pill" onClick={() => setConfirmStop(true)} disabled={stopping}>
+            <Ico d={IC.close} />强制终止
           </button>
         ) : (
           <div className="mask-stop-confirm" role="alert">
@@ -93,14 +93,13 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
             <div>
               <button className="btn" onClick={() => setConfirmStop(false)} disabled={stopping}>返回等待</button>
               <button className="btn btn-stop" onClick={onStop} disabled={stopping}>
-                {stopping ? "正在终止…" : "确认紧急终止"}
+                {stopping ? "正在终止…" : "确认强制终止"}
               </button>
             </div>
           </div>
         )}
         {stopError && <div className="mask-stop-error">{stopError}</div>}
       </div>
-      <div className="mask-lock">⚠ 页面已锁定 · 仅保留紧急终止操作</div>
     </div>
   );
 }

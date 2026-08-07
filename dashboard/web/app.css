@@ -155,6 +155,8 @@ body {
 .btn-accent { background: var(--accent-grad); border: none; color: var(--accent-ink);
   box-shadow: inset 0 1px rgba(255,255,255,.18), 0 7px 20px rgba(28, 133, 112, .15); }
 .btn-accent:hover { filter: brightness(1.08); }
+.btn-pill { min-height: 30px; padding: 0 14px; border-radius: 999px; font-size: 11.5px; }
+.btn-pill svg { width: 13px; height: 13px; }
 /* prominent GREEN primary (same treatment as btn-accent, green instead of coral) — the "go/启动" action.
    gradient + shadow per the design handoff applyBtnStyle, so 启动/恢复 carry 暂停's weight, not a weak tint. */
 .btn-go { background: linear-gradient(135deg, #55E5AD, #2EAD80); border: none; color: #06231B;
