@@ -101,18 +101,22 @@ export function Settings({ confirm, initialTab = null, observerState = null, onM
   return (
     <div className="content">
       {saving && <div className="mask"><span className="spin" style={{ width: 34, height: 34, borderWidth: 3 }} /><h2 style={{ marginTop: 22 }}>保存中…</h2></div>}
-      <div className="tabs">
-        <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
-        <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
-        <div className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</div>
-        <div className={"tab account-tab" + (tab === "account" ? " on" : "")} onClick={() => setTab("account")}>账户信息</div>
-        {tab !== "account" && <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
-          style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, padding: "4px 12px" }}>↺ 恢复默认</button>
-        }
+      <div className="settings-toolbar">
+        <div className="tabs" role="tablist" aria-label="设置分类">
+          <button type="button" role="tab" aria-selected={tab === "scanner"}
+            className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集</button>
+          <button type="button" role="tab" aria-selected={tab === "follow"}
+            className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略</button>
+          <button type="button" role="tab" aria-selected={tab === "add"}
+            className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</button>
+          <button type="button" role="tab" aria-selected={tab === "account"}
+            className={"tab account-tab" + (tab === "account" ? " on" : "")} onClick={() => setTab("account")}>账户信息</button>
+        </div>
+        {tab !== "account" && <button className="btn settings-reset" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}>↺ 恢复默认</button>}
       </div>
 
       {tab === "account" ? <AccountSettings confirm={confirm} observerState={observerState}
-        onModeDataChanged={onModeDataChanged} /> : <div className="tbl-wrap">
+        onModeDataChanged={onModeDataChanged} /> : <div className="settings-surface">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}
         {tab === "follow" && <FollowSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers}

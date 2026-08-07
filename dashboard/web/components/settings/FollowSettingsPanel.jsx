@@ -37,51 +37,69 @@ export function FollowSettingsPanel({
 
   return (
     <React.Fragment>
-      {visibleTopRows.map(row)}
-      {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
-        value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
-        onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}
-      <div className="psec-h psec-h-row">
-        <div className="psec-title-block">保证金与杠杆 · BTC固定稳定档，其余按波动率 σ 分档
-          <span>BTC始终使用稳定档；其余市场由 σ 进入中档/剧烈档，这里设各档的单笔保证金% 与杠杆上限</span></div>
-        {autoTuneParam && <div className={"psec-switch" + (dirty[AUTO_TUNE_KEY] ? " dirty" : "")} title={autoTuneParam.desc}>
-          <span>新代际自动调参</span>
-          <div className={"toggle " + (vals[AUTO_TUNE_KEY] ? "on" : "")}
-            onClick={() => editableParam(autoTuneParam) && onChange(AUTO_TUNE_KEY, !vals[AUTO_TUNE_KEY])}
-            style={{ opacity: editableParam(autoTuneParam) ? 1 : .5 }}>
-            <div className="knob" />
+      <section className="settings-section settings-section-basic">
+        <div className="settings-section-head">
+          <div><b>基础跟单规则</b><span>控制开仓过滤、顺势门槛与持仓保护</span></div>
+        </div>
+        <div className="settings-param-grid">{visibleTopRows.map(row)}</div>
+        {blacklistParam && <div className="settings-wide-card">
+          <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
+            value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
+            onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />
+        </div>}
+      </section>
+
+      <section className="settings-section settings-section-margin">
+        <div className="settings-section-head settings-section-head-row">
+          <div><b>保证金与杠杆</b><span>BTC 固定稳定档，其余市场按波动率 σ 自动分档</span></div>
+          {autoTuneParam && <div className={"psec-switch" + (dirty[AUTO_TUNE_KEY] ? " dirty" : "")} title={autoTuneParam.desc}>
+            <span>新代际自动调参</span>
+            <div className={"toggle " + (vals[AUTO_TUNE_KEY] ? "on" : "")}
+              onClick={() => editableParam(autoTuneParam) && onChange(AUTO_TUNE_KEY, !vals[AUTO_TUNE_KEY])}
+              style={{ opacity: editableParam(autoTuneParam) ? 1 : .5 }}>
+              <div className="knob" />
+            </div>
+          </div>}
+        </div>
+        {marginEquityParam && <div className="settings-margin-card">
+          {row(marginEquityParam)}
+          <div className="param-inline-note">
+            已有仓位不变；Core 资格与组合回测在下次重采或重评后更新。
           </div>
         </div>}
-      </div>
-      {marginEquityParam && row(marginEquityParam)}
-      {marginEquityParam && <div className="param-inline-note">
-        同时缩放每笔新仓的保证金计算基数，并限制累计新仓保证金占用；达到额度后停止新开仓。剩余权益继续供已有仓位加仓与风险缓冲使用。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
-      </div>}
-      {validationErrors.length > 0 && (
-        <div className="param-errors">
-          {validationErrors.map((e, i) => <div key={i}>{e}</div>)}
-        </div>
-      )}
-      {TIER_GROUPS.map(group => {
-        const open = openTiers[group.key];
-        const rows = [group.lev, group.cap].map(k => paramsByKey.get(k)).filter(Boolean);
-        return (
-          <div key={group.key}>
-            <div className={"expand-head" + (open ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, [group.key]: !o[group.key] }))}>
-              <span style={{ color: "var(--t3)", width: 12 }}>{open ? "▾" : "▸"}</span>
-              <span className={"pill " + group.tint}>{group.label}</span>
-              <span className="muted" style={{ fontSize: 12 }}>{group.sub}</span>
-              {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                保证金 {fParam(vals[group.max], "pct")}% · 杠杆 ≤{fParam(vals[group.lev], "x")}x · 单币上限 {fParam(vals[group.cap], "pct")}%
-              </span>}
-            </div>
-            {open && <div className="expand-body">
-              <RangeRow group={group} paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
-              {rows.map(row)}
-            </div>}
+        {validationErrors.length > 0 && (
+          <div className="param-errors">
+            {validationErrors.map((e, i) => <div key={i}>{e}</div>)}
           </div>
-        );
-      })}
+        )}
+        <div className="settings-tier-grid">
+          {TIER_GROUPS.map(group => {
+            const open = openTiers[group.key];
+            const rows = [group.lev, group.cap].map(k => paramsByKey.get(k)).filter(Boolean);
+            return (
+              <div className={"settings-tier-card" + (open ? " open" : "")} key={group.key}>
+                <div className={"expand-head settings-tier-head" + (open ? " open" : "")}
+                  onClick={() => setOpenTiers(o => ({ ...o, [group.key]: !o[group.key] }))}>
+                  <span className="settings-caret">{open ? "▾" : "▸"}</span>
+                  <div className="settings-tier-copy">
+                    <span className={"pill " + group.tint}>{group.label}</span>
+                    <span>{group.sub}</span>
+                  </div>
+                  <div className="settings-tier-summary">
+                    <span><b>{fParam(vals[group.max], "pct")}%</b>保证金</span>
+                    <span><b>≤{fParam(vals[group.lev], "x")}x</b>杠杆</span>
+                    <span><b>{fParam(vals[group.cap], "pct")}%</b>单币上限</span>
+                  </div>
+                </div>
+                {open && <div className="expand-body settings-tier-body">
+                  <RangeRow group={group} paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
+                  {rows.map(row)}
+                </div>}
+              </div>
+            );
+          })}
+        </div>
+      </section>
     </React.Fragment>
   );
 }
