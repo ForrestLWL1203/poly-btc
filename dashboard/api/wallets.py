@@ -6,6 +6,7 @@ import time
 from hyper.copy.economics import (
     PROFITABILITY_BASIS,
     conservative_profitability,
+    copy_stability_7d,
 )
 from hyper.copy.sector import apply_allowed_sector_copy_metrics
 from hyper.selection import follow_score
@@ -76,6 +77,8 @@ def _selection_reason_text(row):
         "source_30d_conservative_pnl_not_positive": "源钱包扣除当前浮亏后30日不盈利",
         "source_7d_conservative_pnl_not_positive": "源钱包扣除当前浮亏后7日不盈利",
         "copy_episode_evidence_insufficient": "Copy完整已平回合少于7个",
+        "copy_7d_segment_evidence_insufficient": "最近28天存在7日分段已平样本不足",
+        "copy_7d_segment_not_profitable": "最近28天并非四个7日分段全部盈利",
         "rough_copy_30d_not_profitable": "粗略Copy 30日未盈利",
         "rough_copy_7d_not_profitable": "粗略Copy最近7日未盈利",
         "copy_30d_closed_pnl_not_positive": "Copy 30日已平净利润不为正",
@@ -794,6 +797,7 @@ def ep_wallet_detail(db, addr, qs=None):
         f"FROM {position_table} cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
     display_metrics = apply_allowed_sector_copy_metrics(dict(pr)) if pr else {}
+    stability7d = copy_stability_7d(display_metrics)
     copy_windows = {
         "30d": _detail_copy_window(display_metrics, 30),
         "7d": _detail_copy_window(display_metrics, 7),
@@ -820,6 +824,7 @@ def ep_wallet_detail(db, addr, qs=None):
         "copyReplay": {
             "stage": "strict" if pr and _col(pr, "replayed_at") else "rough",
             "windows": copy_windows,
+            "stability7d": stability7d,
         },
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
         "forwardWinRatePct": (win_n / n * 100) if n else None,

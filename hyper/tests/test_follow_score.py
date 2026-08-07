@@ -16,6 +16,29 @@ from hyper.selection.follow_score import (
 NOW = 2_000_000_000_000
 
 
+def stability_7d(*returns):
+    values = list(returns or (.10, .08, .06, .04))
+    return {
+        "basis": "four_non_overlapping_closed_episode_7d_v1",
+        "rangeDays": 28,
+        "segmentDays": 7,
+        "evidenceComplete": len(values) == 4 and all(value is not None for value in values),
+        "segments": [
+            {
+                "index": index,
+                "startMs": NOW - (5 - index) * 7 * 86_400_000,
+                "endMs": NOW - (4 - index) * 7 * 86_400_000,
+                "closedN": 1 if value is not None else 0,
+                "closedPnl": (value or 0.0) * 10_000,
+                "return": value,
+                "profitFactor": 2.0 if value is not None and value > 0 else 0.5,
+                "liquidations": 0,
+            }
+            for index, value in enumerate(values, 1)
+        ],
+    }
+
+
 def operational_activity(**overrides):
     value = {
         "operational": True,
@@ -57,6 +80,7 @@ def evidence(**overrides):
         "copy_bt_7d_unrealized_pnl": 0.0,
         "copy_bt_window_start_equity": 10_000.0,
         "copy_bt_7d_window_start_equity": 12_000.0,
+        "copy_bt_stability_7d": stability_7d(),
         "copy_bt_open_fill_rate": 0.90,
         "actionable_open_rate": 0.90,
         "copy_bt_behavior_replication_rate": 0.85,
@@ -100,7 +124,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(low["coreEligible"])
         self.assertTrue(low["checks"]["officialPerpPassed"])
 
-    def test_profit_priority_uses_dynamic_equity_and_70_30(self):
+    def test_profit_priority_uses_dynamic_equity_and_four_segment_stability(self):
         priority, detail = compute_profit_priority(evidence(
             copy_bt_net_pnl=4_000,
             copy_bt_closed_net_pnl=4_000,
@@ -108,9 +132,42 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_7d_net_pnl=1_000,
             copy_bt_7d_closed_net_pnl=1_000,
             copy_bt_7d_window_start_equity=10_000,
+            copy_bt_stability_7d=stability_7d(.12, .10, .08, .02),
         ))
-        self.assertAlmostEqual(priority, .70 * .20 + .30 * .10)
-        self.assertEqual(detail["weights"], {"30d": .70, "7d": .30})
+        self.assertAlmostEqual(priority, .60 * .20 + .25 * .08 + .15 * .02)
+        self.assertEqual(detail["weights"], {
+            "30d": .60, "segment7dAverage": .25, "segment7dWorst": .15,
+        })
+
+    def test_legacy_generation_without_segments_keeps_immutable_70_30_priority(self):
+        metrics = evidence()
+        metrics.pop("copy_bt_stability_7d")
+
+        priority, detail = compute_profit_priority(metrics)
+
+        self.assertAlmostEqual(priority, .70 * .30 + .30 * (1_000 / 12_000))
+        self.assertTrue(detail["legacy"])
+        self.assertTrue(judge("strict", copy_bt_stability_7d={})["coreEligible"])
+
+    def test_new_generation_requires_evidence_and_profit_in_every_segment(self):
+        incomplete = judge(
+            "rough", copy_bt_stability_7d=stability_7d(.10, None, .08, .04),
+        )
+        negative = judge(
+            "strict", copy_bt_stability_7d=stability_7d(.10, .08, -.01, .04),
+        )
+
+        self.assertEqual(
+            incomplete["firstFailure"], "copy_7d_segment_evidence_insufficient",
+        )
+        self.assertEqual(
+            negative["firstFailure"], "copy_7d_segment_not_profitable",
+        )
+        priority, detail = compute_profit_priority(evidence(
+            copy_bt_stability_7d=stability_7d(.10, None, .08, .04),
+        ))
+        self.assertIsNone(priority)
+        self.assertFalse(detail["available"])
 
     def test_follow_score_is_primary_then_profit_tie_breaks_are_stable(self):
         rows = [

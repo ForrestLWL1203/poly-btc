@@ -65,6 +65,16 @@ class WalletDetailGuardedDb:
 
 
 class ApiWalletsPerfTests(unittest.TestCase):
+    def test_four_segment_rejection_reasons_are_operator_readable(self):
+        for reason, expected in (
+            ("copy_7d_segment_evidence_insufficient", "最近28天存在7日分段已平样本不足"),
+            ("copy_7d_segment_not_profitable", "最近28天并非四个7日分段全部盈利"),
+        ):
+            self.assertEqual(
+                api_wallets._selection_reason_text({"selection_reason": reason}),
+                expected,
+            )
+
     def test_sidebar_count_matches_effective_followed_core_total(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -507,8 +517,22 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES('g1','published',1,1,1,'now')"
             )
             policy = json.dumps({"allowed": ["stock"], "stock": {"allow": True}, "crypto": {"allow": False}})
+            stability = {
+                "basis": "four_non_overlapping_closed_episode_7d_v1",
+                "rangeDays": 28,
+                "segmentDays": 7,
+                "evidenceComplete": True,
+                "segments": [
+                    {"index": index, "closedN": 2, "closedPnl": pnl,
+                     "return": ret, "profitFactor": 2.0, "liquidations": 0}
+                    for index, (pnl, ret) in enumerate(
+                        ((40, .04), (30, .03), (20, .02), (10, .01)), 1,
+                    )
+                ],
+            }
             sectors = json.dumps({
-                "stock": {"30": {"copy_net_pnl": 307, "closed_n": 11, "wins": 6},
+                "stock": {"30": {"copy_net_pnl": 307, "closed_n": 11, "wins": 6,
+                                   "stability_7d": stability},
                           "14": {"copy_net_pnl": 293, "closed_n": 9, "wins": 5},
                           "7": {"copy_net_pnl": 171, "closed_n": 6, "wins": 3}},
                 "crypto": {"30": {"copy_net_pnl": -525, "closed_n": 2, "wins": 0}},
@@ -552,6 +576,11 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(detail["copyReplay"]["stage"], "strict")
         self.assertEqual(detail["copyReplay"]["windows"]["30d"]["qualificationPnl"], 307)
         self.assertEqual(detail["copyReplay"]["windows"]["30d"]["closedN"], 11)
+        self.assertTrue(detail["copyReplay"]["stability7d"]["evidenceComplete"])
+        self.assertEqual(
+            [segment["return"] for segment in detail["copyReplay"]["stability7d"]["segments"]],
+            [.04, .03, .02, .01],
+        )
         self.assertNotIn("copyBacktest14dNetPnl", wallet)
         self.assertNotIn("copyReplayParamsHash", wallet)
         self.assertEqual(wallet["selectionReasonText"], "个人资格与共享账户组合均已通过")

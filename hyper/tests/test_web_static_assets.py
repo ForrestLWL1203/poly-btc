@@ -219,6 +219,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("粗略 fills-only Copy", drawer)
         self.assertIn("copyWindowRows", drawer)
         self.assertIn("copyReplay", drawer)
+        self.assertIn("最近 28 天 · 四段稳定性", drawer)
+        self.assertIn("60%×30日 + 25%×四段均值 + 15%×最差", drawer)
         for retired_card in (
             "Pre-strict 可跟性与重复性",
             "源钱包质量",

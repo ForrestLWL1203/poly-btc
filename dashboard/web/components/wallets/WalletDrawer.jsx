@@ -51,6 +51,8 @@ export function WalletDrawer({ address, onClose }) {
   const copyReplay = (d && d.copyReplay) || {};
   const copyRows = copyWindowRows(copyReplay.windows);
   const copy30 = copyRows.find(([label]) => label === "30 天");
+  const stability = copyReplay.stability7d || {};
+  const stabilitySegments = stability.evidenceComplete ? (stability.segments || []) : [];
   const roleView = !d ? null : d.operatorIntent === "draining"
     ? { label: "仅退出中", detail: "已停止新开仓和加仓；捕获持仓全部结案后自动决定恢复或转候选。", tone: "warn" }
     : d.operatorIntent === "requalify"
@@ -97,22 +99,36 @@ export function WalletDrawer({ address, onClose }) {
               <div><span>实际跟单</span><b>{d.recordsTotal}</b><em>{d.closedN} 已平 · {d.openN} 在持</em></div>
               <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
               <div><span>30日保守收益</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 个已平回合" : "暂无数据"}</em></div>
-              <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>70%×30日 + 30%×7日{d.profitRank != null ? ` · 跟单序 #${d.profitRank}` : ""}</em></div>
+              <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>60%×30日 + 25%×四段均值 + 15%×最差{d.profitRank != null ? ` · 跟单序 #${d.profitRank}` : ""}</em></div>
             </div>
 
             <div className="wallet-decision-grid">
               <DecisionCard title={copyReplay.stage === "strict" ? "最终严格 Copy · 保守资格" : "粗略 fills-only Copy · 保守资格"} tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
-                  <div className="score-window-grid">
-                    {copyRows.map(([label, pnl, n, returnPct, startEquity, economics]) => (
-                      <div className="score-window" key={label}>
-                        <span>{label}</span>
-                        <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
-                        <small>{returnPct != null ? `${fSign(returnPct, 1)}% · ` : ""}{n || 0} 回合{startEquity != null ? ` · 期初 $${fNum(startEquity, 0)}` : ""}</small>
-                        {economics && <small>已平 {fSign(economics.closedPnl, 0)} · 浮亏 {fSign(-Number(economics.openLoss || 0), 0)}{Number(economics.openProfitReference || 0) > 0 ? ` · 浮盈参考 ${fSign(economics.openProfitReference, 0)}` : ""}</small>}
+                  <React.Fragment>
+                    <div className="score-window-grid">
+                      {copyRows.map(([label, pnl, n, returnPct, startEquity, economics]) => (
+                        <div className="score-window" key={label}>
+                          <span>{label}</span>
+                          <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
+                          <small>{returnPct != null ? `${fSign(returnPct, 1)}% · ` : ""}{n || 0} 回合{startEquity != null ? ` · 期初 $${fNum(startEquity, 0)}` : ""}</small>
+                          {economics && <small>已平 {fSign(economics.closedPnl, 0)} · 浮亏 {fSign(-Number(economics.openLoss || 0), 0)}{Number(economics.openProfitReference || 0) > 0 ? ` · 浮盈参考 ${fSign(economics.openProfitReference, 0)}` : ""}</small>}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="wallet-decision-title">最近 28 天 · 四段稳定性</div>
+                    {stabilitySegments.length === 4 ? (
+                      <div className="score-window-grid">
+                        {stabilitySegments.map((segment, index) => (
+                          <div className="score-window" key={segment.index || index}>
+                            <span>第 {index + 1} 段 7 天</span>
+                            <b className={Number(segment.return || 0) > 0 ? "up" : "down"}>{fSign(Number(segment.return || 0) * 100, 1)}%</b>
+                            <small>{segment.closedN || 0} 个已平回合 · 净利 {fSign(segment.closedPnl || 0, 0)}</small>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    ) : <p>本代没有完整四段证据；旧代继续按原评分只读展示。</p>}
+                  </React.Fragment>
                 ) : <p>暂无可用 copy 回测窗口，先按历史评分和实盘记录观察。</p>}
               </DecisionCard>
 

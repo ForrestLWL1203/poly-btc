@@ -263,6 +263,7 @@ def _compact_result(result: Mapping) -> dict:
         "current_bag_hours",
         "wallet_forward_loss_blocks",
         "initial_margin_equity", "window_start_equity",
+        "stability_7d",
     )
     return {k: result.get(k) for k in keys if k in result}
 
@@ -568,6 +569,8 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
     out = dict(metrics)
     primary = _evidence_window(copy_json, evidence_sectors, 30)
     if primary:
+        if isinstance(primary.get("stability_7d"), Mapping):
+            out["copy_bt_stability_7d"] = dict(primary["stability_7d"])
         out["copy_bt_net_pnl"] = primary["copy_net_pnl"]
         out["copy_bt_closed_net_pnl"] = primary.get(
             "closed_net_pnl",

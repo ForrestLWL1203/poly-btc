@@ -120,6 +120,8 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
             windows = scanner_copy_bt.copy_bt_results(addr, fills, now, p)
 
         self.assertEqual(replay.call_count, 1)
+        self.assertIn("stability_7d", windows[30])
+        self.assertEqual(windows[30]["stability_7d"]["rangeDays"], 28)
         self.assertGreater(windows[7]["window_start_equity"], 10_000.0)
         self.assertGreater(windows[7]["positions"][0]["margin"], 300.0)
         self.assertEqual(windows[7]["target_open_events"], 1)
@@ -132,6 +134,10 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(
             metrics["copy_bt_window_start_equity"],
             windows[30]["window_start_equity"],
+        )
+        self.assertEqual(
+            metrics["copy_bt_stability_7d"],
+            windows[30]["stability_7d"],
         )
 
     def test_open_position_terminal_mark_is_included_in_every_economic_window(self):

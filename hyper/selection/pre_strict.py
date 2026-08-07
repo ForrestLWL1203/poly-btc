@@ -11,12 +11,17 @@ from typing import Mapping, Optional
 
 from hyper import config
 from hyper.copy.copy_policy import load_copy_policy
-from hyper.copy.economics import conservative_profitability, open_loss_ratio_within_limit
+from hyper.copy.economics import (
+    conservative_profitability,
+    copy_stability_7d,
+    open_loss_ratio_within_limit,
+    stable_profit_priority,
+)
 
 
 DAY_MS = 86_400_000
-POLICY_VERSION = "pre-strict32-pf125-activity-retention-v3"
-SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v8"
+POLICY_VERSION = "pre-strict32-pf125-four-segment-stability-v4"
+SELECTION_MODEL_VERSION = "selection-pre-strict32-stable-profit-retention-v9"
 
 
 def _num(value, default=0.0):
@@ -189,6 +194,8 @@ def evaluate(
     source7 = _source_economics(metrics, 7)
     copy30 = _copy_economics(metrics, 30)
     copy7 = _copy_economics(metrics, 7)
+    stability7d = copy_stability_7d(metrics)
+    stability_required = bool(stability7d.get("present"))
     source_lottery = conditional_lottery(
         win_rate=metrics.get("source_win_rate_30d"),
         top3_profit_share=metrics.get("source_top3_profit_share"),
@@ -216,6 +223,18 @@ def evaluate(
         "dataComplete": data_status in {"", "valid", "ok"} and evidence_status != "invalid",
         "sourceClosedSample": int(_num(metrics.get("source_episode_n_30d"))) >= 7,
         "copyClosedSample": int(_num(metrics.get("copy_bt_closed_n"))) >= 7,
+        # A present payload belongs to the new model and must prove all four buckets. Missing evidence is
+        # never coerced to a flat week. Absence remains a compatibility path for immutable old generations.
+        "copyStabilitySegmentEvidence": (
+            not stability_required or bool(stability7d.get("evidenceComplete"))
+        ),
+        "copyStabilitySegmentsPositive": (
+            not stability_required
+            or (
+                bool(stability7d.get("evidenceComplete"))
+                and int(stability7d.get("positiveSegments") or 0) == 4
+            )
+        ),
         "sourceClosedProfit30d": source30["closedPnl"] > 0.0,
         "sourceClosedProfit7d": source7["closedPnl"] > 0.0,
         "sourceOpenLossRatio": open_loss_ratio_within_limit(source30),
@@ -255,6 +274,8 @@ def evaluate(
         ("copy_single_liquidation_loss_over_8pct", "singleLiquidationLossWithinLimit", False),
         ("source_episode_evidence_insufficient", "sourceClosedSample", False),
         ("copy_episode_evidence_insufficient", "copyClosedSample", False),
+        ("copy_7d_segment_evidence_insufficient", "copyStabilitySegmentEvidence", False),
+        ("copy_7d_segment_not_profitable", "copyStabilitySegmentsPositive", False),
         ("source_30d_closed_pnl_not_positive", "sourceClosedProfit30d", False),
         ("source_7d_closed_pnl_not_positive", "sourceClosedProfit7d", False),
         ("source_open_loss_over_50pct", "sourceOpenLossRatio", False),
@@ -284,7 +305,10 @@ def evaluate(
             break
     return30 = _num(copy30.get("qualificationReturn"))
     return7 = _num(copy7.get("qualificationReturn"))
-    priority = 0.70 * return30 + 0.30 * return7
+    priority, priority_meta = stable_profit_priority(
+        return30, return7, stability7d,
+    )
+    priority = _num(priority)
     tier = (
         "primary"
         if first_failure is None
@@ -306,6 +330,8 @@ def evaluate(
         "copyPayoffRatio": _num(metrics.get("copy_bt_payoff_ratio")),
         "sourceEconomics": {"30": source30, "7": source7},
         "copyEconomics": {"30": copy30, "7": copy7},
+        "stability7d": stability7d,
+        "profitPriorityDetail": priority_meta,
         "profitPriority": priority,
         "tier": tier,
         "policyVersion": POLICY_VERSION,

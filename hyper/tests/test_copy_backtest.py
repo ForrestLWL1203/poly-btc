@@ -3,6 +3,7 @@ import unittest
 from hyper.copy.copy_backtest import (
     PreparedPricePath,
     deployment_distribution,
+    four_segment_7d_stability,
     liquidation_loss_metrics,
     path_risk_metrics,
     prepare_price_path,
@@ -35,6 +36,55 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_four_segment_stability_uses_four_non_overlapping_realized_weeks(self):
+        day = 86_400_000
+        end_ms = 28 * day
+        result = {
+            "initial_margin_equity": 10_000.0,
+            "positions": [
+                {"closed_at": 2 * day, "net_pnl": 100.0, "status": "closed"},
+                {"closed_at": 9 * day, "net_pnl": 200.0, "status": "closed"},
+                {"closed_at": 16 * day, "net_pnl": -50.0, "status": "liquidated"},
+                {"closed_at": 23 * day, "net_pnl": 400.0, "status": "closed"},
+            ],
+        }
+
+        stability = four_segment_7d_stability(result, end_ms)
+
+        self.assertTrue(stability["evidenceComplete"])
+        self.assertEqual(stability["availableSegments"], 4)
+        self.assertEqual(stability["positiveSegments"], 3)
+        self.assertEqual(
+            [segment["closedN"] for segment in stability["segments"]],
+            [1, 1, 1, 1],
+        )
+        expected = [.01, 200 / 10_100, -50 / 10_300, 400 / 10_250]
+        for actual, wanted in zip(
+            (segment["return"] for segment in stability["segments"]), expected,
+        ):
+            self.assertAlmostEqual(actual, wanted)
+        self.assertAlmostEqual(stability["averageReturn"], sum(expected) / 4)
+        self.assertAlmostEqual(stability["worstReturn"], expected[2])
+        self.assertEqual(stability["segments"][2]["liquidations"], 1)
+
+    def test_four_segment_stability_keeps_missing_week_as_missing_evidence(self):
+        day = 86_400_000
+        end_ms = 28 * day
+        stability = four_segment_7d_stability({
+            "initial_margin_equity": 10_000.0,
+            "positions": [
+                {"closed_at": 2 * day, "net_pnl": 100.0, "status": "closed"},
+                {"closed_at": 16 * day, "net_pnl": 50.0, "status": "closed"},
+                {"closed_at": 23 * day, "net_pnl": 80.0, "status": "closed"},
+            ],
+        }, end_ms)
+
+        self.assertFalse(stability["evidenceComplete"])
+        self.assertEqual(stability["availableSegments"], 3)
+        self.assertIsNone(stability["segments"][1]["return"])
+        self.assertIsNone(stability["averageReturn"])
+        self.assertIsNone(stability["worstReturn"])
+
     def test_deployment_distribution_is_time_weighted_and_reports_tail_percentiles(self):
         result = deployment_distribution([
             {"time": 0, "pct": 0.0},

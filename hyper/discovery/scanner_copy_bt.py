@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 
 from hyper import config, params
-from hyper.copy.copy_backtest import prepare_replay_fills, run_backtest, slice_backtest_result
+from hyper.copy.copy_backtest import (
+    four_segment_7d_stability,
+    prepare_replay_fills,
+    run_backtest,
+    slice_backtest_result,
+)
 from hyper.copy.copy_data import market_evidence_key, normalize_copyable_fills
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
@@ -195,6 +200,9 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None,
         )
         sliced["evidence_status"] = "observed" if sliced["has_evidence"] else "no_open_events"
         out[int(days)] = sliced
+    primary = out.get(primary_days)
+    if primary is not None:
+        primary["stability_7d"] = four_segment_7d_stability(warm, now_ms)
     return out
 
 
@@ -274,6 +282,8 @@ def record_primary_copy_bt(metrics, result):
         copy_current_open_loss_frac=result.get("current_open_loss_frac"),
         copy_current_bag_hours=result.get("current_bag_hours"),
     )
+    if result.get("stability_7d") is not None:
+        metrics["copy_bt_stability_7d"] = dict(result["stability_7d"])
     for key in (
         "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
         "positive_episode_n", "negative_episode_n", "top1_profit_share",

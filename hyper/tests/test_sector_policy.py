@@ -22,6 +22,21 @@ def bt(net, closed, wins=None, target_open=None, opened=None):
 DAY_MS = 86400_000
 
 
+def stability_7d(*returns):
+    values = list(returns or (.04, .03, .02, .01))
+    return {
+        "basis": "four_non_overlapping_closed_episode_7d_v1",
+        "rangeDays": 28,
+        "segmentDays": 7,
+        "evidenceComplete": True,
+        "segments": [
+            {"index": index, "closedN": 1, "closedPnl": value * 10_000,
+             "return": value, "profitFactor": 2.0, "liquidations": 0}
+            for index, value in enumerate(values, 1)
+        ],
+    }
+
+
 def replay_window(net, returns, *, now_ms, liquidations=0):
     positions = []
     for index, value in enumerate(returns):
@@ -370,6 +385,7 @@ class SectorPolicyTests(unittest.TestCase):
                     "30": {
                         **bt(1500, 10), "initial_margin_equity": 10_000,
                         "window_start_equity": 12_000,
+                        "stability_7d": stability_7d(.05, .04, .03, .02),
                         "max_liquidation_loss_pct": 0.061,
                         "max_liquidation_loss": 610,
                         "max_liquidation_loss_coin": "BTC",
@@ -401,6 +417,22 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted["copy_bt_max_liquidation_loss_pct"], 0.061)
         self.assertEqual(adjusted["copy_bt_max_liquidation_loss"], 610)
         self.assertEqual(adjusted["copy_bt_max_liquidation_loss_coin"], "BTC")
+        self.assertEqual(
+            adjusted["copy_bt_stability_7d"]["segments"][3]["return"], .02,
+        )
+
+    def test_compact_sector_replay_preserves_four_segment_stability(self):
+        compact = sector.compact_sector_results({
+            "crypto": {
+                30: {**bt(1500, 10), "stability_7d": stability_7d()},
+                14: bt(700, 6),
+                7: bt(300, 5),
+            },
+        })
+
+        self.assertEqual(
+            compact["crypto"]["30"]["stability_7d"]["rangeDays"], 28,
+        )
 
     def test_mix_wallet_uses_joint_account_replay_instead_of_summing_two_accounts(self):
         metrics = {

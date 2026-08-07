@@ -13,6 +13,7 @@ import bisect
 
 from hyper import config
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
+from .economics import STABILITY_7D_BASIS
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
@@ -2055,6 +2056,87 @@ def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None,
                     overrides=overrides, market_ctx=market_ctx,
                     price_path_meta=price_path_meta, valuation_marks=valuation_marks,
                     valuation_asof_ms=valuation_asof_ms).run(fills, price_path=price_path)
+
+
+def four_segment_7d_stability(result: dict, end_ms: int) -> dict:
+    """Split the latest 28 days into four non-overlapping realized seven-day segments.
+
+    This consumes the positions already produced by one continuous warm replay.  It deliberately uses only
+    completed fee-paid Episodes so Rough and Strict share the same definition without four extra historical
+    mark surfaces, price-path passes or API requests.  The existing current-7d conservative gate continues
+    to charge terminal open losses separately.
+    """
+    end_ms = int(end_ms)
+    day_ms = 86_400_000
+    segment_ms = 7 * day_ms
+    closed = sorted(
+        (
+            dict(position) for position in (result or {}).get("positions") or ()
+            if int(position.get("closed_at") or 0) > 0
+            and int(position.get("closed_at") or 0) <= end_ms
+        ),
+        key=lambda position: int(position.get("closed_at") or 0),
+    )
+    initial_equity = (
+        f((result or {}).get("initial_margin_equity"))
+        or float(config.INITIAL_BALANCE)
+    )
+    segments = []
+    range_start = end_ms - 4 * segment_ms
+    for offset in range(4):
+        start_ms = range_start + offset * segment_ms
+        segment_end_ms = start_ms + segment_ms
+        rows = [
+            position for position in closed
+            if int(position.get("closed_at") or 0) >= start_ms
+            and (
+                int(position.get("closed_at") or 0) < segment_end_ms
+                or (offset == 3 and int(position.get("closed_at") or 0) <= segment_end_ms)
+            )
+        ]
+        realized_before = sum(
+            f(position.get("net_pnl")) for position in closed
+            if int(position.get("closed_at") or 0) < start_ms
+        )
+        start_equity = max(1.0, initial_equity + realized_before)
+        pnls = [f(position.get("net_pnl")) for position in rows]
+        closed_pnl = sum(pnls)
+        gross_profit = sum(value for value in pnls if value > 0.0)
+        gross_loss = -sum(value for value in pnls if value < 0.0)
+        segments.append({
+            "index": offset + 1,
+            "startMs": start_ms,
+            "endMs": segment_end_ms,
+            "closedN": len(rows),
+            "closedPnl": closed_pnl,
+            "startEquity": start_equity,
+            # Missing evidence stays NULL; it must never become a synthetic flat week.
+            "return": closed_pnl / start_equity if rows else None,
+            "profitFactor": (
+                gross_profit / gross_loss
+                if gross_loss > 0.0 else 999.0 if gross_profit > 0.0 else 0.0
+            ),
+            "liquidations": sum(
+                str(position.get("status") or "") == "liquidated"
+                for position in rows
+            ),
+        })
+    usable = [item for item in segments if item["return"] is not None]
+    complete = len(usable) == 4
+    values = [float(item["return"]) for item in usable]
+    return {
+        "basis": STABILITY_7D_BASIS,
+        "rangeDays": 28,
+        "segmentDays": 7,
+        "asOfMs": end_ms,
+        "evidenceComplete": complete,
+        "availableSegments": len(usable),
+        "positiveSegments": sum(value > 0.0 for value in values),
+        "averageReturn": sum(values) / len(values) if complete else None,
+        "worstReturn": min(values) if complete else None,
+        "latestReturn": segments[-1]["return"] if complete else None,
+        "segments": segments,
+    }
 
 
 def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> dict:

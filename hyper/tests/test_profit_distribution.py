@@ -32,13 +32,30 @@ def _strict(wallet, return30, return7):
     }
 
 
-def _rough(wallet, return30, return7):
+def _rough(wallet, return30, return7, stability=None):
     def window(value):
         return {"qualificationReturn": value}
     return {
         "wallet": wallet,
         "status": "rough_complete",
-        "rough": {"windows": {"30": window(return30), "14": window(0), "7": window(return7)}},
+        "rough": {
+            "windows": {"30": window(return30), "14": window(0), "7": window(return7)},
+            **({"stability7d": stability} if stability is not None else {}),
+        },
+    }
+
+
+def _stability(*returns):
+    return {
+        "basis": "four_non_overlapping_closed_episode_7d_v1",
+        "rangeDays": 28,
+        "segmentDays": 7,
+        "evidenceComplete": True,
+        "segments": [
+            {"index": index, "closedN": 1, "closedPnl": value * 10_000,
+             "return": value, "profitFactor": 2.0, "liquidations": 0}
+            for index, value in enumerate(returns, 1)
+        ],
     }
 
 
@@ -153,6 +170,22 @@ class ProfitDistributionTests(unittest.TestCase):
         source = inspect.getsource(profit_distribution.run)
         self.assertIn("strict_replay_inputs", source)
         self.assertIn("strictRankingMode", source)
+
+    def test_new_research_ranking_rewards_stable_segments_and_defers_incomplete_evidence(self):
+        stable = _rough("stable", .40, .05, _stability(.05, .05, .05, .05))
+        windfall = _rough("windfall", .40, .20, _stability(.10, .10, .10, .001))
+        incomplete = _rough("incomplete", .90, .50, {
+            **_stability(.10, .10, .10, .10),
+            "segments": _stability(.10, .10, .10, .10)["segments"][:3],
+            "evidenceComplete": False,
+        })
+
+        ranked = sorted(
+            [incomplete, stable, windfall],
+            key=profit_distribution._rough_profit_sort_key,
+        )
+
+        self.assertEqual([row["wallet"] for row in ranked], ["stable", "windfall", "incomplete"])
 
     def test_activity_counts_small_source_opens_and_weekly_continuity(self):
         now_ms = 40 * profit_distribution.DAY_MS

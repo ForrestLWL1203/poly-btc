@@ -38,8 +38,8 @@ Hybrid Perp-volume proof
 Deep fills structure + source quality
     ↓ executable markets; no bot/grid/hedge/blow-up/data hard failure
 Fills-only rough Copy
-    ↓ 3/4 active weeks; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
-Profit-aligned score (70/30 return with bounded confidence haircut)
+    ↓ 3/4 active weeks; four realized-profit 7d segments; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
+Profit-aligned score (60% 30d + 25% four-segment average + 15% worst segment, with bounded confidence haircut)
     ↓ Top32 evidence pool → freeze score Top16 formation candidates
 Final strict individual/shared Copy
     ↓ fresh finalizer process → active-surface count center → one n±1 local tier tune + n±2 guards
@@ -186,8 +186,9 @@ Wallet quality and funded-account membership are separate decisions.
   display/ranking context only; it is not an admission veto.
 - Rough Copy uses one continuously compounded `$10,000` comparison account and requires positive closed and
   conservative 30d/7d PnL, a 30-day open-loss ratio at or below 50%, at least seven complete closed source and
-  Copy Episodes over 30 days, Copy Profit Factor at least 1.25, at least 70% open follow, complete valuation,
-  and conditional lottery protection. Fixed 60%/70%/85% win-rate floors are retired: a sub-50% win wallet may
+  Copy Episodes over 30 days, at least one profitable completed Copy Episode in each of four fixed,
+  non-overlapping seven-day segments over the latest 28 days, Copy Profit Factor at least 1.25, at least 70%
+  open follow, complete valuation, and conditional lottery protection. Fixed 60%/70%/85% win-rate floors are retired: a sub-50% win wallet may
   pass when its PF is sound, Top3 profit is not dominant, and the post-Top3 body remains profitable. When Top3
   reaches 60% of gross profit, that body must also retain at least 20% of total closed net profit. The structural
   profile separately rejects compulsive stop/reopen trial loops only after deep loss-conditioned evidence;
@@ -201,10 +202,12 @@ Wallet quality and funded-account membership are separate decisions.
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude owns the score and does not pre-empt the later unified parameter tune.
 - Qualified wallets form both Top32 and Core through one profit-aligned score. Conservative
-  `70% × 30d + 30% × 7d` Copy return is mapped monotonically, then multiplied by an 85%–100% confidence factor
+  `60% × 30d + 25% × latest-28d four-segment average + 15% × worst segment` Copy return is mapped monotonically,
+  then multiplied by an 85%–100% confidence factor
   derived from PF, samples, execution, repeatability, cross-week activity and liquidation safety. Confidence can
-  only haircut profitability and cannot manufacture a high score for a weak-return wallet. Raw profit priority,
-  30d, 7d, PF and address are stable tie-breaks. Rough 20%/5% wallets remain labelled `primary`; other qualified
+  only haircut profitability and cannot manufacture a high score for a weak-return wallet. Every new-generation
+  segment must contain a closed Episode and be profitable; missing evidence is not treated as flat. Raw profit
+  priority, 30d, segment average/worst, 7d, PF and address are stable tie-breaks. Rough 20%/5% wallets remain labelled `primary`; other qualified
   wallets are `reserve`, but those tiers no longer create a conflicting sort order. Current-surface strict path
   Rough Copy freezes Top32 as evidence and Challenger scope; its first 16 score-ranked wallets form the only
   automatic tuning pool. The winning surface certifies those same frozen Top16 once, so ranks 17–32 cannot
@@ -413,7 +416,7 @@ Observer. A positive `--limit` keeps current Core/Challenger evidence and determ
 Perp-volume rank instead of taking a biased top-volume prefix; zero scans the entire recall set. Its strict
 30/14/7 conservative-return quantiles and paired threshold matrix are the evidence used to choose new
 profitability floors. For a complete-universe wallet hunt after that unbiased calibration, a positive
-`--strict-limit` first ranks every structural survivor by its fills-only 70/30 conservative return and spends
+`--strict-limit` first ranks every structural survivor by its fills-only stable-profit priority and spends
 the shared price-path replay budget only on that many leaders. Such a bounded result is intentionally biased
 and may find candidates, but must not replace the unbiased sample when choosing thresholds.
 

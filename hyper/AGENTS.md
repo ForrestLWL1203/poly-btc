@@ -177,6 +177,11 @@ together. The current broad contract is:
   winner.
 - Rough Copy requires positive 30d/7d economics, adequate samples, and executable open coverage before entering
   the bounded strict pool.
+- New-generation Rough and Strict qualification split the latest 28 days into four fixed, non-overlapping
+  seven-day buckets from the same continuous replay. Every bucket must contain at least one completed Copy
+  Episode and have positive realized net PnL; missing evidence is not a zero-return bucket. Profit ordering is
+  `60% × conservative 30d return + 25% × four-bucket average + 15% × worst bucket`. Immutable generations that
+  predate this evidence remain readable with their original ranking formula.
 - Strict individual and shared formation require positive recent windows, current sample depth, capacity/open
   coverage, acceptable open loss/drawdown/cost, complete price paths, and bounded isolated liquidations.
 - Strict Core ordering applies a small, bounded penalty to unusually dense seven-day source opening activity.

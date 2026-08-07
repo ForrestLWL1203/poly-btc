@@ -11,6 +11,7 @@ import zlib
 
 from hyper.copy.copy_backtest import profit_structure_metrics
 from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.economics import copy_stability_7d, stable_profit_priority
 from hyper.util import f
 
 from . import profit_distribution
@@ -183,9 +184,12 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
     return30 = value(30, "qualificationReturn")
     return14 = value(14, "qualificationReturn")
     return7 = value(7, "qualificationReturn")
-    priority = (
-        0.70 * f(return30) + 0.30 * f(return7)
-        if return30 is not None and return7 is not None else None
+    stability = copy_stability_7d({
+        "copy_bt_stability_7d": replay30.get("stability_7d"),
+    })
+    priority, priority_detail = (
+        stable_profit_priority(return30, return7, stability)
+        if return30 is not None and return7 is not None else (None, {})
     )
     copy_closed = int(value(30, "closedEpisodes") or 0)
     copy_win_rate = (
@@ -210,6 +214,8 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
         "return14": return14,
         "return7": return7,
         "profitPriority": priority,
+        "profitPriorityDetail": priority_detail,
+        "stability7d": stability,
         "closedEpisodes30": value(30, "closedEpisodes"),
         "closedEpisodes14": value(14, "closedEpisodes"),
         "closedEpisodes7": value(7, "closedEpisodes"),

@@ -543,7 +543,7 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     reason          TEXT,
     utility         REAL,
     follow_score    REAL,             -- immutable final copy-follow score at selection publication
-    replay_profit_priority REAL,       -- immutable 70/30 strict-Copy dynamic-return priority
+    replay_profit_priority REAL,       -- immutable generation-specific strict-Copy profit priority
     selection_rank  INTEGER,          -- immutable final profit order within Core/Challenger
     data_status     TEXT,
     evidence_status TEXT,

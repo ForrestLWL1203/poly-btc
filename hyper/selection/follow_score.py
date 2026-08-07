@@ -12,19 +12,22 @@ from typing import Mapping
 
 from hyper import config
 from hyper.copy.economics import (
+    PROFIT_PRIORITY_30_WEIGHT,
+    PROFIT_PRIORITY_SEGMENT_AVG_WEIGHT,
+    PROFIT_PRIORITY_SEGMENT_WORST_WEIGHT,
     PROFITABILITY_BASIS,
     conservative_profitability,
+    copy_stability_7d,
     open_loss_ratio_within_limit,
+    stable_profit_priority,
 )
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import apply_allowed_sector_copy_metrics, parse_json_obj
 from . import pre_strict
 
 
-PROFIT_PRIORITY_30_WEIGHT = 0.70
-PROFIT_PRIORITY_7_WEIGHT = 0.30
-PROFIT_PRIORITY_MODE = "conservative_realized_profit_70_30"
-FOLLOW_SCORE_MODE = "strict_qualification_anchor_profit_confidence_frequency_v4"
+PROFIT_PRIORITY_MODE = "stable_profit_60_25_15_four_segments_v1"
+FOLLOW_SCORE_MODE = "strict_qualification_anchor_stable_profit_frequency_v5"
 FOLLOW_SCORE_PROFIT_SCALE = 0.35
 FOLLOW_SCORE_CONFIDENCE_FLOOR = 0.85
 STRICT_SCORE_QUALIFICATION_BASE = 0.60
@@ -41,6 +44,8 @@ ECONOMIC_REJECTION_REASONS = frozenset({
     "copy_open_loss_over_50pct",
     "rough_copy_30d_conservative_not_profitable",
     "rough_copy_7d_conservative_not_profitable",
+    "copy_7d_segment_evidence_insufficient",
+    "copy_7d_segment_not_profitable",
     "strict_copy_30d_conservative_return_below_floor",
     "strict_copy_7d_conservative_return_below_floor",
 })
@@ -168,27 +173,31 @@ def _source_economics(metrics: Mapping) -> dict:
 
 
 def compute_profit_priority(metrics: Mapping) -> tuple[float | None, dict]:
-    """Return the immutable 70/30 conservative strict-Copy return priority."""
+    """Return the immutable 30d plus four-segment stable-profit priority."""
     scoped = apply_allowed_sector_copy_metrics(metrics)
     economic30 = _copy_window_economics(scoped, 30)
     economic7 = _copy_window_economics(scoped, 7)
-    available = economic30["available"] and economic7["available"]
     return30 = _num(economic30.get("qualificationReturn"))
     return7 = _num(economic7.get("qualificationReturn"))
-    priority = (
-        PROFIT_PRIORITY_30_WEIGHT * return30
-        + PROFIT_PRIORITY_7_WEIGHT * return7
-        if available else None
+    stability = copy_stability_7d(scoped)
+    priority, priority_meta = stable_profit_priority(
+        return30, return7, stability,
     )
+    available = bool(
+        economic30["available"]
+        and economic7["available"]
+        and priority_meta.get("available")
+    )
+    if not available:
+        priority = None
     return priority, {
         "available": available,
-        "mode": PROFIT_PRIORITY_MODE,
-        "weights": {
-            "30d": PROFIT_PRIORITY_30_WEIGHT,
-            "7d": PROFIT_PRIORITY_7_WEIGHT,
-        },
+        "mode": priority_meta.get("mode") or PROFIT_PRIORITY_MODE,
+        "legacy": bool(priority_meta.get("legacy")),
+        "weights": dict(priority_meta.get("weights") or {}),
         "profitabilityBasis": PROFITABILITY_BASIS,
         "returns": {"30d": return30, "7d": return7},
+        "stability7d": stability,
         "windowStartEquity": {
             "30d": economic30["windowStartEquity"],
             "7d": economic7["windowStartEquity"],
@@ -226,10 +235,13 @@ def follow_score_sort_key(
     """Exact formation order: published score, then its raw economic and quality tie-breaks."""
     priority, detail = compute_profit_priority(metrics)
     returns = detail["returns"]
+    stability = detail.get("stability7d") or {}
     return (
         -_num(follow_score_value),
         -(priority if priority is not None else float("-inf")),
         -returns["30d"],
+        -_num(stability.get("averageReturn"), float("-inf")),
+        -_num(stability.get("worstReturn"), float("-inf")),
         -returns["7d"],
         -_num(metrics.get("copy_bt_profit_factor")),
         str(addr or "").lower(),
@@ -511,6 +523,9 @@ def evaluate_follow_eligibility(
             "7": economic7.get("qualificationPnl"),
         },
         "economics": {"30": economic30, "7": economic7},
+        "stability7d": result.get("stability7d"),
+        "profitPriority": result.get("profitPriority"),
+        "profitPriorityDetail": result.get("profitPriorityDetail"),
         "closedN": int(_num(scoped.get("copy_bt_closed_n"))),
         "copyWinRate": _num(copy_win_rate) if copy_win_rate is not None else None,
         "copyWinRateFloor": None,
@@ -544,7 +559,7 @@ def compute_follow_score(
 ) -> tuple[float, dict]:
     """Return the profit-aligned score used by both the funnel and final formation.
 
-    Conservative 70/30 Copy return owns the score. Qualified execution/repeatability evidence may only
+    Conservative stable-profit priority owns the score. Qualified execution/repeatability evidence may only
     haircut it by at most 15%; it can never manufacture a high score for a low-return wallet.
     """
     scoped = apply_allowed_sector_copy_metrics(metrics)
@@ -567,10 +582,8 @@ def compute_follow_score(
     pnl7 = economic7["qualificationPnl"]
     return30 = _num(economic30.get("qualificationReturn"))
     return7 = _num(economic7.get("qualificationReturn"))
-    profit_priority = (
-        PROFIT_PRIORITY_30_WEIGHT * return30
-        + PROFIT_PRIORITY_7_WEIGHT * return7
-    )
+    profit_priority, priority_detail = compute_profit_priority(scoped)
+    profit_priority = _num(profit_priority)
     profit_component = _clamp(
         1.0 - math.exp(
             -max(0.0, profit_priority)
@@ -645,6 +658,16 @@ def compute_follow_score(
         + (1.0 - FOLLOW_SCORE_CONFIDENCE_FLOOR) * reliability
     )
     frequency_penalty, frequency_detail = _strict_frequency_penalty(scoped)
+    stability_detail = priority_detail.get("stability7d") or {}
+    priority_reason = (
+        f"盈利优先 {profit_priority * 100:+.1f}%"
+        f"（30d {return30 * 100:+.1f}% / 四段均值 "
+        f"{_num(stability_detail.get('averageReturn')) * 100:+.1f}% / 最差 "
+        f"{_num(stability_detail.get('worstReturn')) * 100:+.1f}%）"
+        if stability_detail.get("evidenceComplete") else
+        f"盈利优先 {profit_priority * 100:+.1f}%"
+        f"（兼容旧代：30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%）"
+    )
     if strict:
         # A final-Strict wallet has already passed the complete source, activity, PF, execution, path and
         # liquidation contract.  Give that certification a visible baseline, then preserve profit-led order
@@ -671,6 +694,7 @@ def compute_follow_score(
         "mode": FOLLOW_SCORE_MODE,
         "components": components,
         "profitPriorityValue": profit_priority,
+        "profitPriority": priority_detail,
         "profitComponent": profit_component,
         "reliability": reliability,
         "confidenceMultiplier": confidence_multiplier,
@@ -697,8 +721,7 @@ def compute_follow_score(
         ),
         "feeDrag": scoped.get("copy_bt_fee_drag"),
         "reasons": [
-            f"盈利优先 {profit_priority * 100:+.1f}%"
-            f"（30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%）",
+            priority_reason,
             f"可信度 {reliability * 100:.1f}% / 系数 {confidence_multiplier:.3f}",
             f"PF {profit_factor:.2f} / 开仓跟随率 {open_rate * 100:.1f}%",
         ] + ([

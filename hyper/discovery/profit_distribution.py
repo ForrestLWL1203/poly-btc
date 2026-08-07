@@ -22,7 +22,12 @@ import zlib
 
 from hyper import config, params, storage
 from hyper.copy.copy_backtest import prepare_price_path, profit_structure_metrics
-from hyper.copy.economics import replay_result_profitability
+from hyper.copy.economics import (
+    copy_stability_7d,
+    finite_number,
+    replay_result_profitability,
+    stable_profit_priority,
+)
 from hyper.copy.fills import build_episodes
 from hyper.copy.copy_data import normalize_copyable_fills
 from hyper.copy.sector import SECTORS, classify_coin
@@ -34,7 +39,7 @@ from .scanner_copy_bt import copy_bt_results
 
 
 DAY_MS = 86_400_000
-MODEL_VERSION = "profit-distribution-structural-activity-v2"
+MODEL_VERSION = "profit-distribution-four-segment-stability-v3"
 ACTIVITY_LOOKBACK_DAYS = 28
 ACTIVITY_BUCKET_DAYS = 7
 ACTIVITY_MIN_ACTIVE_WEEKS = 3
@@ -831,7 +836,11 @@ def _rough_wallet(
             "openPositions": snapshot.get("open_position_count"),
             "spotHedgeRatio": snapshot.get("hedge_ratio"),
         },
-        "rough": {"mode": "fills_only_current_surface", "windows": windows},
+        "rough": {
+            "mode": "fills_only_current_surface",
+            "windows": windows,
+            "stability7d": (results.get(30) or {}).get("stability_7d"),
+        },
         "activity": activity,
         "strictEligibility": {
             "eligible": bool(activity["operational"]),
@@ -864,11 +873,22 @@ def _quantile(values: list[float], q: float) -> float | None:
 
 
 def _rough_profit_sort_key(row: dict) -> tuple:
-    windows = ((row.get("rough") or {}).get("windows") or {})
+    rough = row.get("rough") or {}
+    windows = rough.get("windows") or {}
     return30 = f((windows.get("30") or {}).get("qualificationReturn"))
     return7 = f((windows.get("7") or {}).get("qualificationReturn"))
-    priority = 0.70 * return30 + 0.30 * return7
-    return (-priority, -return30, -return7, str(row.get("wallet") or ""))
+    stability = copy_stability_7d({
+        "copy_bt_stability_7d": rough.get("stability7d"),
+    })
+    priority, _detail = stable_profit_priority(return30, return7, stability)
+    return (
+        -(priority if priority is not None else float("-inf")),
+        -return30,
+        -finite_number(stability.get("averageReturn"), float("-inf")),
+        -finite_number(stability.get("worstReturn"), float("-inf")),
+        -return7,
+        str(row.get("wallet") or ""),
+    )
 
 
 def summarize(wallets: list[dict]) -> dict:
@@ -1189,7 +1209,7 @@ def resume_rough(
         "activityAuditCompleted": completed,
         "preStrictEligibleCandidates": len(operational),
         "strictReplayCandidates": 0,
-        "strictRankingMode": "operational_activity_then_rough_conservative_profit_70_30",
+        "strictRankingMode": "operational_activity_then_rough_stable_profit_60_25_15",
         "requestStats": rest.request_stats(),
         "summary": summarize(wallets),
         "wallets": wallets,
@@ -1400,7 +1420,7 @@ def run(
         "preStrictEligibleCandidates": len(operational_wallets),
         "preStrictActivityExcluded": len(replay_wallets) - len(operational_wallets),
         "strictReplayCandidates": 0 if rough_only else len(strict_wallets),
-        "strictRankingMode": "operational_activity_then_rough_conservative_profit_70_30",
+        "strictRankingMode": "operational_activity_then_rough_stable_profit_60_25_15",
         "requestStats": rest.request_stats(),
         "summary": summarize(wallets),
         "wallets": wallets,
@@ -1463,6 +1483,7 @@ def run(
                 "mode": "current_surface_15m_path",
                 "pathCoverage": coverage,
                 "windows": windows,
+                "stability7d": (results.get(30) or {}).get("stability_7d"),
             }
             if invalid or valuation_incomplete:
                 row["status"] = "deferred"
@@ -1498,7 +1519,7 @@ def run(
         "preStrictEligibleCandidates": len(operational_wallets),
         "preStrictActivityExcluded": len(replay_wallets) - len(operational_wallets),
         "strictReplayCandidates": len(strict_replay_inputs),
-        "strictRankingMode": "operational_activity_then_rough_conservative_profit_70_30",
+        "strictRankingMode": "operational_activity_then_rough_stable_profit_60_25_15",
         "pathAudit": path_audit,
         "requestStats": rest.request_stats(),
         "summary": summary,
