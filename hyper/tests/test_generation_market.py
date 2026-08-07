@@ -45,7 +45,7 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
             self.assertEqual(generation_market.load(db, "g1")[1]["BTC"]["mark_px"], 50_000.0)
             self.assertEqual(generation_market.summary(db, "g1")["hash"], sealed["hash"])
 
-    def test_daily_candles_are_incremental_across_generations_and_bounded(self):
+    def test_warm_sigma_cache_avoids_repeated_candle_requests(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             day = 86_400_000
@@ -67,7 +67,7 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
 
             with patch.object(
                 generation_market.volatility.price_path.time, "time",
-                side_effect=[asof / 1000, (asof + day) / 1000, (asof + day) / 1000],
+                return_value=(asof + day) / 1000,
             ), patch.object(
                 generation_market.volatility.price_path.rest,
                 "candle_snapshot_range", side_effect=candles,
@@ -80,35 +80,62 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
                     db, "daily-g2", asof + day, {"BTC"}, {"BTC": context()},
                 )
                 second.ensure({"BTC"})
-                db.execute(
-                    "INSERT INTO coin_price_candle VALUES (?,?,?,?,?,?,?,?,?)",
-                    (
-                        "OLD", "1d", asof - 40 * day, asof - 39 * day - 1,
-                        1, 1, 1, 1, asof - 40 * day,
-                    ),
-                )
-                db.commit()
                 same_day = generation_market.Resolver(
                     db, "daily-g3", asof + day, {"BTC"}, {"BTC": context()},
                 )
                 same_day.ensure({"BTC"})
 
-            self.assertEqual(len(requests), 2)
-            self.assertLessEqual(requests[1][1] - requests[1][0], 2 * day)
+            self.assertEqual(len(requests), 1)
             self.assertEqual(
                 db.execute(
-                    "SELECT COUNT(*) FROM coin_price_candle "
-                    "WHERE coin='OLD' AND interval='1d'"
+                    "SELECT sigma_source FROM generation_market_snapshot "
+                    "WHERE generation='daily-g2' AND coin='BTC'"
                 ).fetchone()[0],
-                0,
+                "coin_vol_cache",
             )
-            self.assertLessEqual(
-                db.execute(
-                    "SELECT COUNT(*) FROM coin_price_candle "
-                    "WHERE coin='BTC' AND interval='1d'"
-                ).fetchone()[0],
-                generation_market.volatility.price_path.RETENTION_DAYS["1d"],
+
+    def test_warm_sigma_is_frozen_when_resolver_starts(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO coin_vol(coin,sigma,sigma_fast,sigma_slow,n,updated_at) "
+                "VALUES('BTC',.12,.12,.08,30,'before')"
             )
+            db.commit()
+            resolver = generation_market.Resolver(
+                db, "warm-g1", 1_700_000_000_000, {"BTC"}, {"BTC": context()},
+            )
+            db.execute("UPDATE coin_vol SET sigma=.99,sigma_fast=.99 WHERE coin='BTC'")
+            db.commit()
+            with patch.object(
+                generation_market.volatility, "compute_at",
+                side_effect=AssertionError("warm sigma must not refetch"),
+            ):
+                sigmas, _ = resolver.ensure({"BTC"})
+            self.assertEqual(sigmas["BTC"], .12)
+            self.assertEqual(db.execute(
+                "SELECT sigma,sigma_source FROM generation_market_snapshot "
+                "WHERE generation='warm-g1' AND coin='BTC'"
+            ).fetchone(), (.12, "coin_vol_cache"))
+
+    def test_transient_seven_percent_cache_is_not_reused_as_accurate_sigma(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO coin_vol(coin,sigma,sigma_fast,sigma_slow,n,updated_at) "
+                "VALUES('ETH',.07,NULL,NULL,0,'before')"
+            )
+            db.commit()
+            resolver = generation_market.Resolver(
+                db, "cold-g1", 1_700_000_000_000, {"ETH"}, {"ETH": context()},
+            )
+            sample = {"status": "real", "sigma": .11, "fast": .11, "slow": .08, "n": 30}
+            with patch.object(
+                generation_market.volatility, "compute_at", return_value=sample,
+            ) as compute:
+                sigmas, _ = resolver.ensure({"ETH"})
+            compute.assert_called_once()
+            self.assertEqual(sigmas["ETH"], .11)
 
     def test_missing_terminal_mark_retries_independent_bulk_price_source(self):
         replay = {30: {

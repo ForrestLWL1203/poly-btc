@@ -136,6 +136,10 @@ Leaderboard staging
   missing equity evidence is deferred and must never be coerced into the zero-equity decision.
 - Each generation freezes its candidate order, fill evidence, market snapshot, and as-of time. Recovery must not
   splice in a later market surface or refetch already complete wallets.
+- Rough Copy must use a generation-start snapshot of every usable cached per-coin volatility value. A missing
+  evidence coin is fetched/computed once through the shared daily-candle cache and persisted before that wallet
+  is replayed. The neutral fallback is allowed only after a successful response proves insufficient closed
+  history; ordinary Rough ranking must never assign 7% volatility merely to avoid a cold-cache request.
 
 ### Generation integrity
 

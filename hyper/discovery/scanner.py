@@ -3188,7 +3188,11 @@ def _rough_replay_source_pool(
     db, addrs, generation_id, now_ms, p, stamp, *, source="scan",
     queue_allowed_addrs=None,
 ) -> dict:
-    """Run one cache-only, K-line-free Copy replay for every structural survivor.
+    """Run one fill-path-free Copy replay for every structural survivor.
+
+    Volatility is not approximate: each evidence coin uses the resolver-start snapshot of ``coin_vol`` or is
+    fetched/computed once on a cold miss, then frozen into this generation. Rough remains K-line-path-free; it
+    simply no longer invents a universal 7% sigma for ranking and Top32 admission.
 
     ``queue_allowed_addrs`` is set by Challenger daily refresh to the exact Core/strict-Challenger
     universe published by the latest complete generation. Current Core and open-position wallets still
@@ -3204,6 +3208,8 @@ def _rough_replay_source_pool(
         valuation_marks = _current_copy_valuation_marks()
     incumbent_core = set(selection.published_core_membership(db) or ())
     qualified, failed = [], []
+    resolved_coins = set()
+    market_retry_passes = market_retry_attempts = 0
     cols = storage.PROFILE_COLS.split(",")
     resolver = getattr(p, "generation_market_resolver", None)
     for rank, addr in enumerate(addrs, 1):
@@ -3216,25 +3222,51 @@ def _rough_replay_source_pool(
             continue
         row = dict(zip(cols, raw))
         fills = _copy_bt_cached_fills(db, addr, int(now_ms), p)
-        # Rough Copy is a cached-fill replay by contract.  Do not call
-        # ``resolver.ensure`` here: that method fetches daily candles for every
-        # first-seen coin and previously turned this local stage into a serial
-        # REST crawl.  Empty sigmas deliberately select the backtest engine's
-        # deterministic fallback.  The already-frozen bulk context is safe to
-        # reuse because it performs no per-coin request; strict finalists resolve
-        # their immutable volatility snapshot after this queue is frozen.
-        sigmas = {}
-        if resolver is not None and callable(getattr(resolver, "rough_context", None)):
-            market_ctx = resolver.rough_context({
-                fill.get("coin") for fill in fills if fill.get("coin")
-            })
+        try:
+            sector_policy = json.loads(row.get("sector_policy_json") or "{}")
+        except (TypeError, ValueError):
+            sector_policy = {}
+        evidence_sectors = set(sector_policy.get("allowed") or ()) or set(
+            sector_policy.get("watch") or ()
+        )
+        evidence_coins = {
+            str(fill.get("coin"))
+            for fill in fills
+            if fill.get("coin") and classify_coin(fill.get("coin")) in evidence_sectors
+        }
+        resolved_coins.update(evidence_coins)
+        if resolver is not None and callable(getattr(resolver, "ensure", None)):
+            retry_pass = 0
+            while True:
+                try:
+                    sigmas, market_ctx = resolver.ensure(evidence_coins)
+                    break
+                except generation_market.MarketSnapshotError as exc:
+                    if not str(exc).startswith("sigma_request_failed:"):
+                        raise
+                    retry_pass += 1
+                    market_retry_passes += 1
+                    market_retry_attempts += 1
+                    _set_scan_progress(
+                        db, stage="retry_rough_market_snapshot",
+                        candidates_scanned=rank - 1, candidates_total=len(addrs),
+                    )
+                    time.sleep(min(60.0, float(2 ** min(retry_pass - 1, 6))))
         else:
+            cached_sigmas = dict(getattr(p, "copy_bt_sigmas", None) or {})
             cached_ctx = dict(getattr(p, "copy_bt_market_ctx", None) or {})
+            sigmas = {
+                coin: cached_sigmas[coin] for coin in evidence_coins if coin in cached_sigmas
+            }
             market_ctx = {
                 coin: dict(cached_ctx.get(coin) or {})
-                for coin in {fill.get("coin") for fill in fills if fill.get("coin")}
-                if coin in cached_ctx
+                for coin in evidence_coins if coin in cached_ctx
             }
+            missing = evidence_coins - set(sigmas)
+            if missing and getattr(p, "scan_generation", None):
+                raise generation_market.MarketSnapshotError(
+                    "rough_market_snapshot_missing:" + ",".join(sorted(missing)[:12])
+                )
         # Older interrupted generations may carry the retired rough-market
         # transport marker.  A K-line-free replay no longer depends on that
         # transport, so successful local evaluation clears it.
@@ -3344,7 +3376,9 @@ def _rough_replay_source_pool(
     db.commit()
     return {
         "attempted": len(addrs), "qualified": qualified, "failed": failed,
-        "queued": queued,
+        "queued": queued, "marketCoins": len(resolved_coins),
+        "marketRetryPasses": market_retry_passes,
+        "marketRetryAttempts": market_retry_attempts,
     }
 
 

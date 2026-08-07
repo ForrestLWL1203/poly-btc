@@ -146,6 +146,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn(
             '"strict_market_snapshot", "retry_strict_market_snapshot"', mask,
         )
+        self.assertIn('"rough_copy", "retry_rough_market_snapshot"', mask)
         self.assertIn("strict_market_snapshot: 80", mask)
         self.assertIn("retry_strict_market_snapshot: 80", mask)
         self.assertIn('"local_finalist_validation", "top16_individual_strict"', mask)

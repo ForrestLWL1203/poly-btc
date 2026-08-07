@@ -1,8 +1,10 @@
 """Immutable market inputs for scanner generations.
 
-The mutable ``coin_vol`` table remains Observer's live cache.  Scanner qualification uses this module so
-every wallet, portfolio replay and tune candidate sees exactly the same per-generation sigma/liquidity and
-maintenance inputs.
+The mutable ``coin_vol`` table remains the shared warm cache.  A new scanner generation snapshots every
+usable cached sigma when its resolver is created, then materialises that frozen value on first use.  Missing
+coins are fetched and computed once through the shared daily-candle cache.  Every wallet, portfolio replay
+and tune candidate therefore sees one immutable per-generation sigma without turning every scan into a full
+per-coin candle refresh.
 """
 from __future__ import annotations
 
@@ -184,20 +186,6 @@ class SealedResolver:
             {coin: dict(self.market_ctx.get(coin) or {}) for coin in required},
         )
 
-    def rough_context(self, coins) -> dict[str, dict]:
-        """Return already-frozen context without resolving volatility.
-
-        Rough Copy is deliberately fills-only.  A resumed generation may reuse
-        its sealed bulk context, but must not turn that inexpensive replay into
-        a candle fetch or make its result depend on which coins were resolved
-        earlier in the generation.
-        """
-        return {
-            coin: dict(self.market_ctx.get(coin) or {})
-            for coin in sorted({str(value) for value in coins if value})
-            if coin in self.market_ctx
-        }
-
 
 class Resolver:
     """Generation-scoped, per-coin de-duplicated market-data resolver."""
@@ -213,6 +201,29 @@ class Resolver:
         self.lock = threading.Lock()
         self.cache = {}
         self.errors = {}
+        # Freeze the warm cache at generation construction time. Observer may refresh ``coin_vol`` while a
+        # long scan is running, but those later writes must not splice a different volatility regime into
+        # wallets evaluated near the end of this generation. Rows with no real candle evidence are excluded:
+        # ``n=0`` plus null fast/slow is the historical transient 7% fallback, not an accurate cached sigma.
+        self.warm_sigmas = {}
+        try:
+            warm_rows = db.execute(
+                "SELECT coin,sigma,sigma_fast,sigma_slow,n FROM coin_vol "
+                "WHERE sigma IS NOT NULL AND sigma>0"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - legacy/offline fixtures may not own the shared cache table
+            warm_rows = ()
+        for row in warm_rows:
+            samples = int(row[4] or 0)
+            if samples < int(config.VOL_MIN_SAMPLES) and row[2] is None and row[3] is None:
+                continue
+            self.warm_sigmas[str(row[0])] = {
+                "status": "coin_vol_cache",
+                "sigma": float(row[1]),
+                "fast": _number(row[2]),
+                "slow": _number(row[3]),
+                "n": samples,
+            }
         context_hash = hashlib.sha256(
             json.dumps(self.contexts, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
@@ -262,10 +273,11 @@ class Resolver:
         if coin not in self.universe:
             raise MarketSnapshotError(f"market_not_in_generation_universe:{coin}")
         day_vlm, open_interest, mark_px, oi_notional, max_leverage = self._context_fields(coin)
-        # Never source qualification from Observer's mutable ``coin_vol`` cache.  This explicit as-of fetch
-        # is de-duplicated by the generation resolver and therefore gives every wallet/replay one identical
-        # closed-candle sample without preloading hundreds of markets.
-        sample = volatility.compute_at(coin, self.asof_ms, db=self.db)
+        # Warm generations use the resolver-start snapshot above. A cold coin is computed exactly once; the
+        # volatility helper reuses complete daily candles and calls REST only when that shared history is absent.
+        sample = self.warm_sigmas.get(coin)
+        if sample is None:
+            sample = volatility.compute_at(coin, self.asof_ms, db=self.db)
         if sample["status"] == "request_failed":
             raise MarketSnapshotError(f"sigma_request_failed:{coin}")
         if sample["status"] == "insufficient_history":
@@ -288,50 +300,27 @@ class Resolver:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
-            self.db.execute(
-                "INSERT INTO coin_vol "
-                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,"
-                "market_ctx_updated_at,max_leverage,margin_meta_updated_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(coin) DO UPDATE SET "
-                "sigma=excluded.sigma,sigma_fast=excluded.sigma_fast,sigma_slow=excluded.sigma_slow,"
-                "n=excluded.n,day_ntl_vlm=excluded.day_ntl_vlm,open_interest=excluded.open_interest,"
-                "mark_px=excluded.mark_px,oi_notional=excluded.oi_notional,"
-                "market_ctx_updated_at=excluded.market_ctx_updated_at,max_leverage=excluded.max_leverage,"
-                "margin_meta_updated_at=excluded.margin_meta_updated_at,updated_at=excluded.updated_at",
-                (coin, float(sample["sigma"]), sample.get("fast"), sample.get("slow"), int(sample.get("n") or 0),
-                 day_vlm, open_interest, mark_px, oi_notional, stamp, max_leverage, stamp, stamp),
-            )
+            if sample["status"] != "coin_vol_cache":
+                # A genuine cold computation creates/refreshes the durable warm cache. Reusing a value must
+                # not rewrite ``updated_at`` and falsely present an older sigma as freshly recomputed.
+                self.db.execute(
+                    "INSERT INTO coin_vol "
+                    "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,"
+                    "market_ctx_updated_at,max_leverage,margin_meta_updated_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(coin) DO UPDATE SET "
+                    "sigma=excluded.sigma,sigma_fast=excluded.sigma_fast,sigma_slow=excluded.sigma_slow,"
+                    "n=excluded.n,day_ntl_vlm=excluded.day_ntl_vlm,open_interest=excluded.open_interest,"
+                    "mark_px=excluded.mark_px,oi_notional=excluded.oi_notional,"
+                    "market_ctx_updated_at=excluded.market_ctx_updated_at,max_leverage=excluded.max_leverage,"
+                    "margin_meta_updated_at=excluded.margin_meta_updated_at,updated_at=excluded.updated_at",
+                    (coin, float(sample["sigma"]), sample.get("fast"), sample.get("slow"), int(sample.get("n") or 0),
+                     day_vlm, open_interest, mark_px, oi_notional, stamp, max_leverage, stamp, stamp),
+                )
             self.db.commit()
         return float(sample["sigma"]), {
             "day_ntl_vlm": day_vlm, "oi_notional": oi_notional,
             "mark_px": mark_px, "max_leverage": max_leverage,
         }
-
-    def rough_context(self, coins) -> dict[str, dict]:
-        """Project the frozen bulk context without requesting candle data.
-
-        ``fetch_context_snapshot`` has already captured these fields in one
-        bounded bulk request.  Sigma is intentionally absent: the rough replay
-        uses the engine's deterministic fallback and only strict finalists
-        populate the immutable per-coin volatility snapshot.
-        """
-        selected = {}
-        for coin in sorted({str(value) for value in coins if value}):
-            ctx = self.contexts.get(coin)
-            if not isinstance(ctx, dict):
-                continue
-            mark_px = _number(ctx.get("markPx") or ctx.get("oraclePx") or ctx.get("midPx"))
-            open_interest = _number(ctx.get("openInterest"))
-            selected[coin] = {
-                "day_ntl_vlm": _number(ctx.get("dayNtlVlm")),
-                "oi_notional": (
-                    open_interest * mark_px
-                    if open_interest is not None and mark_px is not None else None
-                ),
-                "mark_px": mark_px,
-                "max_leverage": _number(ctx.get("universe_maxLeverage")),
-            }
-        return selected
 
     def ensure(self, coins) -> tuple[dict[str, float], dict[str, dict]]:
         # The lock intentionally spans the network call: the REST pacer is global anyway, and this guarantees

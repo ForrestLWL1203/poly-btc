@@ -653,7 +653,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 3)
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
-    def test_complete_scan_keeps_rough_copy_local_and_resolves_strict_market_before_seal(self):
+    def test_complete_scan_resolves_rough_sigma_and_strict_market_before_seal(self):
         source = inspect.getsource(scanner.scan)
         reader_source = inspect.getsource(scanner._profile_reader)
         rough_source = inspect.getsource(scanner._rough_replay_source_pool)
@@ -661,8 +661,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn('PRAGMA query_only=ON', reader_source)
         self.assertIn('_profile_reader(profile_db_path, db)', source)
         self.assertIn('stage="retry_deferred_profiles"', source)
-        self.assertNotIn("resolver.ensure(", rough_source)
-        self.assertIn("resolver.rough_context(", rough_source)
+        self.assertIn("resolver.ensure(", rough_source)
+        self.assertNotIn("resolver.rough_context(", rough_source)
         self.assertIn("_prepare_strict_market_snapshot(", source)
         self.assertLess(
             source.index("_prepare_strict_market_snapshot("),
@@ -685,7 +685,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE name='forbidden_worker_write'"
             ).fetchone())
 
-    def test_rough_replay_never_resolves_candles_and_clears_stale_marker(self):
+    def test_rough_replay_uses_generation_sigma_and_clears_stale_marker(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             db.execute(
@@ -695,18 +695,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "'source_qualified','{\"allowed\":[\"crypto\"]}')"
             )
             db.commit()
-            calls = {"ensure": 0, "rough": 0}
+            calls = {"ensure": 0}
 
-            def ensure(_coins):
+            def ensure(coins):
                 calls["ensure"] += 1
-                raise AssertionError("rough Copy must not resolve candle data")
-
-            def rough_context(coins):
-                calls["rough"] += 1
                 self.assertEqual(coins, {"BTC"})
-                return {"BTC": {"mark_px": 100.0, "max_leverage": 50.0}}
+                return (
+                    {"BTC": .12},
+                    {"BTC": {"mark_px": 100.0, "max_leverage": 50.0}},
+                )
 
-            resolver = SimpleNamespace(ensure=ensure, rough_context=rough_context)
+            resolver = SimpleNamespace(ensure=ensure)
             context = SimpleNamespace(
                 generation_market_resolver=resolver,
                 copy_bt_valuation_marks={},
@@ -724,8 +723,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.params, "load_follow", return_value={}), \
                     patch.object(scanner.params, "load_category", return_value={}), \
                     patch.object(scanner.selection, "published_core_membership", return_value=[]), \
-                    patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC"}]), \
-                    patch.object(scanner, "_effective_follow_replay", return_value=replay), \
+                    patch.object(
+                        scanner, "_copy_bt_cached_fills",
+                        return_value=[{"coin": "BTC"}, {"coin": "xyz:AAPL"}],
+                    ), \
+                    patch.object(scanner, "_effective_follow_replay", return_value=replay) as effective, \
                     patch.object(scanner.pre_strict, "copy_activity", return_value={}), \
                     patch.object(scanner.pre_strict, "evaluate", return_value=qualification), \
                     patch.object(scanner, "_store_pre_strict_evidence"), \
@@ -735,7 +737,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["qualified"], ["0xaaa"])
-            self.assertEqual(calls, {"ensure": 0, "rough": 1})
+            self.assertEqual(calls, {"ensure": 1})
+            self.assertEqual(effective.call_args.kwargs["sigmas"], {"BTC": .12})
+            self.assertEqual(
+                effective.call_args.kwargs["market_ctx"],
+                {"BTC": {"mark_px": 100.0, "max_leverage": 50.0}},
+            )
             self.assertEqual(
                 db.execute(
                     "SELECT data_status,evidence_status FROM profile WHERE addr='0xaaa'"

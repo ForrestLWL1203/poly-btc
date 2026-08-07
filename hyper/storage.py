@@ -75,9 +75,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_generation_current
 CREATE INDEX IF NOT EXISTS idx_scan_generation_status_published
     ON scan_generation(status, published_at DESC, id DESC);
 
--- Immutable market inputs used by one scanner generation.  The Observer intentionally continues to use
--- the latest ``coin_vol`` cache; qualification, portfolio formation and tuning must instead read these
--- frozen rows so a long scan cannot mix volatility/liquidity regimes.
+-- Immutable market inputs used by one scanner generation. The resolver snapshots usable ``coin_vol`` values
+-- when the generation starts and materialises them here on first use; cold coins are fetched/computed once.
+-- Qualification, portfolio formation and tuning read these frozen rows so a long scan cannot mix later cache
+-- refreshes into the same generation.
 CREATE TABLE IF NOT EXISTS generation_market_manifest (
     generation       TEXT PRIMARY KEY,
     asof_ms          INTEGER NOT NULL,

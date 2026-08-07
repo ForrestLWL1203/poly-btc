@@ -7,7 +7,9 @@ export const SCAN_STAGES = [
     "fetch_history", "retry_deferred_profiles", "repair_deferred_core_profile",
   ], "拉取/修复 37 天历史"],
   [["score_filter"], "结构与重大风险筛查"],
-  [["rough_copy", "challenger_prepare", "challenger_score"], "Pre-strict 粗 Copy 与跨周活跃"],
+  [[
+    "rough_copy", "retry_rough_market_snapshot", "challenger_prepare", "challenger_score",
+  ], "Pre-strict 粗 Copy 与跨周活跃"],
   [[
     "strict_market_snapshot", "retry_strict_market_snapshot",
     "finalize_handoff", "rebuild_watchlist", "prepare_selection_candidates",
