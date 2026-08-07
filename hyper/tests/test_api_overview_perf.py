@@ -125,7 +125,58 @@ class ApiOverviewPerfTests(unittest.TestCase):
         guard = overview["system"]["storageGuard"]
         self.assertEqual(guard["status"], "warning")
         self.assertEqual(guard["reasons"], ["db_growth_24h_warning"])
+        self.assertEqual(guard["mainDbStatus"], "warning")
+        self.assertEqual(guard["mainDbUsedPct"], 20.0)
         self.assertEqual(guard["diskUsedPct"], 71.0)
+
+    def test_overview_hides_wal_warning_from_main_database_space_signal(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO storage_guard_run "
+                "(checked_at,severity,reasons_json,disk_total_bytes,disk_used_bytes,disk_free_bytes,"
+                "disk_used_pct,db_main_bytes,db_wal_bytes,db_growth_24h_bytes,db_page_bytes,"
+                "db_freelist_bytes,pipeline_audit_rows,staging_generation_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "2026-08-01T00:00:00Z", "warning", '["wal_size_warning"]',
+                    10_000, 2_700, 7_300, 27.0, 500, 1_200, -300, 500, 200, 4, 2,
+                ),
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        guard = overview["system"]["storageGuard"]
+        self.assertEqual(guard["status"], "warning")
+        self.assertEqual(guard["reasons"], ["wal_size_warning"])
+        self.assertEqual(guard["mainDbStatus"], "normal")
+        self.assertEqual(guard["mainDbUsedPct"], 5.0)
+
+    def test_overview_marks_large_main_database_critical(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO storage_guard_run "
+                "(checked_at,severity,reasons_json,disk_total_bytes,disk_used_bytes,disk_free_bytes,"
+                "disk_used_pct,db_main_bytes,db_wal_bytes,db_growth_24h_bytes,db_page_bytes,"
+                "db_freelist_bytes,pipeline_audit_rows,staging_generation_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "2026-08-01T00:00:00Z", "normal", '[]',
+                    10_000, 4_000, 6_000, 40.0, 3_500, 10, 0, 3_500, 0, 0, 0,
+                ),
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        guard = overview["system"]["storageGuard"]
+        self.assertEqual(guard["status"], "normal")
+        self.assertEqual(guard["mainDbStatus"], "critical")
+        self.assertEqual(guard["mainDbUsedPct"], 35.0)
 
     def test_overview_aggregates_open_risk_in_sql(self):
         with tempfile.TemporaryDirectory() as td:

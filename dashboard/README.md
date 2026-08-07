@@ -14,6 +14,10 @@ navigation belong here; Polymarket business logic belongs in `polymarket/`.
 Core capacity. Internal collection, qualification and replay parameters are not part of the Dashboard API.
 Scan history is a rolling operational summary: the API and UI expose at most the latest five runs.
 
+The top-bar SQLite space badge is based only on the physical main database file's share of the filesystem:
+warning at 20% and critical at 35%. WAL size and short-term active-data growth remain available in the storage
+guard diagnostics, but they do not surface as a misleading disk-capacity badge.
+
 Position fill details distinguish margin committed on entry from capital returned on reduce/close. Returned
 capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
 leverage.

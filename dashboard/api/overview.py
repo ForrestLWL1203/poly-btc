@@ -28,6 +28,21 @@ def _db_cache_key(db):
     return id(db)
 
 
+def _main_db_storage_status(storage_guard):
+    if not storage_guard:
+        return "unknown", None
+    total = float(storage_guard["disk_total_bytes"] or 0)
+    main = float(storage_guard["db_main_bytes"] or 0)
+    if total <= 0:
+        return "unknown", None
+    used_pct = 100.0 * main / total
+    if used_pct >= float(config.STORAGE_GUARD_DB_MAIN_CRITICAL_PCT):
+        return "critical", used_pct
+    if used_pct >= float(config.STORAGE_GUARD_DB_MAIN_WARN_PCT):
+        return "warning", used_pct
+    return "normal", used_pct
+
+
 def _gross_traded(db, action_table="copy_action"):
     key = (_db_cache_key(db), action_table)
     head = q1(db, f"SELECT MAX(act_id) max_id FROM {action_table}") or {"max_id": None}
@@ -205,7 +220,7 @@ def ep_overview(db):
     active_strategy = strategy_revision.load_active(db)
     storage_guard = q1(
         db,
-        "SELECT checked_at,severity,reasons_json,disk_used_pct,disk_free_bytes,"
+        "SELECT checked_at,severity,reasons_json,disk_total_bytes,disk_used_pct,disk_free_bytes,"
         "db_main_bytes,db_wal_bytes,db_growth_24h_bytes "
         "FROM storage_guard_run ORDER BY checked_at DESC,id DESC LIMIT 1",
     )
@@ -213,6 +228,7 @@ def ep_overview(db):
         storage_reasons = json.loads(storage_guard["reasons_json"] or "[]") if storage_guard else []
     except (TypeError, ValueError):
         storage_reasons = ["invalid_storage_guard_record"]
+    main_db_status, main_db_used_pct = _main_db_storage_status(storage_guard)
     base["system"] = {
         "observer": obs_state,
         "observerStale": _stale(obs),
@@ -231,9 +247,13 @@ def ep_overview(db):
         "strategyActivatedAt": (active_strategy or {}).get("activatedAt"),
         "strategyParamsHash": (active_strategy or {}).get("paramsHash"),
         "storageGuard": {
+            # Keep the complete maintenance severity/reasons for diagnostics, but give the UI a separate
+            # main-file-only signal.  A transient WAL or growth warning must not masquerade as low disk space.
             "status": (storage_guard["severity"] if storage_guard else "unknown"),
             "checkedAt": (storage_guard["checked_at"] if storage_guard else None),
             "reasons": storage_reasons,
+            "mainDbStatus": main_db_status,
+            "mainDbUsedPct": main_db_used_pct,
             "diskUsedPct": (storage_guard["disk_used_pct"] if storage_guard else None),
             "diskFreeBytes": (storage_guard["disk_free_bytes"] if storage_guard else None),
             "dbMainBytes": (storage_guard["db_main_bytes"] if storage_guard else None),

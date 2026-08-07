@@ -127,6 +127,11 @@ STORAGE_GUARD_DISK_WARN_PCT = 70.0
 STORAGE_GUARD_DISK_CRITICAL_PCT = 85.0
 STORAGE_GUARD_DB_GROWTH_WARN_BYTES_24H = 1_000_000_000
 STORAGE_GUARD_WAL_WARN_BYTES = 512 * 1024 * 1024
+# The Dashboard's operator-facing SQLite-space badge is intentionally narrower than the internal storage
+# guard.  WAL/growth warnings remain available for diagnostics, but the badge appears only when the physical
+# main database file itself consumes a material share of the filesystem.
+STORAGE_GUARD_DB_MAIN_WARN_PCT = 20.0
+STORAGE_GUARD_DB_MAIN_CRITICAL_PCT = 35.0
 SQLITE_JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
 
 # Copy account & sizing (UI-tunable). ``INITIAL_BALANCE`` belongs only to the Paper ledger and the

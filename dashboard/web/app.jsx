@@ -98,7 +98,8 @@ function Dashboard({ onLogout }) {
   }, [scanning]);
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
-  const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
+  const mainDbStatus = storageGuard.mainDbStatus || "unknown";
+  const storageAlert = mainDbStatus === "warning" || mainDbStatus === "critical";
   const pausing = !!obsPending || liveStarting;
   const liveMode = execution?.selectedMode === "live" || ov?.system?.mode === "live";
   const executionState = execution?.state;
@@ -207,10 +208,10 @@ function Dashboard({ onLogout }) {
           </div>
           <div className="topbar-right">
             <ExecutionStatusRings status={obs} executionState={executionState} live={liveMode} />
-            {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
-              title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
-              <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
-              {storageGuard.status === "critical" ? "磁盘高危" : "磁盘预警"} {Number(storageGuard.diskUsedPct || 0).toFixed(0)}%
+            {storageAlert && <span className={"pill " + (mainDbStatus === "critical" ? "tint-red" : "tint-amber")}
+              title={`SQLite 主库 ${fStorage(storageGuard.dbMainBytes)} · 占磁盘 ${Number(storageGuard.mainDbUsedPct || 0).toFixed(1)}% · 磁盘总占用 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}%`}>
+              <span className="dot" style={{ background: mainDbStatus === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
+              {mainDbStatus === "critical" ? "主库空间高危" : "主库空间预警"} {Number(storageGuard.mainDbUsedPct || 0).toFixed(0)}%
             </span>}
             {ov && ov.system && <ObserverControl status={obs} executionState={executionState} busy={pausing}
               onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} live={liveMode} />}
