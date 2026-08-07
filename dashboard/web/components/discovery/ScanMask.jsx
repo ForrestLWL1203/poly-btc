@@ -3,23 +3,49 @@ import { IC, Ico } from "../../lib/icons.jsx";
 export const SCAN_STAGES = [
   [["scan_leaderboard"], "扫描排行榜"],
   [["perp_prefilter"], "Perp 周交易量确认"],
-  [["fetch_history"], "拉取/修复 37 天历史"],
+  [[
+    "fetch_history", "retry_deferred_profiles", "repair_deferred_core_profile",
+  ], "拉取/修复 37 天历史"],
   [["score_filter"], "结构与重大风险筛查"],
-  [["rough_copy"], "Pre-strict 粗 Copy 与跨周活跃"],
+  [["rough_copy", "challenger_prepare", "challenger_score"], "Pre-strict 粗 Copy 与跨周活跃"],
   [[
     "strict_market_snapshot", "retry_strict_market_snapshot",
-    "rebuild_watchlist", "prepare_selection_candidates",
+    "finalize_handoff", "rebuild_watchlist", "prepare_selection_candidates",
+    "repair_deferred_pinned_strict_path",
   ], "冻结 Strict Top32"],
   [[
-    "prefetch_selection_paths", "portfolio_tune", "portfolio_prefix_strict",
-    "portfolio_prefix_cache_hit", "selection_search",
+    "prefetch_selection_paths", "portfolio_tune", "portfolio_tune_coarse",
+    "portfolio_tune_full", "portfolio_count_search", "tier_baseline",
+    "tier_shared_candidates", "tier_margin_extension", "tier_baseline_control",
+    "local_leverage_refine", "local_add_refine", "primary_finalist_cross",
+    "primary_baseline_control", "guard_validation", "guard_promotion_refine",
+    "strict_baseline_control", "local_finalist_validation", "top16_individual_strict",
+    "final_membership_margin_calibration", "final_membership_margin_extension",
+    "final_membership_baseline_control", "final_membership_margin_validation",
+    "portfolio_prefix_strict", "portfolio_prefix_cache_hit", "selection_search",
+    "challenger_membership_retune",
   ], "组合回测调参"],
   [["materialize_replay", "persist"], "写库 & 校验"],
 ];
 
+// Tuning deliberately publishes granular internal stage names. Keep recognized stage families on the
+// portfolio row so a newly added bounded probe cannot blank the whole timeline before its explicit label lands.
+const PORTFOLIO_STAGE_PREFIXES = [
+  "portfolio_", "tier_", "local_", "primary_", "guard_", "strict_baseline_", "top16_",
+  "final_membership_",
+];
+const PORTFOLIO_STAGE_INDEX = SCAN_STAGES.findIndex(([, label]) => label === "组合回测调参");
+
+export const scanStageIndex = (stage) => {
+  const exact = SCAN_STAGES.findIndex(([keys]) => keys.includes(stage));
+  if (exact >= 0) return exact;
+  return PORTFOLIO_STAGE_PREFIXES.some((prefix) => String(stage || "").startsWith(prefix))
+    ? PORTFOLIO_STAGE_INDEX : -1;
+};
+
 export const scanStageLabel = (stage) => {
-  const match = SCAN_STAGES.find(([keys]) => keys.includes(stage));
-  return match ? match[1] : "处理中";
+  const index = scanStageIndex(stage);
+  return index >= 0 ? SCAN_STAGES[index][1] : "处理中";
 };
 
 // Wallet profiling is only the first, linear part of a scan. Once every wallet is profiled the API's
@@ -28,15 +54,35 @@ export const scanStageLabel = (stage) => {
 const POST_PROFILE_PROGRESS = {
   strict_market_snapshot: 80,
   retry_strict_market_snapshot: 80,
+  finalize_handoff: 76,
   rebuild_watchlist: 78,
   prepare_selection_candidates: 82,
+  repair_deferred_pinned_strict_path: 84,
   prefetch_selection_paths: 86,
   portfolio_tune: 89,
-  portfolio_prefix_strict: 89,
-  portfolio_prefix_cache_hit: 90,
-  selection_search: 91,
-  materialize_replay: 96,
+  portfolio_tune_coarse: 87,
+  portfolio_tune_full: 89,
+  portfolio_count_search: 84,
+  local_finalist_validation: 92,
+  top16_individual_strict: 93,
+  final_membership_margin_validation: 96,
+  challenger_membership_retune: 90,
+  portfolio_prefix_strict: 97,
+  portfolio_prefix_cache_hit: 97,
+  selection_search: 98,
+  materialize_replay: 99,
   persist: 99,
+};
+
+const postProfileFamilyProgress = (stage) => {
+  const value = String(stage || "");
+  if (value.startsWith("final_membership_")) return 95;
+  if (value.startsWith("top16_")) return 93;
+  if (value === "local_finalist_validation") return 92;
+  if (["primary_", "guard_", "strict_baseline_"].some((prefix) => value.startsWith(prefix))) return 90;
+  if (["local_", "tier_"].some((prefix) => value.startsWith(prefix))) return 88;
+  if (value.startsWith("portfolio_")) return 89;
+  return null;
 };
 
 const { useState } = React;
@@ -50,11 +96,12 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
   // Older scanner builds emit score_filter after the first completed wallet, so keep the history row active
   // until the linear wallet batch is actually done.
   const visualStage = stage === "score_filter" && total > 0 && scanned < total ? "fetch_history" : stage;
-  const curIdx = SCAN_STAGES.findIndex(([keys]) => keys.includes(visualStage));
-  const pct = POST_PROFILE_PROGRESS[stage] ?? ((status && status.progressPct) || 0);
+  const curIdx = scanStageIndex(visualStage);
+  const postProfilePct = POST_PROFILE_PROGRESS[stage] ?? postProfileFamilyProgress(stage);
+  const pct = postProfilePct ?? ((status && status.progressPct) || 0);
   const el = (status && status.elapsedSec) || 0;
   const mm = String(Math.floor(el / 60)).padStart(2, "0"), ss = String(el % 60).padStart(2, "0");
-  const postProfile = Object.prototype.hasOwnProperty.call(POST_PROFILE_PROGRESS, stage);
+  const postProfile = postProfilePct != null;
   const remain = !postProfile && pct > 3 ? Math.round(el * (100 - pct) / pct) : null;
   const eta = remain != null
     ? `预计还需 ~${String(Math.floor(remain / 60)).padStart(2, "0")}:${String(remain % 60).padStart(2, "0")}`
