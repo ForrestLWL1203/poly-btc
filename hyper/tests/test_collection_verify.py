@@ -39,6 +39,21 @@ class _ParityClients:
 
 
 class CollectionParityTests(unittest.TestCase):
+    def test_portfolio_comparison_ignores_only_the_live_tail(self):
+        left = [["day", {
+            "accountValueHistory": [[1, "100"], [2, "101"]],
+            "pnlHistory": [[1, "0"], [2, "1"]],
+            "vlm": "50",
+        }]]
+        right = [["day", {
+            "accountValueHistory": [[1, "100"], [3, "102"]],
+            "pnlHistory": [[1, "0"], [3, "2"]],
+            "vlm": "50",
+        }]]
+        self.assertEqual(collection_verify._portfolio_compare(left, right), (True, 2, 2))
+        right[0][1]["accountValueHistory"][0][1] = "99"
+        self.assertFalse(collection_verify._portfolio_compare(left, right)[0])
+
     def test_aggregate_report_never_contains_endpoint_or_core_addresses(self):
         addresses = [f"0x{index:040x}" for index in range(1, 6)]
         endpoint = "https://secret-token.quiknode.pro/private/info"

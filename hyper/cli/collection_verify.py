@@ -78,6 +78,50 @@ def _canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _portfolio_compare(official, quicknode) -> tuple[bool, int, int]:
+    """Compare stable portfolio history while excluding each live tail point.
+
+    Hyperliquid appends a mark-to-market point generated at request time to
+    every history. Two sequential requests can therefore be correct while
+    their final timestamp/value differs. Period membership, non-history fields
+    (including volume), history length, and every earlier point remain strict.
+    """
+    try:
+        official_periods = {str(period): details for period, details in official}
+        quicknode_periods = {str(period): details for period, details in quicknode}
+    except (TypeError, ValueError):
+        raise VerificationError("portfolio_invalid") from None
+    if set(official_periods) != set(quicknode_periods):
+        return False, 0, 0
+    stable_points = 0
+    ignored_tails = 0
+    for period in sorted(official_periods):
+        left, right = official_periods[period], quicknode_periods[period]
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            raise VerificationError("portfolio_invalid")
+        left_other = {key: value for key, value in left.items() if key not in {
+            "accountValueHistory", "pnlHistory",
+        }}
+        right_other = {key: value for key, value in right.items() if key not in {
+            "accountValueHistory", "pnlHistory",
+        }}
+        if _canonical(left_other) != _canonical(right_other):
+            return False, stable_points, ignored_tails
+        for key in ("accountValueHistory", "pnlHistory"):
+            left_history, right_history = left.get(key), right.get(key)
+            if not isinstance(left_history, list) or not isinstance(right_history, list):
+                raise VerificationError("portfolio_invalid")
+            if abs(len(left_history) - len(right_history)) > 1:
+                return False, stable_points, ignored_tails
+            left_stable = left_history[:-1] if left_history else []
+            right_stable = right_history[:-1] if right_history else []
+            if _canonical(left_stable) != _canonical(right_stable):
+                return False, stable_points, ignored_tails
+            stable_points += len(left_stable)
+            ignored_tails += int(bool(left_history) or bool(right_history))
+    return True, stable_points, ignored_tails
+
+
 def _meta_signature(payload) -> list:
     universe = payload.get("universe") if isinstance(payload, dict) else None
     if not isinstance(universe, list):
@@ -170,7 +214,12 @@ def run_parity(db_path: str, *, days: int = 37, expected_core_count: int = 5) ->
         "ok": True,
         "coreCount": len(addrs),
         "meta": {"matched": False},
-        "portfolio": {"matchedWallets": 0, "checkedWallets": len(addrs)},
+        "portfolio": {
+            "matchedWallets": 0,
+            "checkedWallets": len(addrs),
+            "stableHistoryPoints": 0,
+            "liveTailPairsIgnored": 0,
+        },
         "fills": {
             "matchedWallets": 0,
             "checkedWallets": len(addrs),
@@ -192,7 +241,12 @@ def run_parity(db_path: str, *, days: int = 37, expected_core_count: int = 5) ->
     for addr in addrs:
         official_portfolio = clients.official({"type": "portfolio", "user": addr})
         quicknode_portfolio = clients.quicknode({"type": "portfolio", "user": addr})
-        if _canonical(official_portfolio) == _canonical(quicknode_portfolio):
+        portfolio_match, stable_points, ignored_tails = _portfolio_compare(
+            official_portfolio, quicknode_portfolio,
+        )
+        report["portfolio"]["stableHistoryPoints"] += stable_points
+        report["portfolio"]["liveTailPairsIgnored"] += ignored_tails
+        if portfolio_match:
             report["portfolio"]["matchedWallets"] += 1
 
         official_fills = _fetch_fills(clients.official, addr, start_ms)
