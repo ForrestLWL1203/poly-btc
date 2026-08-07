@@ -29,14 +29,6 @@ export function FollowSettingsPanel({
   );
   return (
     <React.Fragment>
-      <section className="settings-section settings-section-basic">
-        {blacklistParam && <div className="settings-wide-card">
-          <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
-            value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
-            onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />
-        </div>}
-      </section>
-
       <section className="settings-section settings-section-margin">
         <div className="settings-section-head settings-section-head-row">
           <div><b>保证金与杠杆</b><span>BTC 固定稳定档，其余市场按波动率 σ 自动分档</span></div>
@@ -88,6 +80,13 @@ export function FollowSettingsPanel({
           })}
         </div>
       </section>
+      {blacklistParam && <section className="settings-section settings-section-blacklist">
+        <div className="settings-wide-card">
+          <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
+            value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
+            onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />
+        </div>
+      </section>}
     </React.Fragment>
   );
 }

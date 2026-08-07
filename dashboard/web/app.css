@@ -647,12 +647,12 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .settings-param-grid > div > .prow .pctl { grid-column: 3; grid-row: 1; align-self: start; }
 .settings-param-grid > div > .prow .pd { grid-column: 2 / 4; line-height: 1.42; }
 .settings-param-grid > div > .prow.dirty { border-color: rgba(var(--accent-rgb),.28); background: rgba(var(--accent-rgb),.065); }
-.settings-wide-card { margin-top: 7px; border: 1px solid rgba(255,255,255,.065); border-radius: 11px;
+.settings-wide-card { margin-top: 0; border: 1px solid rgba(255,255,255,.065); border-radius: 11px;
   background: rgba(255,255,255,.022); overflow: hidden; }
-.settings-wide-card .coin-blacklist-row { min-height: 62px; border: none; padding: 9px 11px; align-items: center; }
-.settings-wide-card .coin-blacklist-row .pn { width: 200px; }
-.settings-wide-card .coin-blacklist-row .pd { max-width: 560px; line-height: 1.5; }
-.settings-wide-card .coin-blacklist-ctl { min-width: min(460px, 38vw); }
+.settings-wide-card .coin-blacklist-row { min-height: 48px; border: none; padding: 7px 10px; align-items: center; gap: 10px; }
+.settings-wide-card .coin-blacklist-row .pn { width: 150px; }
+.settings-wide-card .coin-blacklist-row .pd { max-width: 480px; line-height: 1.4; }
+.settings-wide-card .coin-blacklist-ctl { flex: 1 1 660px; min-width: min(620px, 48vw); }
 .settings-margin-card { margin-bottom: 8px; padding: 1px 0 6px; border: 1px solid rgba(var(--accent-rgb),.12);
   border-radius: 11px; background: linear-gradient(135deg, rgba(var(--accent-rgb),.055), rgba(255,255,255,.015)); }
 .settings-margin-card .prow { border: 0; padding: 8px 11px 3px; }
@@ -695,30 +695,34 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .range-row .pd { max-width: 680px; }
 .range-ctl { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 190px; }
 .range-ctl > span { color: var(--t4); font-size: 11px; }
-.coin-blacklist-row { align-items: flex-start; }
-.coin-blacklist-ctl { min-width: min(520px, 45vw); flex-direction: column; align-items: stretch !important; gap: 8px !important; }
-.coin-list-head { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 18px; }
+.coin-blacklist-row { align-items: center; }
+.coin-blacklist-ctl { min-width: min(620px, 48vw); align-items: stretch !important; }
+.coin-list-inline { width: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.coin-list-inline:has(.coin-tags.expanded) { align-items: flex-start; }
+.coin-list-meta { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; }
 .coin-count { color: var(--t4); font-size: 10.5px; white-space: nowrap; }
 .coin-count b { color: var(--t2); font-family: var(--mono); font-size: 11px; font-weight: 600; }
 .coin-list-toggle { padding: 0; border: 0; background: transparent; color: var(--accent); font-family: var(--sans);
   font-size: 10.5px; cursor: pointer; }
 .coin-list-toggle:hover { color: var(--accent-l); }
-.coin-tags { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-height: 28px; }
-.coin-tags.expanded { max-height: 112px; overflow-y: auto; align-content: flex-start; padding: 2px 4px 2px 0; }
+.coin-tags { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 5px; flex: 0 1 auto;
+  flex-wrap: nowrap; min-height: 28px; }
+.coin-tags.expanded { flex: 1 1 360px; max-height: 96px; overflow-y: auto; align-content: flex-start;
+  flex-wrap: wrap; padding: 1px 4px 1px 0; }
 .coin-tags.expanded::-webkit-scrollbar { width: 4px; }
 .coin-tags.expanded::-webkit-scrollbar-thumb { border-radius: 4px; background: rgba(var(--accent-rgb),.24); }
 .coin-empty { color: var(--t4); font-size: 12px; padding: 4px 0; }
-.coin-tag { display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px 5px 10px; border-radius: 9px;
+.coin-tag { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px 4px 9px; border-radius: 8px;
   border: 1px solid rgba(255,92,92,.25); background: rgba(255,92,92,.10); color: var(--red-l);
   font-family: var(--mono); font-size: 12px; cursor: pointer; }
 .coin-tag b { color: var(--t2); font-size: 13px; line-height: 1; }
 .coin-tag:hover { background: rgba(255,92,92,.17); border-color: rgba(255,92,92,.42); }
 .coin-tag:disabled { opacity: .55; cursor: default; }
-.coin-more { height: 28px; padding: 0 9px; border-radius: 9px; border: 1px solid rgba(var(--accent-rgb),.18);
+.coin-more { flex: 0 0 auto; height: 26px; padding: 0 8px; border-radius: 8px; border: 1px solid rgba(var(--accent-rgb),.18);
   background: rgba(var(--accent-rgb),.07); color: var(--accent-l); font: 600 11px/1 var(--mono); cursor: pointer; }
 .coin-more:hover { border-color: rgba(var(--accent-rgb),.34); background: rgba(var(--accent-rgb),.12); }
-.coin-add { display: flex; justify-content: flex-end; gap: 6px; }
-.coin-add input { width: 160px; height: 30px; padding: 0 9px; border-radius: 8px; background: rgba(0,0,0,.28);
+.coin-add { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 5px; }
+.coin-add input { width: 150px; height: 28px; padding: 0 8px; border-radius: 8px; background: rgba(0,0,0,.28);
   border: 1px solid var(--glass-border); color: var(--t1); font-family: var(--mono); font-size: 12px; outline: none; text-transform: uppercase; }
 .coin-add input:focus { border-color: var(--accent); }
 .deploy-row { border-top: 1px solid rgba(255,255,255,.045); border-bottom: 1px solid rgba(255,255,255,.06); border-radius: 10px;
@@ -777,7 +781,7 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .settings-param-grid, .settings-param-grid-scanner { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .settings-wide-card .coin-blacklist-row { display: grid; grid-template-columns: 10px 180px minmax(0, 1fr); }
   .settings-wide-card .coin-blacklist-row .pctl { grid-column: 3; min-width: 0; width: 100%; }
-  .settings-wide-card .coin-list-head, .settings-wide-card .coin-tags, .settings-wide-card .coin-add { justify-content: flex-start; }
+  .settings-wide-card .coin-list-inline, .settings-wide-card .coin-tags, .settings-wide-card .coin-add { justify-content: flex-start; }
 }
 
 @media (max-width: 860px) {
@@ -944,7 +948,11 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .settings-wide-card .coin-blacklist-row .pn { width: auto; }
   .settings-wide-card .coin-blacklist-row .pd { max-width: none; }
   .coin-blacklist-ctl { min-width: 0; width: 100%; }
-  .coin-list-head, .coin-tags, .coin-add { justify-content: flex-start; }
+  .coin-list-inline { flex-wrap: wrap; justify-content: flex-start; }
+  .coin-list-meta { width: 100%; }
+  .coin-tags, .coin-add { justify-content: flex-start; }
+  .coin-tags { overflow: hidden; }
+  .coin-tags.expanded { flex-basis: 100%; }
   .coin-add input { width: min(180px, 100%); }
   .range-ctl { grid-column: 2; justify-content: flex-start; min-width: 0; flex-wrap: wrap; }
   .deploy-row { margin: 0 0 8px; }
