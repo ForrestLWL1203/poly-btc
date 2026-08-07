@@ -19,11 +19,6 @@ export const resolveLevel = (...params) => {
   return LEVEL_META[picked] ? picked : "green";
 };
 
-export function ParamRiskBadge({ level }) {
-  const meta = LEVEL_META[level] || LEVEL_META.green;
-  return <span className={"param-risk-badge " + level} title={meta.title}>{meta.label}</span>;
-}
-
 export function ParamRow({ param, value, dirty, invalid, onChange }) {
   const meta = PARAM_META[param.key] || {};
   const editable = editableParam(param);
@@ -31,8 +26,8 @@ export function ParamRow({ param, value, dirty, invalid, onChange }) {
   return (
     <div>
       <div className={"prow level-" + level + (dirty ? " dirty" : "") + (invalid ? " invalid" : "")}>
-        <span className={"lvl-dot lvl-" + level} />
-        <div className="pn"><b>{param.name || meta.name || param.key}</b><ParamRiskBadge level={level} /></div>
+        <span className="lvl-dot" />
+        <div className="pn"><b>{param.name || meta.name || param.key}</b></div>
         <div className="pd">
           {param.desc || meta.desc}
           {meta.range && meta.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {meta.range}</span>}
@@ -63,8 +58,8 @@ export function RangeRow({ group, paramsByKey, vals, dirty, badKeys, onChange })
   const level = resolveLevel(pMax);
   return (
     <div className={"prow level-" + level + (dirty[group.max] ? " dirty" : "") + (badKeys.has(group.max) ? " invalid" : "")}>
-      <span className={"lvl-dot lvl-" + level} />
-      <div className="pn"><b>{group.label}·单笔保证金</b><ParamRiskBadge level={level} /></div>
+      <span className="lvl-dot" />
+      <div className="pn"><b>{group.label}·单笔保证金</b></div>
       <div className="pd">每个新仓按保证金权益额度乘以此比例计算，并为至少4次加仓预留单币容量</div>
       <EditableValue value={vals[group.max]} unit="%" ptype="pct" disabled={!editableParam(pMax)} onCommit={v => onChange(group.max, v)} />
     </div>

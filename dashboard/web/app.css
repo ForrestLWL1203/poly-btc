@@ -623,24 +623,11 @@ th.sortable:hover .sort-ind { opacity: .85; }
 
 .prow { display: flex; align-items: center; gap: 14px; padding: 7px 16px; border-bottom: 1px solid rgba(255,255,255,.04); }
 .prow:last-child { border-bottom: none; }
-.prow.level-yellow { background: rgba(255,178,122,.018); }
-.prow.level-blue { background: rgba(94,155,255,.016); }
-.prow.level-black { background: rgba(122,122,130,.018); }
-.prow.level-yellow.dirty { background: rgba(255,178,122,.075); }
-.prow.level-blue.dirty { background: rgba(94,155,255,.07); }
-.prow.level-black.dirty { background: rgba(122,122,130,.065); }
 .prow.dirty { background: rgba(var(--accent-rgb),.07); }
-.lvl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.lvl-green { background: var(--green); } .lvl-yellow { background: var(--amber); } .lvl-blue { background: var(--blue); } .lvl-black { background: var(--gray); }
+.lvl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb),.24); }
 .prow .pn { width: 220px; }
 .prow .pn b { font-size: 13.5px; font-weight: 600; }
-.param-risk-badge { display: inline-flex; align-items: center; margin-left: 8px; padding: 2px 6px; border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.035);
-  color: var(--t3); font-size: 10px; font-weight: 700; line-height: 1; vertical-align: 1px; white-space: nowrap; }
-.param-risk-badge.green { border-color: rgba(63,207,142,.18); background: rgba(63,207,142,.07); color: var(--green-l); }
-.param-risk-badge.yellow { border-color: rgba(255,178,122,.24); background: rgba(255,178,122,.08); color: var(--amber); }
-.param-risk-badge.blue { border-color: rgba(94,155,255,.22); background: rgba(94,155,255,.08); color: var(--blue-l); }
-.param-risk-badge.black { border-color: rgba(122,122,130,.18); background: rgba(122,122,130,.09); color: var(--t3); }
 .prow .pd { flex: 1; font-size: 12px; color: var(--t3); }
 .prow .pctl { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .range-row { background: rgba(255,255,255,.018); }

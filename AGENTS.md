@@ -36,6 +36,9 @@ contract; `hyper/CLAUDE.md` must not duplicate or override product rules.
 - Update the owning module's docs, tests, launcher/service paths, and build commands when moving an entry point.
 - A code deployment is not permission to start, stop, pause, drain, or change the selected Paper/Live mode.
   Preserve the current production runtime state unless the user explicitly asks to change it.
+- For small Dashboard-only visual changes explicitly requested by the user, build, commit, push, and deploy the
+  finished change without waiting for a separate deployment confirmation. Restart only the Dashboard service and
+  preserve Observer, Scanner, execution mode, and trading controls exactly as they are.
 
 ## Current verification
 
