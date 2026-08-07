@@ -8,7 +8,8 @@ deployed system auditable and lets `ops.update` diff/re-push a unit without touc
 # Long-lived services plus the two mutually-exclusive scanner jobs and their timers. `observe` is the copy
 # engine — installed but NOT started at deploy (the operator starts copy-trading from the dashboard).
 UNITS = (
-    "hl-dashboard", "hl-observe", "hl-execution-control.service", "hl-scan.service", "hl-scan.timer",
+    "hl-dashboard", "hl-observe", "hl-execution-control.service", "hl-collection-control.service",
+    "hl-scan.service", "hl-scan.timer",
     "hl-challenger-refresh.service", "hl-challenger-refresh.timer",
     "hl-finalize-resume.service", "hl-finalize-resume.timer",
 )
@@ -23,6 +24,7 @@ After=network.target
 Type=simple
 Environment=HL_CREDENTIAL_PUBLIC_KEY_FILE={app_dir}/secret/credential-wrap-public.pem
 InaccessiblePaths={app_dir}/secret/credential-wrap-private.pem
+InaccessiblePaths={app_dir}/secret/quicknode
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -77,6 +79,25 @@ UMask=0077
 """
 
 
+def collection_control_unit(app_dir, py, db):
+    return f"""[Unit]
+Description=Hyperliquid protected collection credential worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=hl-credential-wrap-private.pem:{app_dir}/secret/credential-wrap-private.pem
+Environment=HL_CREDENTIAL_PRIVATE_KEY_FILE=%d/hl-credential-wrap-private.pem
+Environment=HL_QUICKNODE_ENDPOINT_FILE={app_dir}/secret/quicknode
+WorkingDirectory={app_dir}
+ExecStart={py} -m hyper.cli.collection_control --db {db} process-pending
+TimeoutStartSec=90
+UMask=0077
+"""
+
+
 def scan_service(app_dir, py, db, days=14, scan_interval=6):
     return f"""[Unit]
 Description=Hyperliquid copy-trade incremental scanner / weekly candidate refresh
@@ -86,6 +107,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
+LoadCredential=quicknode:{app_dir}/secret/quicknode
+Environment=HL_QUICKNODE_ENDPOINT_FILE=%d/quicknode
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} scan --days {days} --scan-interval {scan_interval}
 TimeoutStartSec=infinity
@@ -119,6 +142,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
+LoadCredential=quicknode:{app_dir}/secret/quicknode
+Environment=HL_QUICKNODE_ENDPOINT_FILE=%d/quicknode
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} challenger-refresh --scan-interval {scan_interval}
 TimeoutStartSec=infinity
@@ -153,6 +178,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
+LoadCredential=quicknode:{app_dir}/secret/quicknode
+Environment=HL_QUICKNODE_ENDPOINT_FILE=%d/quicknode
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} finalize-profiled --if-ready
 TimeoutStartSec=infinity
@@ -193,6 +220,9 @@ def render_all(cfg):
         "/etc/systemd/system/hl-dashboard.service": dashboard_unit(cfg.app_dir, cfg.py, cfg.db, cfg.port),
         "/etc/systemd/system/hl-observe.service": observe_unit(cfg.app_dir, cfg.py, cfg.db),
         "/etc/systemd/system/hl-execution-control.service": execution_control_unit(
+            cfg.app_dir, cfg.py, cfg.db,
+        ),
+        "/etc/systemd/system/hl-collection-control.service": collection_control_unit(
             cfg.app_dir, cfg.py, cfg.db,
         ),
         "/etc/systemd/system/hl-scan.service": scan_service(cfg.app_dir, cfg.py, cfg.db,

@@ -4,7 +4,10 @@ import { scanStageLabel } from "./ScanMask.jsx";
 
 const PIPELINE_LABELS = ["排行榜", "Perp 确认", "有效画像", "入围名单", "Core"];
 
-export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan }) {
+const sourceLabel = source => source === "quicknode" ? "QuickNode" : "Hyperliquid";
+
+export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan,
+  collectionSource, sourceChanging, sourceError, onSourceChange, onQuickNodeSetup }) {
   const sc = discovery.scanner || { mode: "unknown", detail: {} };
   const detail = sc.detail || {};
   const scMode = sc.mode;
@@ -22,6 +25,16 @@ export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan
   const stageLabel = activeScan
     ? (stage === "score_filter" ? "深度画像 / 评分筛选" : scanStageLabel(stage))
     : "等待下一轮完整重评";
+  const selectedSource = collectionSource?.selectedSource || "official";
+  const effectiveSource = scanStatus?.effectiveSource || detail.effectiveSource
+    || collectionSource?.effectiveSource || null;
+  const taskSelectedSource = scanStatus?.selectedSource || detail.selectedSource
+    || collectionSource?.currentTaskSelectedSource || selectedSource;
+  const fallbackReason = scanStatus?.sourceFallbackReason || detail.sourceFallbackReason
+    || collectionSource?.fallbackReason;
+  const quicknodeReady = collectionSource?.quicknode?.configured
+    && Boolean(collectionSource?.quicknode?.verifiedAt);
+  const sourceLocked = busy || collectionSource?.switchLocked || sourceChanging;
 
   return (
     <section className="discovery-glass scan-command" aria-label="实时采集进度">
@@ -45,6 +58,26 @@ export function ScanStatusCard({ discovery, scanning, scanStatus, busy, doRescan
       </div>
 
       <div className="scan-command-progress">
+        <div className="scan-source-control">
+          <div className="scan-source-copy">
+            <span>采集数据源</span>
+            <small>首选 <b>{sourceLabel(selectedSource)}</b>{activeScan && <React.Fragment> · 本轮 <b>{sourceLabel(effectiveSource || taskSelectedSource)}</b></React.Fragment>}</small>
+          </div>
+          <div className="scan-source-segment" role="group" aria-label="选择采集数据源">
+            <button type="button" className={selectedSource === "quicknode" ? "on" : ""}
+              disabled={sourceLocked || !quicknodeReady} onClick={() => onSourceChange("quicknode")}
+              title={!quicknodeReady ? "请先到账户信息保存并验证 QuickNode Endpoint" : "下次采集使用 QuickNode"}>QuickNode</button>
+            <button type="button" className={selectedSource === "official" ? "on" : ""}
+              disabled={sourceLocked} onClick={() => onSourceChange("official")}>Hyperliquid</button>
+          </div>
+        </div>
+        {!quicknodeReady && selectedSource !== "quicknode" && <div className="scan-source-hint">
+          QuickNode 尚未验证 · <button type="button" onClick={onQuickNodeSetup}>前往账户信息配置</button>
+        </div>}
+        {activeScan && effectiveSource && effectiveSource !== taskSelectedSource && <div className="scan-source-fallback">
+          已回退 Hyperliquid{fallbackReason ? ` · ${fallbackReason}` : ""}
+        </div>}
+        {sourceError && <div className="scan-source-error">{sourceError}</div>}
         <div className="scan-command-progress-head">
           <div><span>实时进度</span><strong className="mono">
             {total > 0 ? <React.Fragment><em>{scanned.toLocaleString("en-US")}</em> / {total.toLocaleString("en-US")} · <em>{progressPct}%</em></React.Fragment> : "等待数据"}

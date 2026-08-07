@@ -48,6 +48,25 @@ class LauncherTests(unittest.TestCase):
             rendered["/etc/systemd/system/hl-challenger-refresh.service"],
         )
 
+    def test_quicknode_credential_is_scanner_only(self):
+        rendered = templates.render_all(DeployConfig())
+        for name in (
+            "hl-scan.service", "hl-challenger-refresh.service", "hl-finalize-resume.service",
+        ):
+            self.assertIn("LoadCredential=quicknode:", rendered[f"/etc/systemd/system/{name}"])
+            self.assertIn("HL_QUICKNODE_ENDPOINT_FILE=%d/quicknode", rendered[f"/etc/systemd/system/{name}"])
+        self.assertNotIn(
+            "LoadCredential=quicknode:", rendered["/etc/systemd/system/hl-observe.service"],
+        )
+        self.assertIn(
+            "InaccessiblePaths=/root/poly-btc/secret/quicknode",
+            rendered["/etc/systemd/system/hl-dashboard.service"],
+        )
+        self.assertIn(
+            "hyper.cli.collection_control",
+            rendered["/etc/systemd/system/hl-collection-control.service"],
+        )
+
     def test_timer_install_touches_persistent_stamps_before_enable(self):
         commands = []
 

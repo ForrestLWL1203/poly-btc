@@ -4,6 +4,12 @@ import time
 
 from .commands import (ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command,
                            insert_command, validate_command_payload)
+from .collection_source import (
+    CollectionSourceBusy,
+    CollectionSourceUnavailable,
+    ep_collection_source,
+    set_collection_source,
+)
 from .discovery import (
     ep_discovery,
     ep_pipeline_audit,
@@ -68,6 +74,7 @@ GET_ROUTES = {
     "/api/credential-wrap-key": lambda db, qs: public_wrap_key_payload(
         os.environ.get("HL_CREDENTIAL_PUBLIC_KEY_FILE", "secret/credential-wrap-public.pem")
     ),
+    "/api/collection-source": lambda db, qs: ep_collection_source(db),
 }
 
 
@@ -105,7 +112,7 @@ def _post_command_payload(db_path, auth, path, body, authed, secure_context=Fals
     ctype = body.get("type")
     if ctype not in ALLOWED_COMMANDS:
         return 400, {"error": "bad_command_type", "detail": ctype}
-    if ctype == "credential_upsert" and not secure_context:
+    if ctype in {"credential_upsert", "collection_endpoint_upsert"} and not secure_context:
         return 403, {"error": "secure_context_required"}
     try:
         payload = validate_command_payload(ctype, body.get("payload"))
@@ -137,9 +144,29 @@ def _post_params_reset_payload(db_path, auth, path, body, authed):
         return 500, {"error": "server_error", "detail": str(e)}
 
 
+def _post_quicknode_endpoint_payload(db_path, auth, path, body, authed, secure_context=False):
+    if not authed:
+        return 401, {"error": "unauthorized"}
+    if not secure_context:
+        return 403, {"error": "secure_context_required"}
+    try:
+        payload = validate_command_payload(
+            "collection_endpoint_upsert", {"envelope": body.get("envelope")},
+        )
+        cmd_id, status = exec_process_command(
+            db_path, "collection_endpoint_upsert", payload,
+        )
+        return 202, {"commandId": cmd_id, "status": status}
+    except ValueError as exc:
+        return 422, {"error": "invalid_payload", "detail": str(exc)}
+    except Exception:  # noqa: BLE001 - do not expose worker paths or endpoints
+        return 500, {"error": "server_error"}
+
+
 POST_ROUTES = {
     "/api/auth/login": _post_login_payload,
     "/api/commands": _post_command_payload,
+    "/api/collection-source/quicknode": _post_quicknode_endpoint_payload,
 }
 
 
@@ -151,7 +178,7 @@ POST_PREFIX_ROUTES = (
 def dispatch_post(db_path, auth, path, body, authed, secure_context=False):
     handler = POST_ROUTES.get(path)
     if handler:
-        if handler is _post_command_payload:
+        if handler in {_post_command_payload, _post_quicknode_endpoint_payload}:
             code, payload = handler(db_path, auth, path, body, authed, secure_context)
         else:
             code, payload = handler(db_path, auth, path, body, authed)
@@ -181,12 +208,34 @@ def _patch_params_payload(db_path, path, body):
         return 500, {"error": "server_error", "detail": str(e)}
 
 
+def _patch_collection_source_payload(db_path, path, body):
+    try:
+        return 200, set_collection_source(db_path, body.get("source"))
+    except CollectionSourceBusy as exc:
+        return 409, {"error": str(exc)}
+    except CollectionSourceUnavailable as exc:
+        return 422, {"error": str(exc)}
+    except ValueError as exc:
+        return 422, {"error": str(exc)}
+    except Exception:  # noqa: BLE001 - keep local storage details private
+        return 500, {"error": "server_error"}
+
+
+PATCH_ROUTES = {
+    "/api/collection-source": _patch_collection_source_payload,
+}
+
+
 PATCH_PREFIX_ROUTES = (
     ("/api/params/", _patch_params_payload),
 )
 
 
 def dispatch_patch(db_path, path, body):
+    handler = PATCH_ROUTES.get(path)
+    if handler:
+        code, payload = handler(db_path, path, body)
+        return True, code, payload
     for prefix, handler in PATCH_PREFIX_ROUTES:
         if path.startswith(prefix):
             code, payload = handler(db_path, path, body)

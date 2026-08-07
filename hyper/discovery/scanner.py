@@ -42,7 +42,7 @@ from hyper.copy.sector import (
     classify_coin,
 )
 from hyper.copy.fill_transition import classify_fill_transition
-from hyper.market import generation_market, price_path, rest
+from hyper.market import collection_runtime, generation_market, price_path, rest
 from hyper.execution.mode import selected_book
 from hyper.ops import resource_guard, storage_guard
 from hyper.selection import (
@@ -7545,12 +7545,14 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
                 reason=None, api_stats=None, retention_metrics=None, commit=True):
     api_stats = dict(api_stats or {})
     retention_metrics = dict(retention_metrics or {})
+    source_state = rest.collection_source_state()
     db.execute(
         "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,profiled,probed_new,added,"
         "retired,kept,rejected,n_active,full,failed,complete,kind,generation,api_requests,api_weight,"
         "outcome_reason,core_added,core_removed,core_probation,core_recovered,"
-        "core_confirmed_demotion,core_safety_exit,replacement_blocked) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "core_confirmed_demotion,core_safety_exit,replacement_blocked,selected_source,"
+        "effective_source,source_fallback_reason,source_fallback_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (started, now_iso(), round(time.time() - t0, 1), candidates, profiled, profiled, added, retired,
          kept, rejected, n_active, 1 if full else 0, failed, 1 if complete else 0,
          str(kind or "complete"), generation_id, int(api_stats.get("requests") or 0),
@@ -7561,7 +7563,9 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
          int(retention_metrics.get("recovered") or 0),
          int(retention_metrics.get("confirmedDemotion") or 0),
          int(retention_metrics.get("safetyExit") or 0),
-         int(bool(retention_metrics.get("replacementBlocked")))))
+         int(bool(retention_metrics.get("replacementBlocked"))),
+         source_state["selectedSource"], source_state["effectiveSource"],
+         source_state.get("fallbackReason"), source_state.get("fallbackAt")))
     storage_guard.trim_scan_history(db)
     if commit:
         db.commit()
@@ -8574,6 +8578,7 @@ def finalize_profiled_generation(
             "resumedFinalize": True,
             "deferredCoreRepair": repair_summary,
             "operatorStarredRetention": len(pinned_core_order),
+            "collectionSource": collection_runtime.generation_metrics(),
         }
         db.execute(
             "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
@@ -8981,6 +8986,7 @@ def refresh_challengers(db, p) -> dict:
     _set_scan_progress(
         db, state="scanning", started_at=started, stage="challenger_prepare",
         candidates_scanned=0, candidates_total=len(workset), manual=0,
+        **collection_runtime.progress_fields(),
     )
     rest.reset_request_stats()
     profiled = failed = valid_profiles = deferred_profiles = rejected = 0
@@ -9009,6 +9015,7 @@ def refresh_challengers(db, p) -> dict:
                 "baseFullGeneration": base_generation,
                 "marginEquityPct": float(p.margin_equity_pct),
                 "initialMarginEquity": float(config.INITIAL_BALANCE),
+                "collectionSource": collection_runtime.generation_metrics(),
             },
         )
         db.commit()
@@ -9703,6 +9710,7 @@ def refresh_challengers(db, p) -> dict:
             "hardSafetyCoreRemoved": len(hard_safety_core),
             "marketSnapshot": market_snapshot,
             "marketValidation": market_validation, "marketScopeAudit": scope_audit,
+            "collectionSource": collection_runtime.generation_metrics(),
             **rest.request_stats(),
         }
         db.execute(
@@ -9850,7 +9858,8 @@ def scan(db, p):
     db.commit()
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
-                       candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
+                       candidates_scanned=0, candidates_total=0, manual=1 if manual else 0,
+                       **collection_runtime.progress_fields())
     # Production profile replay resolves its generation snapshot explicitly after executable fills and sector
     # structure are known.  Do not seed it from Observer's mutable live cache.
     p.copy_bt_sigmas = {}
@@ -10063,6 +10072,7 @@ def scan(db, p):
         "collectionBlacklisted": len(blacklisted_generation),
         "marginEquityPct": float(p.margin_equity_pct),
         "initialMarginEquity": float(config.INITIAL_BALANCE),
+        "collectionSource": collection_runtime.generation_metrics(),
     }
     generation.record_workset(
         db,
@@ -10492,6 +10502,7 @@ def scan(db, p):
             "marketSnapshotProfiled": market_snapshot_audit,
             "marginEquityPct": float(p.margin_equity_pct),
             "initialMarginEquity": float(config.INITIAL_BALANCE),
+            "collectionSource": collection_runtime.generation_metrics(),
         }
         generation.mark_generation_ready(
             db,
@@ -10777,6 +10788,7 @@ def scan(db, p):
                     ),
                     "effectiveCore": list(current_core),
                     "operatorStarredRetention": len(pinned_core_order),
+                    "collectionSource": collection_runtime.generation_metrics(),
                     "marketSnapshot": market_validation,
                 },
                 stamp=publication_stamp,
@@ -10848,6 +10860,7 @@ def scan(db, p):
                 "marketSnapshot": market_validation,
                 "marketSnapshotProfiled": market_snapshot_audit,
                 "operatorStarredRetention": len(pinned_core_order),
+                "collectionSource": collection_runtime.generation_metrics(),
                 **rest.request_stats(),
             }
             db.execute(

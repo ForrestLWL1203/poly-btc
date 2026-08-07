@@ -54,11 +54,17 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
   const eta = remain != null
     ? `预计还需 ~${String(Math.floor(remain / 60)).padStart(2, "0")}:${String(remain % 60).padStart(2, "0")}`
     : postProfile ? "画像已完成 · 正在执行有限组合计算" : "预计剩余计算中…";
+  const selectedSource = status?.selectedSource === "quicknode" ? "QuickNode" : "Hyperliquid";
+  const effectiveSource = status?.effectiveSource === "quicknode" ? "QuickNode" : "Hyperliquid";
+  const fellBack = status?.effectiveSource && status.effectiveSource !== status.selectedSource;
   return (
     <div className="mask">
       <div className="radar" />
       <h2>采集进行中…</h2>
       <div className="sub">{mm}:{ss} 已用 · {eta}</div>
+      <div className={"mask-source" + (fellBack ? " fallback" : "")}>
+        首选 {selectedSource} · 本轮 {effectiveSource}{fellBack ? "（已自动回退）" : ""}
+      </div>
       <div className="mask-prog"><div className="pf" style={{ width: pct + "%" }} /></div>
       <div className="mask-meta">
         <span>{pct}%</span>

@@ -289,8 +289,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('disabled={busy || stopped || draining}', shell)
         self.assertNotIn('role="menuitem"', shell)
         self.assertIn('cfg.danger ? "btn-stop" : "btn-accent"', confirm)
-        self.assertIn(".observer-pause-btn {", css)
-        self.assertIn("background: linear-gradient(135deg, #EE7A82", css)
+        self.assertIn(".observer-pause-btn,", css)
+        self.assertIn("background: var(--accent-grad)", css)
         self.assertIn(".observer-stop-btn:disabled {", css)
         self.assertIn(".btn-stop { background: linear-gradient(135deg, #FF4D57, #D72F3B)", css)
 
@@ -378,7 +378,11 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('className="btn btn-accent"', account)
         self.assertIn("启动跟单仍使用右上角按钮", account)
         self.assertIn('api.cmdAndWait("credential_verify"', account)
-        self.assertIn("真实权益", account)
+        self.assertNotIn("真实权益", account)
+        self.assertNotIn("live-credential-proof", account)
+        self.assertNotIn("account-safety-note", account)
+        self.assertIn("QuickNodeCard", account)
+        self.assertIn("保存并验证", account)
         self.assertNotIn("启动实盘跟单", account)
         self.assertNotIn('api.cmdAndWait("execution_preflight"', account)
         self.assertNotIn('api.cmdAndWait("activate_live"', account)
@@ -399,7 +403,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         param_row = (ROOT / "dashboard" / "web" / "components" / "settings" / "ParamRow.jsx").read_text(encoding="utf-8")
 
         self.assertIn("LEVEL_META", param_row)
-        self.assertIn("param-risk-badge", param_row)
+        self.assertIn("lvl-dot", param_row)
+        self.assertNotIn("param-risk-badge", param_row)
         self.assertIn("prow level-", param_row)
         self.assertIn("resolveLevel", param_row)
 

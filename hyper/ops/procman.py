@@ -195,6 +195,7 @@ def _scan_progress_scanning(db_path):
 OBSERVER_UNIT = "hl-observe.service"
 SCAN_UNIT = "hl-scan.service"
 EXECUTION_CONTROL_UNIT = "hl-execution-control.service"
+COLLECTION_CONTROL_UNIT = "hl-collection-control.service"
 
 
 def _systemctl(*args, timeout=15):
@@ -229,6 +230,13 @@ def _execution_control_argv(db_path, command_id):
     ]
 
 
+def _collection_control_argv(db_path, command_id):
+    return [
+        PYTHON, "-m", "hyper.cli.collection_control", "--db", db_path,
+        "process", "--command-id", str(int(command_id)),
+    ]
+
+
 def trigger_execution_control(db_path, command_id):
     """Wake the protected one-shot worker after an execution command is queued."""
     if _use_systemd():
@@ -239,6 +247,25 @@ def trigger_execution_control(db_path, command_id):
     logf = open(_logfile(db_path, "execution-control"), "ab", buffering=0)
     subprocess.Popen(
         _execution_control_argv(db_path, command_id),
+        cwd=REPO,
+        stdout=logf,
+        stderr=logf,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"queued": True, "backend": "local"}
+
+
+def trigger_collection_control(db_path, command_id):
+    """Wake the protected QuickNode credential worker after an encrypted command is queued."""
+    if _use_systemd():
+        result = _systemctl("start", "--no-block", COLLECTION_CONTROL_UNIT)
+        if result is None or result.returncode != 0:
+            raise RuntimeError("collection_control_start_failed")
+        return {"queued": True, "backend": "systemd"}
+    logf = open(_logfile(db_path, "collection-control"), "ab", buffering=0)
+    subprocess.Popen(
+        _collection_control_argv(db_path, command_id),
         cwd=REPO,
         stdout=logf,
         stderr=logf,

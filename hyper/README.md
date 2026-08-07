@@ -572,6 +572,39 @@ The dashboard focuses on operator decisions rather than internal model terminolo
 - pipeline audit explains profile, selection, follow, and tuner decisions;
 - portfolio replay summary is displayed only when it belongs to the current published generation.
 
+### Scanner collection provider
+
+Complete scans, daily Challenger refreshes, manual scans, and resumed finalizers snapshot one preferred REST
+source when the job starts. New installations use Hyperliquid official `/info`. After a QuickNode endpoint has
+been verified, the operator can select QuickNode from the collection page; compatible request bodies and JSON
+responses pass through unchanged, so profile, filtering, replay, and persistence logic do not branch by source.
+
+- QuickNode is paced process-wide at 10 RPS across the existing profile workers. Leaderboard, `l2Book`, and
+  `recentTrades` remain official-only; Observer, trading, WebSocket, and L2 execution are outside this feature.
+- `401/403/404` trip the current job immediately. `429`, timeout, invalid JSON/shape, and `5xx` retry up to three
+  attempts with backoff, then lock the rest of the job to official transport. `400/422` disables only that
+  method. A finalizer inherits the generation's fallback state. Every later scheduled or manually-triggered job
+  retries its selected source, so a prior fallback never permanently disables QuickNode.
+- `selected_source`, `effective_source`, fallback code, and fallback time are recorded in live progress, scan
+  history, and generation metrics. The collection page displays both preferred and effective source and locks
+  its switch while a job is running.
+- Plaintext endpoints exist only in `secret/quicknode`. The account page encrypts input in the browser; the
+  protected collection worker accepts only HTTPS `*.quiknode.pro`, normalizes copied `/evm` endpoints to
+  `/info`, verifies a non-empty `meta.universe`, and atomically replaces the mode-`0600` file. Failed validation
+  preserves the previous endpoint. The Dashboard service cannot read the file, and API/status responses never
+  return it.
+- Production parity can be checked without exposing endpoints or Core addresses with
+  `.venv/bin/python -m hyper.cli.collection_verify --db data/hl.db`. Its aggregate-only report compares `meta`,
+  each current Core's Portfolio, 37-day fill TIDs and critical fields, plus perp and spot account state.
+
+Control API:
+
+```text
+GET   /api/collection-source
+PATCH /api/collection-source                 {"source":"quicknode"|"official"}
+POST  /api/collection-source/quicknode       {"envelope":{...}}
+```
+
 ## Run locally
 
 From the repository root:
@@ -637,6 +670,9 @@ the local mock dashboard and inspect the rendered result.
   token bucket and backs off automatically on HTTP 429. Once Observer has a Core target or open position, Scanner
   immediately returns to its configured slow interval. Scanner does not read Observer request peaks or account
   WebSocket health to change this budget.
+- When the scanner job selected QuickNode, its compatible `/info` requests use the independent 10 RPS provider
+  pacer and do not consume the official weighted token bucket. Official-only calls and any audited fallback
+  continue through the existing adaptive official budget.
 - Complete-scan and daily-refresh Profile workers use independent short-lived query-only SQLite connections
   and return cache/profile/Episode artifacts; the scanner parent alone commits them in bounded batches. Strict
   per-wallet replay and independent tune candidates use CPU-affinity-aware process workers

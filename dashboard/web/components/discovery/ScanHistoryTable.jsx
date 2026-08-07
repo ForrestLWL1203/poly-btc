@@ -9,6 +9,8 @@ const runTooltip = run => [
   `Core +${run.coreAdded || 0}/-${run.coreRemoved || 0}`,
   `观察 ${run.coreProbation || 0} · 恢复 ${run.coreRecovered || 0} · 确认降级 ${run.coreConfirmedDemotion || 0} · 安全退出 ${run.coreSafetyExit || 0}`,
   run.replacementBlocked ? "显著增益不足，替换已阻止" : "",
+  `数据源 ${run.effectiveSource === "quicknode" ? "QuickNode" : "Hyperliquid"}`,
+  run.sourceFallbackReason ? `本轮由 QuickNode 回退：${run.sourceFallbackReason}` : "",
 ].filter(Boolean).join(" · ");
 
 export function ScanHistoryTable({ runs }) {

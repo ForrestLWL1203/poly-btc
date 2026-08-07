@@ -21,7 +21,7 @@ from .sdk_clients import CredentialError, _normalize_address
 ENVELOPE_VERSION = 1
 ENVELOPE_ALGORITHM = "RSA-OAEP-256+A256GCM"
 _MAX_ENVELOPE_JSON_BYTES = 8_192
-_MAX_CIPHERTEXT_BYTES = 512
+_MAX_CIPHERTEXT_BYTES = 4_096
 _MAX_WRAPPED_KEY_BYTES = 1_024
 
 
@@ -138,19 +138,24 @@ def public_wrap_key_payload(path_value: str | os.PathLike) -> dict:
     }
 
 
-def decrypt_agent_wallet(
+def decrypt_wrapped_secret(
     envelope: Any,
     *,
-    network: str,
-    account_address: str,
-    agent_address: str,
+    aad: bytes,
     private_key_path: str | os.PathLike,
-):
+) -> bytearray:
+    """Unwrap one browser-encrypted secret without interpreting its contents.
+
+    Product-specific workers own the AAD and plaintext validation. Returning a
+    mutable buffer lets callers zero the decrypted bytes as soon as they have
+    constructed their runtime object or persisted the protected credential.
+    """
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding, rsa
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from eth_account import Account
 
+    if not isinstance(aad, bytes) or not aad or len(aad) > 1_024:
+        raise CredentialError("invalid_credential_aad")
     normalized = validate_envelope(envelope)
     path = _protected_regular_file(private_key_path, private=True)
     try:
@@ -162,7 +167,9 @@ def decrypt_agent_wallet(
     if _public_key_id(private_key.public_key()) != normalized["wrapKeyId"]:
         raise CredentialError("credential_wrap_key_mismatch")
 
-    wrapped = _decode_b64(normalized["wrappedKey"], code="invalid_wrapped_key", maximum=_MAX_WRAPPED_KEY_BYTES)
+    wrapped = _decode_b64(
+        normalized["wrappedKey"], code="invalid_wrapped_key", maximum=_MAX_WRAPPED_KEY_BYTES,
+    )
     iv = _decode_b64(normalized["iv"], code="invalid_credential_iv", maximum=32)
     ciphertext = _decode_b64(
         normalized["ciphertext"], code="invalid_credential_ciphertext", maximum=_MAX_CIPHERTEXT_BYTES,
@@ -170,11 +177,33 @@ def decrypt_agent_wallet(
     try:
         aes_key = private_key.decrypt(
             wrapped,
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
         )
-        plaintext = bytearray(AESGCM(aes_key).decrypt(
-            iv, ciphertext, credential_aad(network, account_address, agent_address),
-        ))
+        return bytearray(AESGCM(aes_key).decrypt(iv, ciphertext, aad))
+    except Exception:  # noqa: BLE001 - never expose cryptographic or secret-derived details
+        raise CredentialError("credential_decryption_failed") from None
+
+
+def decrypt_agent_wallet(
+    envelope: Any,
+    *,
+    network: str,
+    account_address: str,
+    agent_address: str,
+    private_key_path: str | os.PathLike,
+):
+    from eth_account import Account
+
+    try:
+        plaintext = decrypt_wrapped_secret(
+            envelope,
+            aad=credential_aad(network, account_address, agent_address),
+            private_key_path=private_key_path,
+        )
         raw_text = bytes(plaintext).decode("ascii").strip()
         # Rabby/MetaMask exports and browser libraries disagree on whether the
         # conventional ``0x`` prefix is present.  Accept both exact shapes,
@@ -188,6 +217,18 @@ def decrypt_agent_wallet(
         if len(raw_key) != 32:
             raise ValueError("length")
         wallet = Account.from_key(raw_key)
+    except CredentialError as exc:
+        # Envelope/key-file validation errors are safe operational diagnostics
+        # and historically crossed this boundary unchanged. AAD binding and
+        # cryptographic failures remain deliberately indistinguishable.
+        if str(exc) not in {
+            "invalid_credential_network",
+            "invalid_account_address",
+            "invalid_expected_agent_address",
+            "credential_decryption_failed",
+        }:
+            raise
+        raise CredentialError("credential_decryption_failed") from None
     except Exception:  # noqa: BLE001 - never expose cryptographic or secret-derived details
         raise CredentialError("credential_decryption_failed") from None
     finally:

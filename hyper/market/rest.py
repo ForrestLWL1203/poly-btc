@@ -19,6 +19,23 @@ _stats_lock = threading.Lock()
 _request_stats = {
     "requests": 0, "retries": 0, "estimated_weight": 0,
     "rate_limited": 0, "budget_wait_s": 0.0,
+    "quicknode_requests": 0, "quicknode_retries": 0,
+    "official_requests": 0, "quicknode_method_fallbacks": 0,
+}
+_QUICKNODE_UNSUPPORTED_TYPES = frozenset({"l2Book", "recentTrades"})
+_quicknode_pace_lock = threading.Lock()
+_quicknode_last_start = [0.0]
+_collection_lock = threading.Lock()
+_collection = {
+    "selected": "official",
+    "effective": "official",
+    "endpoint": None,
+    "fallback_reason": None,
+    "fallback_at": None,
+    "disabled_types": set(),
+    "on_change": None,
+    "healthy_reported": False,
+    "quicknode_rps": 10.0,
 }
 _WEIGHT_ESTIMATE = {
     "userFills": 20, "userFillsByTime": 20, "portfolio": 20,
@@ -49,6 +66,8 @@ def reset_request_stats():
         _request_stats.update(
             requests=0, retries=0, estimated_weight=0,
             rate_limited=0, budget_wait_s=0.0,
+            quicknode_requests=0, quicknode_retries=0,
+            official_requests=0, quicknode_method_fallbacks=0,
         )
 
 
@@ -60,6 +79,139 @@ def request_stats():
         out["budget_scale"] = float(_budget["scale"])
         out["budget_weight_per_min"] = float(_budget["weight_per_min"])
     return out
+
+
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def collection_source_state() -> dict:
+    with _collection_lock:
+        return {
+            "selectedSource": str(_collection["selected"]),
+            "effectiveSource": str(_collection["effective"]),
+            "fallbackReason": _collection["fallback_reason"],
+            "fallbackAt": _collection["fallback_at"],
+            "quicknodeHealthy": bool(_collection["healthy_reported"]),
+        }
+
+
+def _notify_collection_change(callback=None) -> None:
+    callback = callback or _collection.get("on_change")
+    if not callback:
+        return
+    try:
+        callback(collection_source_state())
+    except Exception:  # noqa: BLE001 - status reporting must never break collection
+        pass
+
+
+def configure_collection_source(
+    *,
+    selected: str,
+    quicknode_endpoint: str | None = None,
+    inherited_state: dict | None = None,
+    quicknode_rps: float = 10.0,
+    on_change=None,
+) -> dict:
+    """Configure the process-local collection transport.
+
+    Observer never calls this function, so its REST polling stays on the
+    official endpoint. Scanner/finalizer processes snapshot operator intent at
+    job start and may inherit a generation's already-tripped circuit breaker.
+    """
+    chosen = "quicknode" if str(selected or "").lower() == "quicknode" else "official"
+    inherited_state = inherited_state if isinstance(inherited_state, dict) else {}
+    inherited_fallback = (
+        chosen == "quicknode"
+        and inherited_state.get("selectedSource") == "quicknode"
+        and inherited_state.get("effectiveSource") == "official"
+        and inherited_state.get("fallbackReason")
+    )
+    with _collection_lock:
+        _collection.update(
+            selected=chosen,
+            endpoint=(str(quicknode_endpoint).strip() if quicknode_endpoint else None),
+            disabled_types=set(),
+            on_change=on_change,
+            healthy_reported=False,
+            quicknode_rps=max(0.1, float(quicknode_rps or 10.0)),
+        )
+        if chosen == "official":
+            _collection.update(effective="official", fallback_reason=None, fallback_at=None)
+        elif inherited_fallback:
+            _collection.update(
+                effective="official",
+                fallback_reason=str(inherited_state.get("fallbackReason"))[:80],
+                fallback_at=inherited_state.get("fallbackAt") or _utc_now(),
+            )
+        elif _collection["endpoint"]:
+            _collection.update(effective="quicknode", fallback_reason=None, fallback_at=None)
+        else:
+            _collection.update(
+                effective="official",
+                fallback_reason="quicknode_not_configured",
+                fallback_at=_utc_now(),
+            )
+    with _quicknode_pace_lock:
+        _quicknode_last_start[0] = 0.0
+    _notify_collection_change(on_change)
+    return collection_source_state()
+
+
+def _quicknode_eligible(body: dict) -> bool:
+    request_type = str(body.get("type") or "")
+    with _collection_lock:
+        return bool(
+            _collection["selected"] == "quicknode"
+            and _collection["effective"] == "quicknode"
+            and _collection["endpoint"]
+            and request_type not in _QUICKNODE_UNSUPPORTED_TYPES
+            and request_type not in _collection["disabled_types"]
+        )
+
+
+def _trip_quicknode(reason: str) -> None:
+    changed = False
+    with _collection_lock:
+        if _collection["selected"] == "quicknode" and _collection["effective"] != "official":
+            _collection.update(
+                effective="official",
+                fallback_reason=str(reason or "quicknode_unavailable")[:80],
+                fallback_at=_utc_now(),
+            )
+            changed = True
+    if changed:
+        _notify_collection_change()
+
+
+def _mark_quicknode_healthy() -> None:
+    changed = False
+    with _collection_lock:
+        if _collection["effective"] == "quicknode" and not _collection["healthy_reported"]:
+            _collection["healthy_reported"] = True
+            changed = True
+    if changed:
+        _notify_collection_change()
+
+
+def _disable_quicknode_type(request_type: str) -> None:
+    with _collection_lock:
+        _collection["disabled_types"].add(str(request_type or ""))
+    with _stats_lock:
+        _request_stats["quicknode_method_fallbacks"] += 1
+
+
+def _reserve_quicknode() -> float:
+    with _quicknode_pace_lock:
+        with _collection_lock:
+            interval = 1.0 / max(0.1, float(_collection["quicknode_rps"]))
+        now = time.monotonic()
+        wait = max(0.0, interval - (now - float(_quicknode_last_start[0])))
+        if wait > 0.0:
+            time.sleep(wait)
+        _quicknode_last_start[0] = time.monotonic()
+        return wait
 
 
 def configure_post_budget(*, weight_per_min: float | None, burst_weight: float = 20.0,
@@ -153,7 +305,7 @@ def _rate_limit_feedback(*, limited: bool) -> None:
             _budget["successes"] = 0
 
 
-def _charge_result_weight(body: dict, result) -> int:
+def _charge_result_weight(body: dict, result, *, reserve_budget: bool = True) -> int:
     """Charge response-sized weight after the server reveals the returned row count."""
     divisor = _RESULT_WEIGHT_DIVISORS.get(body.get("type"))
     if divisor is None or not isinstance(result, list):
@@ -164,7 +316,7 @@ def _charge_result_weight(body: dict, result) -> int:
     with _stats_lock:
         _request_stats["estimated_weight"] += extra
     with _pace_lock:
-        if _budget["enabled"]:
+        if reserve_budget and _budget["enabled"]:
             # A negative balance is deliberate debt.  The next reservation waits for both its own request
             # and the extra response-sized weight consumed by this result.
             _budget["tokens"] = float(_budget["tokens"]) - float(extra)
@@ -189,19 +341,17 @@ def _get(url: str, retries: int = 3):
     raise err  # type: ignore[misc]
 
 
-def post(body: dict, retries: int = 7):
-    """POST to the info endpoint, globally paced and with 429-aware backoff."""
-    data = json.dumps(body).encode()
+def _official_post(body: dict, data: bytes, retries: int):
+    """Send one logical request through the existing official weighted path."""
     err = None
     weight = _WEIGHT_ESTIMATE.get(body.get("type"), 1)
-    with _stats_lock:
-        _request_stats["requests"] += 1
-        _request_stats["estimated_weight"] += weight
     for attempt in range(retries):
         if attempt:
             with _stats_lock:
                 _request_stats["retries"] += 1
         _reserve_post(weight)
+        with _stats_lock:
+            _request_stats["official_requests"] += 1
         try:                                               # ... the request below runs concurrently
             req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -222,6 +372,74 @@ def post(body: dict, retries: int = 7):
     raise err  # type: ignore[misc]
 
 
+def _quicknode_post(body: dict, data: bytes):
+    request_type = str(body.get("type") or "")
+    err = None
+    for attempt in range(3):
+        if attempt:
+            with _stats_lock:
+                _request_stats["retries"] += 1
+                _request_stats["quicknode_retries"] += 1
+        _reserve_quicknode()
+        with _collection_lock:
+            endpoint = _collection["endpoint"]
+        with _stats_lock:
+            _request_stats["quicknode_requests"] += 1
+        try:
+            req = urllib.request.Request(str(endpoint), data=data, headers=config.UA)
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode())
+            if not isinstance(result, (dict, list)) \
+                    or (isinstance(result, dict) and "error" in result):
+                raise ValueError("quicknode_invalid_response")
+            _charge_result_weight(body, result, reserve_budget=False)
+            _mark_quicknode_healthy()
+            return result
+        except urllib.error.HTTPError as exc:
+            err = exc
+            if exc.code in {400, 422}:
+                _disable_quicknode_type(request_type)
+                return None
+            if exc.code in {401, 403, 404}:
+                _trip_quicknode(f"quicknode_http_{exc.code}")
+                return None
+            if exc.code == 429:
+                with _stats_lock:
+                    _request_stats["rate_limited"] += 1
+            if exc.code != 429 and not 500 <= exc.code <= 599:
+                _trip_quicknode("quicknode_http_error")
+                return None
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            err = exc
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+        if attempt < 2:
+            time.sleep(min(2.0 ** attempt, 4.0))
+    if isinstance(err, urllib.error.HTTPError):
+        reason = f"quicknode_http_{err.code}" if err.code == 429 or 500 <= err.code <= 599 \
+            else "quicknode_http_error"
+    elif isinstance(err, (json.JSONDecodeError, UnicodeDecodeError, ValueError)):
+        reason = "quicknode_invalid_response"
+    else:
+        reason = "quicknode_unavailable"
+    _trip_quicknode(reason)
+    return None
+
+
+def post(body: dict, retries: int = 7):
+    """POST one unmodified /info request through the process-selected provider."""
+    data = json.dumps(body).encode()
+    weight = _WEIGHT_ESTIMATE.get(body.get("type"), 1)
+    with _stats_lock:
+        _request_stats["requests"] += 1
+        _request_stats["estimated_weight"] += weight
+    if _quicknode_eligible(body):
+        result = _quicknode_post(body, data)
+        if result is not None:
+            return result
+    return _official_post(body, data, retries)
+
+
 def post_soft(body: dict):
     """Like post() but returns None on failure instead of raising (for backfill)."""
     try:
@@ -235,6 +453,11 @@ def realtime_post_soft(body: dict, timeout: float = 5.0):
 
     This deliberately does not use the global historical/fill pacer: one allMids call every few seconds is
     cheap, and sharing the fill-signal queue can leave stock marks stale behind dozens of userFills calls."""
+    if _quicknode_eligible(body):
+        try:
+            return post(body, retries=3)
+        except Exception:  # noqa: BLE001
+            return None
     try:
         data = json.dumps(body).encode()
         req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)

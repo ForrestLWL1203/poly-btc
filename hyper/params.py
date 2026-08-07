@@ -21,6 +21,8 @@ from .util import now_iso
 # wiring (apply_scanner_params / _reload_params) still resolves them without adding operator clutter.
 PARAM_SPEC = [
     # ── ① 采集 watchlist 参数 (effect = rescan) ──────────────────────────────────
+    ("COLLECTION_SOURCE", "scanner", "hidden", "text", "rescan", "official",
+        "采集数据源", "QuickNode 或 Hyperliquid 官方；任务启动时快照"),
     ("HARVEST_MIN_ACCT",     "scanner", "hidden", "usd",     "rescan", config.HARVEST_MIN_ACCT,
         "旧钱包最低资金", "仅兼容旧快照；不再参与召回或资格"),
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,

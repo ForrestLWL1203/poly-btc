@@ -69,6 +69,35 @@ export const api = {
     });
     return (await requireOk(r, "param_patch_failed")).data;
   },
+
+  async patchCollectionSource(source) {
+    const r = await fetch("/api/collection-source", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer " + api.token },
+      body: JSON.stringify({ source }),
+    });
+    return requireOk(r, "collection_source_update_failed");
+  },
+
+  async saveQuickNodeEndpoint(envelope, timeoutMs = 90000) {
+    const r = await fetch("/api/collection-source/quicknode", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + api.token },
+      body: JSON.stringify({ envelope }),
+    });
+    const queued = await requireOk(r, "quicknode_verification_failed");
+    if (!queued.commandId) throw new Error(queued.error || "quicknode_verification_failed");
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) {
+      const state = await api.get("/api/commands/" + queued.commandId);
+      if (state.status === "done") return state.result || state;
+      if (["failed", "error"].includes(state.status)) {
+        throw new Error(state.error || "quicknode_verification_failed");
+      }
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+    throw new Error("command_timeout");
+  },
 };
 
 const bytesToB64 = bytes => {
@@ -99,6 +128,40 @@ export async function encryptCredential(secret, wrapKey, context) {
   );
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv: nonce, additionalData: aad }, dek, new TextEncoder().encode(secret.trim())
+  );
+  const wrappedKey = await window.crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, rawDek);
+  return {
+    version: wrapKey.version,
+    algorithm: wrapKey.algorithm,
+    wrapKeyId: wrapKey.wrapKeyId,
+    wrappedKey: bytesToB64(wrappedKey),
+    iv: bytesToB64(nonce),
+    ciphertext: bytesToB64(ciphertext),
+  };
+}
+
+export async function encryptQuickNodeEndpoint(endpoint, wrapKey) {
+  if (!window.crypto || !window.crypto.subtle || !wrapKey || !wrapKey.spki) {
+    throw new Error("secure_context_required");
+  }
+  if (!window.isSecureContext) throw new Error("secure_context_required");
+  const value = String(endpoint || "").trim();
+  let parsed;
+  try { parsed = new URL(value); }
+  catch (_error) { throw new Error("quicknode_endpoint_invalid"); }
+  if (parsed.protocol !== "https:" || !parsed.hostname.toLowerCase().endsWith(".quiknode.pro")
+      || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("quicknode_endpoint_invalid");
+  }
+  const publicKey = await window.crypto.subtle.importKey(
+    "spki", b64ToBytes(wrapKey.spki), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]
+  );
+  const dek = await window.crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+  const rawDek = await window.crypto.subtle.exportKey("raw", dek);
+  const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode("poly-btc-hyperliquid-collection-v1\nquicknode");
+  const ciphertext = await window.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: aad }, dek, new TextEncoder().encode(value)
   );
   const wrappedKey = await window.crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, rawDek);
   return {

@@ -21,7 +21,7 @@ from hyper import config, params, storage
 from hyper.discovery import collection_blacklist, frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
 from hyper.execution.mode import selected_book
-from hyper.market import rest
+from hyper.market import collection_runtime, rest
 from hyper.ops import paper_reset, procman, scan_lock, storage_guard
 from hyper.ops import resource_guard
 from hyper.util import now_iso
@@ -209,6 +209,7 @@ def _serve_rescan(db, db_path=config.DEFAULT_DB):
             due = _hours_since_last_scan(db) >= AUTO_SCAN_EVERY_H
             if (pend or due) and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
+                collection_runtime.configure_for_job(db)
                 cadence = _configure_scan_cadence(db, ns, manual=bool(pend))
                 why = f"command #{pend[0]}" if pend else "auto 72h complete candidate reevaluation"
                 print(f"-> running scan [{why}]", flush=True)
@@ -499,6 +500,7 @@ def main() -> int:
             "SELECT 1 FROM commands WHERE status='pending' AND type='rescan' LIMIT 1"
         ).fetchone()
         _configure_scan_cadence(db, args, manual=bool(pending_manual))
+        collection_runtime.configure_for_job(db)
         _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
         args.defer_finalize = True
@@ -541,6 +543,7 @@ def main() -> int:
         ns.workers = args.workers
         ns.scan_interval = args.scan_interval
         config.MIN_POST_INTERVAL = args.scan_interval
+        collection_runtime.configure_for_job(db)
         _start_adaptive_pace(args.db, args.scan_interval)
         params.apply_scanner_params(db, ns)
         try:
@@ -625,6 +628,9 @@ def main() -> int:
             print(json.dumps({"status": "idle", "reason": "no_ready_generation"}, sort_keys=True))
             db.close()
             return 0
+        collection_runtime.configure_for_job(
+            db, generation_id=args.generation, inherit=True,
+        )
         try:
             with scan_lock.acquire(args.db):
                 with scanner._ScannerHeartbeat(db):

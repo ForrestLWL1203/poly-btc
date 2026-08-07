@@ -1,6 +1,7 @@
 """Discovery and scanner-status dashboard endpoints."""
 
 import json
+import sqlite3
 import time
 
 from hyper import config
@@ -20,7 +21,8 @@ def scanner_status(db):
     try:
         progress = q1(
             db,
-            "SELECT state,started_at,stage,candidates_scanned,candidates_total,updated_at "
+            "SELECT state,started_at,stage,candidates_scanned,candidates_total,updated_at,"
+            "selected_source,effective_source,source_fallback_reason,source_fallback_at "
             "FROM scan_progress WHERE id=1",
         )
         if progress is None:  # compact legacy test/status databases omit started_at
@@ -34,14 +36,23 @@ def scanner_status(db):
     progress_active = bool(progress and progress["state"] == "scanning")
     if not r:
         if progress_active:
+            detail = {
+                "stage": progress["stage"],
+                "scanned": progress["candidates_scanned"],
+                "total": progress["candidates_total"],
+            }
+            if "selected_source" in progress.keys():
+                detail.update({
+                    "selectedSource": progress["selected_source"] or "official",
+                    "effectiveSource": progress["effective_source"]
+                    or progress["selected_source"] or "official",
+                    "sourceFallbackReason": progress["source_fallback_reason"],
+                    "sourceFallbackAt": progress["source_fallback_at"],
+                })
             return {
                 "mode": "scanning", "stale": False,
                 "heartbeatAt": progress["updated_at"],
-                "detail": {
-                    "stage": progress["stage"],
-                    "scanned": progress["candidates_scanned"],
-                    "total": progress["candidates_total"],
-                },
+                "detail": detail,
             }
         ran = q1(db, "SELECT COUNT(*) c FROM scan_runs")
         return {"mode": "idle" if (ran and ran["c"]) else "unknown", "stale": False,
@@ -61,6 +72,14 @@ def scanner_status(db):
             "scanned": progress["candidates_scanned"],
             "total": progress["candidates_total"],
         })
+        if "selected_source" in progress.keys():
+            detail.update({
+                "selectedSource": progress["selected_source"] or "official",
+                "effectiveSource": progress["effective_source"]
+                or progress["selected_source"] or "official",
+                "sourceFallbackReason": progress["source_fallback_reason"],
+                "sourceFallbackAt": progress["source_fallback_at"],
+            })
         if "started_at" in progress.keys():
             detail["startedAt"] = progress["started_at"]
     hb = iso_epoch(heartbeat_at)
@@ -257,18 +276,31 @@ def ep_discovery(db):
 
 def ep_scan_runs(db, limit):
     limit = max(0, min(int(limit), int(config.SCAN_HISTORY_KEEP_COUNT)))
-    rows = qall(db, "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
-                    "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
-                    "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"
-                    "COALESCE(kind,'complete') AS kind,COALESCE(api_requests,0) AS api_requests,"
-                    "COALESCE(api_weight,0) AS api_weight,outcome_reason,"
-                    "COALESCE(core_added,0) AS core_added,COALESCE(core_removed,0) AS core_removed,"
-                    "COALESCE(core_probation,0) AS core_probation,"
-                    "COALESCE(core_recovered,0) AS core_recovered,"
-                    "COALESCE(core_confirmed_demotion,0) AS core_confirmed_demotion,"
-                    "COALESCE(core_safety_exit,0) AS core_safety_exit,"
-                    "COALESCE(replacement_blocked,0) AS replacement_blocked "
-                    "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
+    base_sql = (
+        "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
+        "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
+        "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"
+        "COALESCE(kind,'complete') AS kind,COALESCE(api_requests,0) AS api_requests,"
+        "COALESCE(api_weight,0) AS api_weight,outcome_reason,"
+        "COALESCE(core_added,0) AS core_added,COALESCE(core_removed,0) AS core_removed,"
+        "COALESCE(core_probation,0) AS core_probation,"
+        "COALESCE(core_recovered,0) AS core_recovered,"
+        "COALESCE(core_confirmed_demotion,0) AS core_confirmed_demotion,"
+        "COALESCE(core_safety_exit,0) AS core_safety_exit,"
+        "COALESCE(replacement_blocked,0) AS replacement_blocked"
+    )
+    try:
+        rows = db.execute(
+            base_sql + ",COALESCE(selected_source,'official') AS selected_source,"
+            "COALESCE(effective_source,selected_source,'official') AS effective_source,"
+            "source_fallback_reason,source_fallback_at "
+            "FROM scan_runs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        has_source = True
+    except sqlite3.OperationalError:
+        rows = qall(db, base_sql + " FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
+        has_source = False
     return {"runs": [{"at": _col(r, "started_at", 0), "finishedAt": _col(r, "finished_at", 1),
                       "candidates": _col(r, "candidates", 2), "profiled": _col(r, "profiled", 3),
                       "added": _col(r, "added", 4), "retired": _col(r, "retired", 5),
@@ -285,7 +317,15 @@ def ep_scan_runs(db, limit):
                       "coreRecovered": _col(r, "core_recovered", 19) or 0,
                       "coreConfirmedDemotion": _col(r, "core_confirmed_demotion", 20) or 0,
                       "coreSafetyExit": _col(r, "core_safety_exit", 21) or 0,
-                      "replacementBlocked": bool(_col(r, "replacement_blocked", 22))}
+                      "replacementBlocked": bool(_col(r, "replacement_blocked", 22)),
+                      "selectedSource": (_col(r, "selected_source", 23) or "official")
+                      if has_source else "official",
+                      "effectiveSource": (_col(r, "effective_source", 24) or "official")
+                      if has_source else "official",
+                      "sourceFallbackReason": _col(r, "source_fallback_reason", 25)
+                      if has_source else None,
+                      "sourceFallbackAt": _col(r, "source_fallback_at", 26)
+                      if has_source else None}
                      for r in rows]}
 
 
@@ -298,9 +338,17 @@ def ep_scan_status(db):
     total, scanned, eta = r["candidates_total"] or 0, r["candidates_scanned"] or 0, r["eta_sec"] or 1200
     pct = round(scanned / total * 100) if total else min(99, round(elapsed / eta * 100))
     manual = bool(r["manual"]) if "manual" in r.keys() else True
+    selected_source = r["selected_source"] if "selected_source" in r.keys() else "official"
+    effective_source = r["effective_source"] if "effective_source" in r.keys() else selected_source
     return {"state": "scanning", "manual": manual, "startedAt": r["started_at"], "elapsedSec": elapsed,
             "etaSec": eta, "progressPct": pct, "candidatesScanned": scanned,
-            "candidatesTotal": total, "stage": r["stage"]}
+            "candidatesTotal": total, "stage": r["stage"],
+            "selectedSource": selected_source or "official",
+            "effectiveSource": effective_source or selected_source or "official",
+            "sourceFallbackReason": r["source_fallback_reason"]
+            if "source_fallback_reason" in r.keys() else None,
+            "sourceFallbackAt": r["source_fallback_at"]
+            if "source_fallback_at" in r.keys() else None}
 
 
 def ep_score_dist(db):

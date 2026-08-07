@@ -693,7 +693,11 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     core_recovered INTEGER DEFAULT 0,
     core_confirmed_demotion INTEGER DEFAULT 0,
     core_safety_exit INTEGER DEFAULT 0,
-    replacement_blocked INTEGER DEFAULT 0
+    replacement_blocked INTEGER DEFAULT 0,
+    selected_source TEXT DEFAULT 'official',
+    effective_source TEXT DEFAULT 'official',
+    source_fallback_reason TEXT,
+    source_fallback_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 
@@ -1029,6 +1033,19 @@ CREATE INDEX IF NOT EXISTS idx_live_ca_pos_act ON live_copy_action(pos_id, actio
 -- The dashboard NEVER writes business tables directly. All writes go here as commands consumed by
 -- Observer/Scanner (single-writer invariant). Read side: process_status / scan_progress / params.
 
+-- QuickNode credential health is mutated only by the protected collection-control worker and scanner.
+-- The endpoint itself never enters SQLite; it remains in the protected secret file/systemd credential.
+CREATE TABLE IF NOT EXISTS collection_source_control (
+    id                         INTEGER PRIMARY KEY CHECK (id = 1),
+    quicknode_configured       INTEGER NOT NULL DEFAULT 0,
+    quicknode_status           TEXT NOT NULL DEFAULT 'missing',
+    quicknode_verified_at      TEXT,
+    quicknode_last_success_at  TEXT,
+    quicknode_error_code       TEXT,
+    quicknode_error_at         TEXT,
+    updated_at                 TEXT
+);
+
 -- Command channel: the ONLY way the dashboard mutates trading state. Observer/Scanner poll this,
 -- execute, and flip status. owner+TTL lets a consumer self-heal a stuck flag if the issuer dies.
 CREATE TABLE IF NOT EXISTS commands (
@@ -1068,6 +1085,10 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     candidates_total   INTEGER DEFAULT 0,
     eta_sec            INTEGER,
     manual             INTEGER DEFAULT 0,  -- 1 = dashboard-triggered (lock UI); 0 = scheduled background scan
+    selected_source    TEXT DEFAULT 'official',
+    effective_source   TEXT DEFAULT 'official',
+    source_fallback_reason TEXT,
+    source_fallback_at TEXT,
     updated_at         TEXT
 );
 
@@ -1498,6 +1519,14 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN core_confirmed_demotion INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN core_safety_exit INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN replacement_blocked INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN selected_source TEXT DEFAULT 'official'",
+    "ALTER TABLE scan_runs ADD COLUMN effective_source TEXT DEFAULT 'official'",
+    "ALTER TABLE scan_runs ADD COLUMN source_fallback_reason TEXT",
+    "ALTER TABLE scan_runs ADD COLUMN source_fallback_at TEXT",
+    "ALTER TABLE scan_progress ADD COLUMN selected_source TEXT DEFAULT 'official'",
+    "ALTER TABLE scan_progress ADD COLUMN effective_source TEXT DEFAULT 'official'",
+    "ALTER TABLE scan_progress ADD COLUMN source_fallback_reason TEXT",
+    "ALTER TABLE scan_progress ADD COLUMN source_fallback_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_generation TEXT",
     "ALTER TABLE follow_history ADD COLUMN last_followed_generation TEXT",

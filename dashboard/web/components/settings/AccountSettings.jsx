@@ -1,10 +1,9 @@
-import { api, encryptCredential } from "../../lib/api.js";
+import { api, encryptCredential, encryptQuickNodeEndpoint } from "../../lib/api.js";
 import { friendlyExecutionError } from "../../lib/execution.js";
 import { fUsd } from "../../lib/format.js";
 
 const { useCallback, useEffect, useState } = React;
 
-const short = value => value ? value.slice(0, 8) + "…" + value.slice(-6) : "—";
 const expiryText = value => {
   if (!value) return "—";
   const date = new Date(value);
@@ -14,6 +13,63 @@ const expiryText = value => {
     hour: "2-digit", minute: "2-digit", hour12: false,
   });
 };
+
+const QUICKNODE_LABEL = {
+  verified: "已验证",
+  fallback: "最近故障",
+  error: "验证失败",
+  missing: "未配置",
+  not_configured: "未配置",
+};
+
+function QuickNodeCard({ source, wrapKey, reload }) {
+  const [endpoint, setEndpoint] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
+  const quicknode = source?.quicknode || {};
+  const status = quicknode.status || "not_configured";
+
+  const save = async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const envelope = await encryptQuickNodeEndpoint(endpoint, wrapKey);
+      await api.saveQuickNodeEndpoint(envelope);
+      setEndpoint("");
+      setMessage({ ok: true, text: "Endpoint 验证通过，已安全保存；下次采集可选择 QuickNode。" });
+      await reload();
+    } catch (error) {
+      setMessage({ ok: false, text: friendlyExecutionError(error) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <section className="quicknode-account-card">
+    <div className="account-card-head quicknode-card-head">
+      <div>
+        <span className="account-kicker">COLLECTION PROVIDER</span>
+        <h3>QuickNode</h3>
+      </div>
+      <div className="quicknode-card-status">
+        <span className={"account-state-chip " + status}>{QUICKNODE_LABEL[status] || "状态异常"}</span>
+        <small>最近验证 {expiryText(quicknode.verifiedAt)}</small>
+      </div>
+    </div>
+    <div className="quicknode-endpoint-row">
+      <label><span>Endpoint</span><input type="password" value={endpoint}
+        onChange={event => setEndpoint(event.target.value)} placeholder="https://…quiknode.pro/…"
+        autoComplete="new-password" data-1p-ignore="true" data-lpignore="true" spellCheck="false" /></label>
+      <button className="btn btn-accent" disabled={saving || !endpoint.trim() || !wrapKey} onClick={save}>
+        {saving ? "正在验证…" : "保存并验证"}
+      </button>
+    </div>
+    {message && <div className={"account-inline-message " + (message.ok ? "ok" : "error")}>{message.text}</div>}
+    {!message && quicknode.errorCode && <div className="account-inline-message error">
+      最近失败：{friendlyExecutionError(quicknode.errorCode)}
+    </div>}
+  </section>;
+}
 
 const CREDENTIAL_LABEL = {
   verified: "已验证",
@@ -88,7 +144,6 @@ function LiveAccountCard({ status, wrapKey, reload, refreshDashboard, confirm, o
       <div>
         <span className="account-kicker">MAINNET ACCOUNT</span>
         <h3>实盘账户</h3>
-        <p>私钥只在浏览器内加密。VPS 仅用于交易签名，不具备提现权限。</p>
       </div>
       <span className={"account-state-chip " + (existing?.status || "missing")}>
         {CREDENTIAL_LABEL[existing?.status] || "未配置"}
@@ -96,10 +151,10 @@ function LiveAccountCard({ status, wrapKey, reload, refreshDashboard, confirm, o
     </div>
 
     <div className="live-account-form">
-      <label><span>Rabby 主钱包地址</span><input value={accountAddress}
+      <label><span>钱包地址</span><input value={accountAddress}
         onChange={e => setAccountAddress(e.target.value.trim())} placeholder="0x…"
         autoComplete="off" spellCheck="false" disabled={active} /></label>
-      <label><span>Agent 公开地址</span><input value={agentAddress}
+      <label><span>Agent 地址</span><input value={agentAddress}
         onChange={e => setAgentAddress(e.target.value.trim())} placeholder="0x…"
         autoComplete="off" spellCheck="false" disabled={active} /></label>
       <label className="live-private-key-field"><span>Agent 私钥</span><input type="password" value={privateKey}
@@ -107,17 +162,6 @@ function LiveAccountCard({ status, wrapKey, reload, refreshDashboard, confirm, o
         autoComplete="new-password" data-1p-ignore="true" data-lpignore="true" spellCheck="false"
         disabled={active} /></label>
     </div>
-
-    {existing && <div className="live-credential-proof">
-      <span><small>主钱包</small>{short(existing.accountAddress)}</span>
-      <span><small>Agent</small>{short(existing.agentAddress)}</span>
-      <span><small>官方授权有效至</small>{expiryText(existing.validUntil)}</span>
-      {status?.accountPreview && <React.Fragment>
-        <span><small>真实权益</small>{fUsd(status.accountPreview.equity)}</span>
-        <span><small>可用资金</small>{fUsd(status.accountPreview.available)}</span>
-        <span><small>账户仓位 / 挂单</small>{status.accountPreview.positionCount} / {status.accountPreview.openOrderCount}</span>
-      </React.Fragment>}
-    </div>}
 
     <div className="live-account-actions">
       <button className="btn btn-accent" disabled={busy || active || observerRunning || !privateKey || !wrapKey}
@@ -128,15 +172,13 @@ function LiveAccountCard({ status, wrapKey, reload, refreshDashboard, confirm, o
     </div>
 
     {message && <div className={"account-inline-message " + (message.ok ? "ok" : "error")}>{message.text}</div>}
-    <p className="account-safety-note">
-      此处只完成凭据加密、Agent 归属、官方授权与 Unified 基础验证。资金、Core、市场、REST/WS、仓位和挂单检查，将在右上角启动跟单时自动执行。
-    </p>
   </section>;
 }
 
 export function AccountSettings({ confirm, observerState = null, onModeDataChanged = null }) {
   const [status, setStatus] = useState(null);
   const [wrapKey, setWrapKey] = useState(null);
+  const [collectionSource, setCollectionSource] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [showLive, setShowLive] = useState(false);
@@ -148,12 +190,22 @@ export function AccountSettings({ confirm, observerState = null, onModeDataChang
     return next;
   }, []);
 
+  const reloadCollection = useCallback(async () => {
+    const next = await api.get("/api/collection-source");
+    setCollectionSource(next);
+    return next;
+  }, []);
+
   useEffect(() => {
     reload().catch(e => setError(friendlyExecutionError(e)));
+    reloadCollection().catch(e => setError(friendlyExecutionError(e)));
     api.get("/api/credential-wrap-key").then(setWrapKey).catch(e => setError(friendlyExecutionError(e)));
-    const timer = setInterval(() => reload().catch(() => {}), 5000);
+    const timer = setInterval(() => {
+      reload().catch(() => {});
+      reloadCollection().catch(() => {});
+    }, 5000);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, reloadCollection]);
 
   const live = status?.selectedMode === "live";
   const verified = status?.credentials?.mainnet?.status === "verified";
@@ -213,6 +265,8 @@ export function AccountSettings({ confirm, observerState = null, onModeDataChang
     </div>
 
     {error && <div className="account-error-banner">{error}</div>}
+
+    <QuickNodeCard source={collectionSource} wrapKey={wrapKey} reload={reloadCollection} />
 
     {showLive && <LiveAccountCard status={status} wrapKey={wrapKey} reload={reload}
       refreshDashboard={onModeDataChanged} confirm={confirm}

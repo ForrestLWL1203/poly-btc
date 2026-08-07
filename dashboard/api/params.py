@@ -154,7 +154,17 @@ def reset_params(db_path, category):
     db = rw_connect(db_path)
     try:
         cat = None if category == "all" else category
+        source_row = db.execute(
+            "SELECT value FROM params WHERE key='COLLECTION_SOURCE'"
+        ).fetchone()
         count = params_mod.reset_defaults(db, cat, commit=False)
+        # The collection provider has its own lock-aware control endpoint. A generic scanner-parameter
+        # reset must not bypass that boundary or silently change an operator's next-run source.
+        if cat in (None, "scanner") and source_row:
+            db.execute(
+                "UPDATE params SET value=? WHERE key='COLLECTION_SOURCE'",
+                (source_row["value"],),
+            )
         if cat in (None, "follow"):
             _enqueue_follow_revision(db, "dashboard_params_reset")
         db.commit()

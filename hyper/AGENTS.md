@@ -255,6 +255,13 @@ together. The current broad contract is:
 
 ### Pricing and API budget
 
+- Discovery jobs may snapshot `COLLECTION_SOURCE=quicknode` and route compatible `/info` calls through the
+  protected QuickNode endpoint at a process-wide maximum of 10 RPS. The default remains `official`; Observer,
+  trading, WebSocket, and execution-time L2 paths never receive or initialize the QuickNode credential.
+- Leaderboard, `l2Book`, and `recentTrades` always use Hyperliquid official transport. A QuickNode 400/422
+  disables only that request type for the current process. Credential/plan errors trip immediately; exhausted
+  429, timeout, invalid-response, or 5xx retries lock the remaining job to official transport. A resumed
+  finalizer inherits that lock. Every later scheduled or manually-triggered job probes its selected source again.
 - Standard Crypto and `xyz:*` perps use the same public WS BBO and per-coin `activeAssetCtx` mark streams.
 - REST `l2Book` is execution-only: fetch it immediately before an open/add/reduce/close for depth and bounded
   slippage. Never continuously poll books for Dashboard marks.
@@ -315,6 +322,11 @@ together. The current broad contract is:
 
 - The Account tab configures Paper/Live mode and Mainnet credentials; Testnet is development-only and does not
   belong in production mode selection or persistent product bookkeeping.
+- The Account tab also configures the scanner-only QuickNode endpoint. Browser code encrypts it with the
+  existing public wrap key; a dedicated protected worker validates `meta` and atomically writes only an HTTPS
+  `*.quiknode.pro` `/info` endpoint to `secret/quicknode` with mode `0600`. Dashboard/API/SQLite/logs must never
+  expose or persist the plaintext endpoint. Source changes are rejected while a scan is active; endpoint
+  replacement remains allowed but applies only to the next job.
 - Paper mode is compact. Live reveals owner address, agent address, and agent private-key input. “加密保存并验证”
   validates ownership/authorization/Unified/account basics and stores credentials; it does not start Observer.
 - The global top-right player-style controls are the only normal start/pause/stop controls. Their state comes

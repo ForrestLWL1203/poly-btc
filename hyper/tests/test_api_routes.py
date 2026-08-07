@@ -17,6 +17,7 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("/api/score-dist", api_routes.GET_ROUTES)
         self.assertIn("/api/execution/status", api_routes.GET_ROUTES)
         self.assertIn("/api/credential-wrap-key", api_routes.GET_ROUTES)
+        self.assertIn("/api/collection-source", api_routes.GET_ROUTES)
         for retired in (
             "/api/risk-radar", "/api/risk-radar/intents", "/api/risk-radar/thresholds",
             "/api/connections", "/api/shadow",
@@ -31,11 +32,13 @@ class ApiRouteTests(unittest.TestCase):
     def test_write_routes_are_declared_in_tables(self):
         self.assertIn("/api/auth/login", api_routes.POST_ROUTES)
         self.assertIn("/api/commands", api_routes.POST_ROUTES)
+        self.assertIn("/api/collection-source/quicknode", api_routes.POST_ROUTES)
         post_prefixes = [prefix for prefix, _handler in api_routes.POST_PREFIX_ROUTES]
         patch_prefixes = [prefix for prefix, _handler in api_routes.PATCH_PREFIX_ROUTES]
 
         self.assertIn("/api/params/", post_prefixes)
         self.assertIn("/api/params/", patch_prefixes)
+        self.assertIn("/api/collection-source", api_routes.PATCH_ROUTES)
 
     def test_dispatch_get_calls_exact_route_with_query_params(self):
         with patch.object(api_routes, "ep_equity", return_value={"ok": "7d"}) as ep:
@@ -85,6 +88,26 @@ class ApiRouteTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(code, 403)
         self.assertEqual(payload, {"error": "secure_context_required"})
+
+    def test_quicknode_upload_requires_secure_context(self):
+        handled, code, payload = api_routes.dispatch_post(
+            "db", object(), "/api/collection-source/quicknode", {}, True, False,
+        )
+        self.assertTrue(handled)
+        self.assertEqual(code, 403)
+        self.assertEqual(payload, {"error": "secure_context_required"})
+
+    def test_collection_source_switch_returns_conflict_while_scanning(self):
+        with patch.object(
+            api_routes, "set_collection_source",
+            side_effect=api_routes.CollectionSourceBusy("collection_source_locked"),
+        ):
+            handled, code, payload = api_routes.dispatch_patch(
+                "db", "/api/collection-source", {"source": "official"},
+            )
+        self.assertTrue(handled)
+        self.assertEqual(code, 409)
+        self.assertEqual(payload, {"error": "collection_source_locked"})
 
     def test_retired_risk_radar_commands_are_not_accepted(self):
         for retired in (

@@ -11,6 +11,7 @@ from .ssh import _q
 
 SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.service",
                  "execution_control": "hl-execution-control.service",
+                 "collection_control": "hl-collection-control.service",
                  "scan": "hl-scan.service", "timer": "hl-scan.timer",
                  "challenger_scan": "hl-challenger-refresh.service",
                  "challenger_timer": "hl-challenger-refresh.timer",
@@ -36,6 +37,16 @@ class SystemdServices:
     def sync_units(self, emit=None):
         """Refresh unit definitions without changing which optional workers are running."""
         emit = emit or (lambda _message: None)
+        quicknode = _q(f"{self.cfg.app_dir}/secret/quicknode")
+        secret_dir = _q(f"{self.cfg.app_dir}/secret")
+        self.ex.run(
+            f"install -d -m 700 {secret_dir} && "
+            f"if [ -L {quicknode} ] || {{ [ -e {quicknode} ] && [ ! -f {quicknode} ]; }}; "
+            f"then echo quicknode_endpoint_file_invalid >&2; exit 1; "
+            f"elif [ ! -e {quicknode} ]; then install -m 600 /dev/null {quicknode}; "
+            f"else chmod 600 {quicknode}; fi",
+            on_line=emit,
+        )
         for path, text in templates.render_all(self.cfg).items():
             if "/systemd/" in path:
                 self.ex.put_text(path, text)

@@ -238,7 +238,7 @@ function Dashboard({ onLogout }) {
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} onDataChanged={refreshModeData} />}
         {page === "discovery" && <Discovery scanning={scanning} scanStatus={scanStatus}
-          startRescan={startRescan} confirm={setConfirmCfg} />}
+          startRescan={startRescan} confirm={setConfirmCfg} openAccountSettings={openAccountSettings} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab}
           observerState={obs} onModeDataChanged={refreshModeData} />}
       </main>

@@ -6,6 +6,9 @@ import sqlite3
 from hyper.ops import procman
 from hyper.util import now_iso
 from hyper.execution.command_worker import CONTROL_COMMANDS
+from hyper.execution.credentials import validate_envelope
+from hyper.execution.sdk_clients import CredentialError
+from hyper.market.collection_control import COLLECTION_COMMANDS
 from .common import q1
 
 
@@ -14,7 +17,10 @@ ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_to
                     "observer_start", "observer_stop", "rescan", "scan_stop",
                     "patch_params", "reload_params", "drain", "emergency_close_all",
                     *CONTROL_COMMANDS}
-PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop", *CONTROL_COMMANDS}
+PROCESS_COMMANDS = {
+    "observer_start", "observer_stop", "rescan", "scan_stop",
+    *CONTROL_COMMANDS,
+}
 
 
 def validate_command_payload(ctype, payload):
@@ -54,6 +60,13 @@ def validate_command_payload(ctype, payload):
     elif ctype in {"drain", "emergency_close_all"}:
         if payload:
             raise ValueError(f"{ctype} does not accept payload fields")
+    elif ctype == "collection_endpoint_upsert":
+        if set(payload) != {"envelope"} or not isinstance(payload.get("envelope"), dict):
+            raise ValueError("collection_endpoint_upsert requires encrypted envelope")
+        try:
+            validate_envelope(payload["envelope"])
+        except CredentialError as exc:
+            raise ValueError(str(exc)) from None
     elif ctype in {"wallet_toggle", "wallet_star"}:
         expected_flag = "enabled" if ctype == "wallet_toggle" else "starred"
         if set(payload) != {"address", expected_flag}:
@@ -113,6 +126,9 @@ def exec_process_command(db_path, ctype, payload=None):
     try:
         if ctype in CONTROL_COMMANDS:
             procman.trigger_execution_control(db_path, cmd_id)
+            return cmd_id, "pending"
+        if ctype in COLLECTION_COMMANDS:
+            procman.trigger_collection_control(db_path, cmd_id)
             return cmd_id, "pending"
         if ctype == "observer_start":
             res = procman.start_observer(db_path)
