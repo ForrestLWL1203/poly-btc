@@ -2,13 +2,11 @@ import { fParam } from "../../lib/format.js";
 import { CoinBlacklistEditor } from "./CoinBlacklistEditor.jsx";
 import { editableParam, ParamRow, RangeRow } from "./ParamRow.jsx";
 import {
-  ADD_KEYS,
   AUTO_TUNE_KEY,
   BLACKLIST_KEY,
   TIER_GROUPS,
 } from "./paramMeta.js";
 
-const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.max, g.lev, g.cap]));
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 
 export function FollowSettingsPanel({
@@ -29,19 +27,9 @@ export function FollowSettingsPanel({
     <ParamRow key={p.key} param={p} value={vals[p.key]} dirty={dirty[p.key]}
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
-  const visibleTopRows = list.filter(p => !(
-    tierKeys.has(p.key)
-    || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY
-    || p.key === BLACKLIST_KEY || p.key === marginEquityKey
-  ));
-
   return (
     <React.Fragment>
       <section className="settings-section settings-section-basic">
-        <div className="settings-section-head">
-          <div><b>基础跟单规则</b><span>控制开仓过滤、顺势门槛与持仓保护</span></div>
-        </div>
-        <div className="settings-param-grid">{visibleTopRows.map(row)}</div>
         {blacklistParam && <div className="settings-wide-card">
           <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
             value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
