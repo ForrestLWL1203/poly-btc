@@ -101,7 +101,6 @@ export function Wallets({ confirm, onDataChanged = null }) {
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
   const portfolioRoiReplay = portfolioReplay && (portfolioReplay.paperAccount || portfolioReplay);
-  const portfolioRelease = data && data.portfolioRelease;
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -205,10 +204,6 @@ export function Wallets({ confirm, onDataChanged = null }) {
           </div>
         </div>
       </div>
-      {tab === "followed" && portfolioRelease && portfolioRelease.status === "operator_review_degraded" &&
-        <div className="wallet-alert" role="status">
-          组合经济门槛降级：保留当前有效 Core 与参数，暂停自动晋升和调参，等待人工复核。
-        </div>}
       {starError && <div className="wallet-alert" role="alert">{starError}</div>}
       {exitError && <div className="wallet-alert" role="alert">{exitError}</div>}
       <div className="tbl-wrap">

@@ -1,4 +1,5 @@
 import json
+import inspect
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -296,7 +297,8 @@ class ChallengerRefreshTests(unittest.TestCase):
                 (current[0],),
             ).fetchall()
             run = db.execute(
-                "SELECT kind,complete,full FROM scan_runs ORDER BY id DESC LIMIT 1"
+                "SELECT kind,complete,full,core_added,core_removed,outcome_reason "
+                "FROM scan_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
 
         self.assertEqual(result["status"], "published")
@@ -306,7 +308,7 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(selected, [
             ("0xchallenge", "core"), ("0xcore", "core")
         ])
-        self.assertEqual(run, ("challenger_refresh", 1, 0))
+        self.assertEqual(run, ("challenger_refresh", 1, 0, 1, 0, None))
         self.assertEqual(profile_one.call_count, 2)
         self.assertEqual(form.call_count, 2)
         self.assertFalse(form.call_args_list[0].kwargs["retune"])
@@ -364,6 +366,41 @@ class ChallengerRefreshTests(unittest.TestCase):
 
         self.assertEqual(decision["mode"], "refresh")
         self.assertEqual(decision["selected"], ("0xcoreb", "0xcorea"))
+
+    def test_degraded_shared_portfolio_blocks_release(self):
+        degraded = SimpleNamespace(search_meta={
+            "finalStrictCopy": {
+                "status": "operator_review_degraded",
+                "failures": ["open_follow_rate"],
+            },
+        })
+        passed = SimpleNamespace(search_meta={
+            "finalStrictCopy": {"status": "passed", "failures": []},
+        })
+
+        self.assertTrue(scanner._shared_portfolio_release_degraded(degraded))
+        self.assertFalse(scanner._shared_portfolio_release_degraded(passed))
+        self.assertFalse(scanner._shared_portfolio_release_degraded(None))
+
+        source = inspect.getsource(scanner.refresh_challengers)
+        build_at = source.index("proposed_selection_rows, marginal =")
+        release_at = source.index("shared_economics_degraded =", build_at)
+        apply_at = source.index("_apply_formation_params(", release_at)
+        self.assertLess(build_at, release_at)
+        self.assertLess(release_at, apply_at)
+        self.assertIn(
+            "None if shared_economics_degraded else marginal", source,
+        )
+
+    def test_unavailable_core_is_removed_before_daily_formation(self):
+        source = inspect.getsource(scanner.refresh_challengers)
+        unavailable_at = source.index("unavailable_core =")
+        retention_order_at = source.index("formation_retention_order =", unavailable_at)
+        fixed_formation_at = source.index("fixed_formation = form_quality_prefix(")
+
+        self.assertLess(unavailable_at, retention_order_at)
+        self.assertLess(retention_order_at, fixed_formation_at)
+        self.assertIn("| unavailable_core", source)
 
     def test_daily_full_core_never_auto_replaces_incumbent(self):
         previous = tuple(f"0xcore{i:02d}" for i in range(16))

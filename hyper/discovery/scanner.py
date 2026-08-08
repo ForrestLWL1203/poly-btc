@@ -2145,6 +2145,29 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
     return len(rows)
 
 
+def _advisory_retention_admissible(row, qualification=None) -> bool:
+    """Allow only economic advisory failures to keep an incumbent Core seat."""
+    row = dict(row or {})
+    if (row.get("data_status") or "valid") != "valid":
+        return False
+    if (
+        row.get("acct_value") is not None
+        and f(row.get("acct_value")) <= max(float(config.FLAT), 1e-6)
+        and int(row.get("open_position_count") or 0) == 0
+    ):
+        return False
+    profile_kind = wallet_risk.reason_kind(row.get("reason"))
+    if profile_kind in {
+        wallet_risk.HIGH, wallet_risk.UNAVAILABLE, "structural", "deferred",
+    }:
+        return False
+    classification = core_retention.qualification_failure(
+        qualification if qualification is not None
+        else row.get("follow_qualification") or {}
+    )[0]
+    return classification in {core_retention.HEALTHY, "soft", "medium"}
+
+
 def _quality_first_core_transition(
     profiles,
     *,
@@ -2178,12 +2201,11 @@ def _quality_first_core_transition(
         data_valid = refreshed and (row.get("data_status") or "valid") == "valid"
         enabled = controls.get(addr, True)
         qualification = row.get("follow_qualification") or {}
-        retention_class = core_retention.qualification_failure(qualification)[0]
         retained_advisory = bool(
             retain_advisory_incumbents
             and addr in previous_core
             and addr in desired
-            and retention_class in {core_retention.HEALTHY, "soft", "medium"}
+            and _advisory_retention_admissible(row, qualification)
         )
         core_ok = (
             (
@@ -2876,17 +2898,9 @@ def _apply_zero_equity_no_positions_gate(db, generation_id: str) -> set[str]:
     is funded again may qualify in a later scan. NULL equity is not zero and remains governed by the existing
     incomplete-data path.
     """
-    floor = max(float(config.FLAT), 1e-6)
-    rows = db.execute(
-        "SELECT lower(addr) FROM profile "
-        "WHERE profile_generation=? AND status IN ('active','qualified') AND data_status='valid' "
-        "AND acct_value IS NOT NULL AND acct_value<=? "
-        "AND COALESCE(open_position_count,0)=0 "
-        "AND NOT (status='rejected' AND reason='source_zero_equity_no_positions') "
-        "ORDER BY lower(addr)",
-        (generation_id, floor),
-    ).fetchall()
-    gated = {str(row[0] or "").lower() for row in rows if row[0]}
+    gated = _fresh_zero_equity_no_position_addrs(
+        db, generation_id, active_only=True,
+    )
     if not gated:
         return set()
 
@@ -2913,6 +2927,23 @@ def _apply_zero_equity_no_positions_gate(db, generation_id: str) -> set[str]:
             },
         )
     return gated
+
+
+def _fresh_zero_equity_no_position_addrs(
+    db, generation_id: str, *, active_only: bool = False,
+) -> set[str]:
+    """Return current-generation wallets proven empty by a valid fresh snapshot."""
+    floor = max(float(config.FLAT), 1e-6)
+    status_clause = "AND status IN ('active','qualified')" if active_only else ""
+    rows = db.execute(
+        "SELECT lower(addr) FROM profile "
+        "WHERE profile_generation=? AND data_status='valid' "
+        "AND acct_value IS NOT NULL AND acct_value<=? "
+        "AND COALESCE(open_position_count,0)=0 "
+        f"{status_clause} ORDER BY lower(addr)",
+        (generation_id, floor),
+    ).fetchall()
+    return {str(row[0] or "").lower() for row in rows if row[0]}
 
 
 def _source_quality_pool(db, generation_id: str) -> tuple[list[str], list[str]]:
@@ -6099,6 +6130,14 @@ def _apply_shared_retention_failure(
     return updated
 
 
+def _shared_portfolio_release_degraded(marginal) -> bool:
+    validation = (
+        ((marginal.search_meta or {}).get("finalStrictCopy"))
+        if marginal else {}
+    ) or {}
+    return validation.get("status") == "operator_review_degraded"
+
+
 def _persist_wallet_risk_assessment(
     db, generation_id, addr, decision, *, source, assessed_at, complete=True,
 ):
@@ -6344,9 +6383,12 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    effective_policies=None, effective_metrics=None,
                                    effective_score_details=None,
                                    effective_replay_params_hash=None,
+                                   effective_param_overrides=None,
                                    allow_loo=False):
     """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
-    policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
+    effective_follow = params.load_follow(db)
+    effective_follow.update(dict(effective_param_overrides or {}))
+    policy_values = {**effective_follow, **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
     for addr, qualification in dict(effective_qualifications or {}).items():
@@ -6421,12 +6463,12 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     )
 
     def retention_admissible(addr):
-        qualification = dict(by_addr.get(addr, {}).get("follow_qualification") or {})
+        row = by_addr.get(addr, {})
+        qualification = dict(row.get("follow_qualification") or {})
         return bool(
             retention_hysteresis
             and addr in previous_core_members
-            and core_retention.qualification_failure(qualification)[0]
-            in {core_retention.HEALTHY, "soft", "medium"}
+            and _advisory_retention_admissible(row, qualification)
         )
 
     invalid = [
@@ -6460,7 +6502,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         )
         if window_fills is None or not any(window_fills.values()):
             raise RuntimeError("quality_prefix_replay_unavailable")
-        follow = params.load_follow(db)
+        follow = dict(effective_follow)
         if "SMART_ADD" in follow:
             follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
         sigmas = auto_tune._load_sigmas(db, generation_id)
@@ -6732,13 +6774,18 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         elif addr in previous_core and exit_kind in {
             wallet_risk.HIGH, wallet_risk.UNAVAILABLE, "structural",
         }:
-            role = selection.CHALLENGER
             selection_enabled = False
-            reason = (
+            exit_reason = (
                 "high_risk_isolation" if exit_kind == wallet_risk.HIGH
                 else "funds_withdrawn_requalify" if exit_kind == wallet_risk.UNAVAILABLE
                 else "structural_unfollowable"
             )
+            if addr in held:
+                role = selection.EXIT_ONLY
+                reason = f"{exit_reason}:exit_pending"
+            else:
+                role = selection.CHALLENGER
+                reason = exit_reason
         elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
@@ -6898,9 +6945,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               effective_policies=None, effective_metrics=None,
                               effective_score_details=None,
                               effective_replay_params_hash=None,
+                              effective_param_overrides=None,
                               allow_loo=False):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
-    policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
+    policy_values = {
+        **params.load_follow(db),
+        **dict(effective_param_overrides or {}),
+        **params.load_category(db, "scanner"),
+    }
     copy_policy = load_copy_policy(policy_values)
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
     previous_roles = {}
@@ -7033,6 +7085,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             effective_metrics=effective_metrics,
             effective_score_details=effective_score_details,
             effective_replay_params_hash=effective_replay_params_hash,
+            effective_param_overrides=effective_param_overrides,
             allow_loo=allow_loo,
         )
     raise RuntimeError("explicit selection builder requires forced score-prefix formation")
@@ -9261,6 +9314,12 @@ def refresh_challengers(db, p) -> dict:
         source_pool, source_tail = _source_quality_pool(
             db, generation_id,
         )
+        unavailable_core = previous_core & _fresh_zero_equity_no_position_addrs(
+            db, generation_id,
+        )
+        formation_retention_order = tuple(
+            addr for addr in previous_core_order if addr not in unavailable_core
+        )
         _set_scan_progress(
             db, stage="rough_copy", candidates_scanned=0,
             candidates_total=len(source_pool),
@@ -9272,7 +9331,7 @@ def refresh_challengers(db, p) -> dict:
         )
         strict_market_summary = _prepare_strict_market_snapshot(
             db, rough_summary.get("queued") or (), generation_id, now_ms, p,
-            retention_addrs=previous_core,
+            retention_addrs=formation_retention_order,
         )
         severe_copy_liquidations = {
             str(addr or "").lower()
@@ -9360,7 +9419,7 @@ def refresh_challengers(db, p) -> dict:
         prefetch_candidates = _selection_prefetch_candidates(
             db, generation_id, now_ms,
             limit=_formation_core_upper(db),
-            retention_addrs=previous_core_order,
+            retention_addrs=formation_retention_order,
         )
         _set_scan_progress(
             db, stage="prefetch_selection_paths",
@@ -9375,7 +9434,7 @@ def refresh_challengers(db, p) -> dict:
         fixed_formation = form_quality_prefix(
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
-            retention_addrs=previous_core_order,
+            retention_addrs=formation_retention_order,
         )
         daily_retention_evidence_complete = True
         try:
@@ -9418,7 +9477,7 @@ def refresh_challengers(db, p) -> dict:
         }
         automatic_exit_core = (
             set(hard_safety_core) | structural_core | actual_catastrophic_core
-            | prepublication_high_core
+            | prepublication_high_core | unavailable_core
         )
         fixed_core_order = tuple(
             str(addr or "").lower()
@@ -9453,6 +9512,7 @@ def refresh_challengers(db, p) -> dict:
                     "structuralRemoved": len(structural_core),
                     "actualCatastropheRemoved": len(actual_catastrophic_core),
                     "actualHighRiskRemoved": len(prepublication_high_core),
+                    "unavailableRemoved": len(unavailable_core),
                     "protectedCore": len(daily_floor_order),
                     "fixedSurfaceCore": len(fixed_core),
                     "promotionSuppressed": len(fixed_core - set(daily_floor_order)),
@@ -9469,7 +9529,7 @@ def refresh_challengers(db, p) -> dict:
                 tuned_formation = form_quality_prefix(
                     db, generation_id, stamp, now_ms,
                     retune=True, force_retune=True,
-                    retention_addrs=previous_core_order,
+                    retention_addrs=formation_retention_order,
                 )
                 tuned_core_order = tuple(
                     str(addr or "").lower()
@@ -9561,7 +9621,6 @@ def refresh_challengers(db, p) -> dict:
             db, publication_stamp,
             leaderboard_generation=generation_id, commit=False,
         )
-        _apply_formation_params(db, formation, publication_stamp)
         proposed_selection_rows, marginal = _build_explicit_selection(
             db, generation_id, publication_stamp, now_ms,
             forced_core_order=publish_core_order,
@@ -9579,8 +9638,14 @@ def refresh_challengers(db, p) -> dict:
             effective_metrics=formation.get("walletMetrics") or {},
             effective_score_details=formation.get("scoreDetails") or {},
             effective_replay_params_hash=formation.get("replayParamsHash"),
+            effective_param_overrides=formation.get("params") or {},
             allow_loo=False,
         )
+        shared_economics_degraded = _shared_portfolio_release_degraded(marginal)
+        if shared_economics_degraded:
+            promotion_blocked_reason = "shared_economics_operator_review"
+            membership_retune_triggered = False
+            fixed_surface_promotion = False
         if promotion_blocked_reason:
             selection_rows = _carry_challenger_daily_core_rows(
                 previous_selection_rows,
@@ -9609,7 +9674,10 @@ def refresh_challengers(db, p) -> dict:
                     data_status=row.data_status, reason=row.reason,
                     last_actionable_open_ms=last_open.get(addr),
                 )
+            if not shared_economics_degraded:
+                marginal = None
         else:
+            _apply_formation_params(db, formation, publication_stamp)
             selection_rows = proposed_selection_rows
         selection_rows = _decorate_retention_rows(
             selection_rows, previous_core, daily_retention_decisions,
@@ -9683,6 +9751,7 @@ def refresh_challengers(db, p) -> dict:
                 "hardSafetyCoreRemoved": len(hard_safety_core),
                 "structuralCoreRemoved": len(structural_core),
                 "actualCatastropheCoreRemoved": len(actual_catastrophic_core),
+                "unavailableCoreRemoved": len(unavailable_core),
                 "carriedCoreEvidenceGeneration": (
                     previous_generation if promotion_blocked_reason else None
                 ),
@@ -9725,6 +9794,7 @@ def refresh_challengers(db, p) -> dict:
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
                 "hardSafetyCoreRemoved": len(hard_safety_core),
+                "unavailableCoreRemoved": len(unavailable_core),
                 "strategyRevision": active_strategy["revision"],
             },
         )
@@ -9750,6 +9820,7 @@ def refresh_challengers(db, p) -> dict:
             "verifiedSourceBlowups": len(verified_source_blowups),
             "severeCopyLiquidations": len(severe_copy_liquidations),
             "hardSafetyCoreRemoved": len(hard_safety_core),
+            "unavailableCoreRemoved": len(unavailable_core),
             "marketSnapshot": market_snapshot,
             "marketValidation": market_validation, "marketScopeAudit": scope_audit,
             "collectionSource": collection_runtime.generation_metrics(),
@@ -9760,7 +9831,8 @@ def refresh_challengers(db, p) -> dict:
             (json.dumps(metrics_json, sort_keys=True), generation_id),
         )
         portfolio_replay, selection_replay = _store_final_copy_summary(
-            db, generation_id, marginal,
+            db, generation_id,
+            None if shared_economics_degraded else marginal,
         )
         auto_tune.bind_active_tune_rollback_core(db, current_core)
         _record_run(
@@ -9769,6 +9841,12 @@ def refresh_challengers(db, p) -> dict:
             len(set(current_core) & previous_core), rejected, len(current_core),
             full=False, failed=0, complete=True, kind="challenger_refresh",
             generation_id=generation_id, api_stats=rest.request_stats(),
+            reason=promotion_blocked_reason,
+            retention_metrics={
+                "coreAdded": len(added_core),
+                "coreRemoved": len(removed_core),
+                "safetyExit": len(automatic_exit_core),
+            },
             commit=False,
         )
         db.commit()
@@ -9796,6 +9874,7 @@ def refresh_challengers(db, p) -> dict:
             "verifiedSourceBlowups": len(verified_source_blowups),
             "severeCopyLiquidations": len(severe_copy_liquidations),
             "hardSafetyCoreRemoved": len(hard_safety_core),
+            "unavailableCoreRemoved": len(unavailable_core),
             "portfolioReplay": portfolio_replay,
             "selectionReplay": selection_replay,
             "strategyRevision": active_strategy["revision"],

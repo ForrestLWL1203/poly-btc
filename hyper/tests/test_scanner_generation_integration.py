@@ -650,7 +650,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("_retention_exact_formation(", daily_source)
         self.assertIn("retention_addrs=pinned_core_order", complete_source)
         self.assertIn("retention_addrs=pinned_core_order", finalizer_source)
-        self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 3)
+        self.assertEqual(daily_source.count("retention_addrs=formation_retention_order"), 4)
+        self.assertLess(
+            daily_source.index("unavailable_core ="),
+            daily_source.index("fixed_formation = form_quality_prefix("),
+        )
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
     def test_complete_scan_resolves_rough_sigma_and_strict_market_before_seal(self):
@@ -984,6 +988,84 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     desired_order=("0xsoft",),
                     formation_meta={"retentionHysteresis": True},
                 )
+
+            unavailable = {
+                **profile,
+                "status": "rejected",
+                "reason": "source_zero_equity_no_positions",
+                "acct_value": 0.0,
+                "open_position_count": 0,
+                # Reproduce the production mismatch: cached Strict still says
+                # eligible while the fresh account snapshot proves unavailable.
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": True,
+                    "status": "core_eligible",
+                },
+            }
+            with self.assertRaisesRegex(
+                RuntimeError, "quality_prefix_contains_ineligible_wallets:1",
+            ):
+                scanner._build_forced_prefix_selection(
+                    db, "g2", "now", 1, profiles=[unavailable],
+                    previous_roles={"0xsoft": scanner.selection.CORE},
+                    controls={"0xsoft": True}, held=set(),
+                    desired_order=("0xsoft",),
+                    formation_meta={"retentionHysteresis": True},
+                )
+
+    def test_fresh_zero_equity_snapshot_excludes_rejected_previous_core(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile "
+                "(addr,status,reason,profile_generation,data_status,acct_value,open_position_count) "
+                "VALUES (?,?,?,?,?,?,?)",
+                [
+                    (
+                        "0xempty", "rejected", "source_zero_equity_no_positions",
+                        "g2", "valid", 0.0, 0,
+                    ),
+                    ("0xfunded", "active", "ok", "g2", "valid", 100.0, 0),
+                    ("0xopen", "active", "ok", "g2", "valid", 0.0, 1),
+                ],
+            )
+            db.commit()
+
+            empty = scanner._fresh_zero_equity_no_position_addrs(db, "g2")
+
+            self.assertEqual({"0xempty"}, empty)
+
+    def test_unavailable_previous_core_with_open_copy_becomes_exit_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            profile = {
+                "addr": "0xempty", "status": "rejected",
+                "reason": "source_zero_equity_no_positions",
+                "acct_value": 0.0, "open_position_count": 0,
+                "profile_generation": "g2", "data_status": "valid",
+                "evidence_status": "economically_disqualified",
+                "follow_score": 0.0,
+                "follow_qualification": {
+                    "eligible": False, "coreEligible": False,
+                    "firstFailure": "source_zero_equity_no_positions",
+                    "status": "source_zero_equity_no_positions",
+                },
+            }
+
+            rows, _marginal = scanner._build_forced_prefix_selection(
+                db, "g2", "now", 1, profiles=[profile],
+                previous_roles={"0xempty": scanner.selection.CORE},
+                controls={"0xempty": True}, held={"0xempty"},
+                desired_order=(), formation_meta={},
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].role, scanner.selection.EXIT_ONLY)
+            self.assertFalse(rows[0].enabled)
+            self.assertEqual(
+                rows[0].reason, "funds_withdrawn_requalify:exit_pending",
+            )
 
     def test_recent_former_core_remains_on_recheck_surface_after_empty_generation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2724,6 +2806,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                         "reasons": ["最终参数评分证据"],
                     }},
                     effective_replay_params_hash="sealed-hash",
+                    effective_param_overrides={"MAX_LEV": 9.0},
                 )
 
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "core")])
@@ -2738,6 +2821,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertFalse(window_fills.call_args.kwargs["include_watch"])
             final_replay.assert_called_once()
             self.assertIsNotNone(final_replay.call_args.kwargs["path_rows"])
+            self.assertEqual(final_replay.call_args.args[3]["MAX_LEV"], 9.0)
+            self.assertNotEqual(float(params.get(db, "MAX_LEV")), 9.0)
 
     def test_star_cannot_bypass_final_win_gate_and_held_position_becomes_exit_only(self):
         with tempfile.TemporaryDirectory() as td:

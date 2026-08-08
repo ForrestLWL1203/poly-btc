@@ -398,6 +398,29 @@ class SelectionTests(unittest.TestCase):
 
         self.assertEqual((), result["selected"])
 
+    def test_daily_transition_never_retains_empty_unavailable_incumbent(self):
+        profiles = [{
+            "addr": "0xempty", "status": "rejected",
+            "reason": "source_zero_equity_no_positions",
+            "acct_value": 0.0, "open_position_count": 0,
+            "profile_generation": "g2", "data_status": "valid",
+            # Stale strict evidence must not overrule the fresh account snapshot.
+            "follow_qualification": {
+                "eligible": True, "coreEligible": True,
+                "status": "core_eligible",
+            },
+        }]
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2",
+            previous_roles={"0xempty": "core"}, controls={},
+            desired_order=("0xempty",),
+            strict_evaluate=lambda _addrs: self._transition_metrics(0),
+            retain_advisory_incumbents=True,
+        )
+
+        self.assertEqual((), result["selected"])
+
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,
                  deploy=.7, cost=.10, latency=None):
