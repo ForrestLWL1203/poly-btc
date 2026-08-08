@@ -311,12 +311,12 @@ class SelectionTests(unittest.TestCase):
     def test_daily_transition_retains_advisory_incumbent_with_new_entrant(self):
         profiles = [
             {
-                "addr": "0xincumbent", "status": "active",
+                "addr": "0xincumbent", "status": "rejected",
                 "profile_generation": "g2", "data_status": "valid",
                 "follow_qualification": {
                     "eligible": False, "coreEligible": False,
-                    "firstFailure": "copy_7d_closed_pnl_not_positive",
-                    "status": "copy_7d_closed_pnl_not_positive",
+                    "firstFailure": "copy_7d_segment_not_profitable",
+                    "status": "copy_7d_segment_not_profitable",
                 },
             },
             {
@@ -356,6 +356,26 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(
             ("0xincumbent", "0xentrant"), retained["selected"],
         )
+
+    def test_daily_transition_does_not_admit_rejected_advisory_challenger(self):
+        profiles = [{
+            "addr": "0xchallenger", "status": "rejected",
+            "profile_generation": "g2", "data_status": "valid",
+            "follow_qualification": {
+                "eligible": False, "coreEligible": False,
+                "firstFailure": "copy_7d_segment_not_profitable",
+                "status": "copy_7d_segment_not_profitable",
+            },
+        }]
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2", previous_roles={}, controls={},
+            desired_order=("0xchallenger",),
+            strict_evaluate=lambda _addrs: self._transition_metrics(0),
+            retain_advisory_incumbents=True,
+        )
+
+        self.assertEqual((), result["selected"])
 
     def test_daily_transition_never_retains_structural_incumbent(self):
         profiles = [{

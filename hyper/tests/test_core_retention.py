@@ -156,6 +156,16 @@ class CoreRetentionTest(unittest.TestCase):
         self.assertEqual(core_retention.HEALTHY, classification)
         self.assertIsNone(reason)
 
+    def test_unprofitable_seven_day_segment_is_advisory(self):
+        classification, reason = core_retention.qualification_failure({
+            "eligible": False,
+            "firstFailure": "copy_7d_segment_not_profitable",
+            "status": "copy_7d_segment_not_profitable",
+        })
+
+        self.assertEqual("soft", classification)
+        self.assertEqual("copy_7d_segment_not_profitable", reason)
+
     def test_unsafe_shared_baseline_has_no_replacement_protection(self):
         self.assertFalse(core_retention.baseline_protectable({
             "standardizedAccount": {

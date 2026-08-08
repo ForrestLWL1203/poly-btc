@@ -2186,7 +2186,10 @@ def _quality_first_core_transition(
             and retention_class in {core_retention.HEALTHY, "soft", "medium"}
         )
         core_ok = (
-            row.get("status") in {"active", "qualified"}
+            (
+                row.get("status") in {"active", "qualified"}
+                or retained_advisory
+            )
             and (_formation_core_permission(qualification) or retained_advisory)
             and data_valid and enabled
         )
@@ -6421,6 +6424,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         qualification = dict(by_addr.get(addr, {}).get("follow_qualification") or {})
         return bool(
             retention_hysteresis
+            and addr in previous_core_members
             and core_retention.qualification_failure(qualification)[0]
             in {core_retention.HEALTHY, "soft", "medium"}
         )
@@ -6429,7 +6433,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         addr for addr in desired
         if addr not in by_addr
         or by_addr[addr].get("profile_generation") != generation_id
-        or by_addr[addr].get("status") not in {"active", "qualified"}
+        or (
+            by_addr[addr].get("status") not in {"active", "qualified"}
+            and not retention_admissible(addr)
+        )
         or (
             not _formation_core_permission(by_addr[addr].get("follow_qualification"))
             and not retention_admissible(addr)

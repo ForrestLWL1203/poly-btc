@@ -945,6 +945,46 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(rows[0].enabled)
             self.assertEqual(rows[0].reason, "challenger_return_watch")
 
+    def test_forced_prefix_allows_only_previous_core_through_advisory_retention(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            profile = {
+                "addr": "0xsoft", "status": "rejected", "reason": "economic_watch",
+                "profile_generation": "g2", "data_status": "valid",
+                "evidence_status": "rejected", "follow_score": .7,
+                "follow_qualification": {
+                    "eligible": False, "coreEligible": False,
+                    "firstFailure": "copy_7d_segment_not_profitable",
+                    "status": "copy_7d_segment_not_profitable",
+                },
+            }
+
+            # The old Core clears the publication eligibility boundary and reaches
+            # the next replay check. No fill evidence is installed in this fixture.
+            with self.assertRaisesRegex(
+                RuntimeError, "quality_prefix_replay_unavailable",
+            ):
+                scanner._build_forced_prefix_selection(
+                    db, "g2", "now", 1, profiles=[dict(profile)],
+                    previous_roles={"0xsoft": scanner.selection.CORE},
+                    controls={"0xsoft": True}, held=set(),
+                    desired_order=("0xsoft",),
+                    formation_meta={"retentionHysteresis": True},
+                )
+
+            # The same economic failure cannot admit a new Challenger through the
+            # incumbent-only retention lane.
+            with self.assertRaisesRegex(
+                RuntimeError, "quality_prefix_contains_ineligible_wallets:1",
+            ):
+                scanner._build_forced_prefix_selection(
+                    db, "g2", "now", 1, profiles=[dict(profile)],
+                    previous_roles={}, controls={"0xsoft": True}, held=set(),
+                    desired_order=("0xsoft",),
+                    formation_meta={"retentionHysteresis": True},
+                )
+
     def test_recent_former_core_remains_on_recheck_surface_after_empty_generation(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

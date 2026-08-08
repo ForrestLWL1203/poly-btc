@@ -55,6 +55,7 @@ SOFT_FAILURE_REASONS = frozenset({
     "source_7d_closed_pnl_not_positive",
     "source_7d_conservative_pnl_not_positive",
     "copy_7d_closed_pnl_not_positive",
+    "copy_7d_segment_not_profitable",
     "rough_copy_7d_conservative_not_profitable",
     "activity_not_operational",
     "latest_7d_inactive",
