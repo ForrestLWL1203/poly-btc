@@ -97,36 +97,67 @@ def _market_fields(asset_ctx):
     oi_notional = open_interest * mark_px if open_interest > 0 and mark_px > 0 else None
     max_leverage = f(asset_ctx.get("universe_maxLeverage")) or None
     stamp = now_iso()
-    return day_ntl_vlm, open_interest, mark_px or None, oi_notional, stamp, max_leverage, stamp
+    return (
+        day_ntl_vlm, open_interest, mark_px or None, oi_notional, stamp,
+        max_leverage, stamp if max_leverage is not None else None,
+    )
+
+
+def _upsert_sample(
+    db, coin: str, sigma: float, fast, slow, n: int,
+    day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
+    max_leverage, margin_meta_updated_at,
+):
+    """Persist volatility and refresh market metadata without erasing good evidence.
+
+    Market context is a separate REST surface from candles. A transient/partial
+    context response must not turn a previously proven venue leverage cap back
+    into NULL, especially for HIP-3 markets whose configured tier cap may be
+    higher than the exchange permits.
+    """
+    db.execute(
+        "INSERT INTO coin_vol "
+        "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,"
+        "market_ctx_updated_at,max_leverage,margin_meta_updated_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(coin) DO UPDATE SET "
+        "sigma=excluded.sigma,sigma_fast=excluded.sigma_fast,sigma_slow=excluded.sigma_slow,"
+        "n=excluded.n,day_ntl_vlm=COALESCE(excluded.day_ntl_vlm,coin_vol.day_ntl_vlm),"
+        "open_interest=COALESCE(excluded.open_interest,coin_vol.open_interest),"
+        "mark_px=COALESCE(excluded.mark_px,coin_vol.mark_px),"
+        "oi_notional=COALESCE(excluded.oi_notional,coin_vol.oi_notional),"
+        "market_ctx_updated_at=COALESCE(excluded.market_ctx_updated_at,coin_vol.market_ctx_updated_at),"
+        "max_leverage=COALESCE(excluded.max_leverage,coin_vol.max_leverage),"
+        "margin_meta_updated_at=COALESCE(excluded.margin_meta_updated_at,coin_vol.margin_meta_updated_at),"
+        "updated_at=excluded.updated_at",
+        (
+            coin, sigma, fast, slow, n, day_ntl_vlm, open_interest, mark_px, oi_notional,
+            market_ctx_updated_at, max_leverage, margin_meta_updated_at, now_iso(),
+        ),
+    )
 
 
 def refresh(db, coin: str, asset_ctx=None):
     """Recompute coin's σ and upsert its coin_vol row. Returns sigma_used, or the FALLBACK (also
     persisted, briefly) when candles are unavailable so we don't refetch a dead coin every signal."""
     res = compute(coin)
-    if asset_ctx is None and coin and ":" not in coin:
+    if asset_ctx is None and coin:
         asset_ctx = rest.asset_context(coin)
     (day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
      max_leverage, margin_meta_updated_at) = _market_fields(asset_ctx)
     if res is None:
         sigma = config.VOL_FALLBACK_SIGMA
-        db.execute(
-            "INSERT OR REPLACE INTO coin_vol "
-            "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,market_ctx_updated_at,max_leverage,margin_meta_updated_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (coin, sigma, None, None, 0, day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
-             max_leverage, margin_meta_updated_at,
-             now_iso()),
+        _upsert_sample(
+            db, coin, sigma, None, None, 0,
+            day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
+            max_leverage, margin_meta_updated_at,
         )
     else:
         sigma, fast, slow, n = res
-        db.execute(
-            "INSERT OR REPLACE INTO coin_vol "
-            "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,market_ctx_updated_at,max_leverage,margin_meta_updated_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (coin, sigma, fast, slow, n, day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
-             max_leverage, margin_meta_updated_at,
-             now_iso()),
+        _upsert_sample(
+            db, coin, sigma, fast, slow, n,
+            day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
+            max_leverage, margin_meta_updated_at,
         )
     db.commit()
     return sigma

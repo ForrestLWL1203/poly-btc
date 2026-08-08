@@ -580,9 +580,17 @@ def asset_contexts(dex: str = None, realtime: bool = False) -> dict:
 
 
 def asset_context(coin: str):
-    if not coin or ":" in coin:
+    if not coin:
         return None
-    return asset_contexts().get(coin)
+    name = str(coin)
+    if ":" not in name:
+        return asset_contexts().get(name)
+    dex, local_name = name.split(":", 1)
+    contexts = asset_contexts(dex)
+    # Hyperliquid currently returns fully-qualified HIP-3 names, while a few
+    # fixtures/older SDK adapters expose the dex-local name. Accept both at
+    # this boundary and keep the rest of the product fully qualified.
+    return contexts.get(name) or contexts.get(local_name)
 
 
 def perp_universe() -> set:

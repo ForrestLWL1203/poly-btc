@@ -49,6 +49,7 @@ class LiveExecutionResult:
     oids: tuple[int, ...]
     outcome: str
     error_code: str | None = None
+    leverage: float | None = None
 
 
 def _float(value, default=0.0):
@@ -783,6 +784,7 @@ class LiveExecutor:
                 return LiveExecutionResult(
                     filled, _float(existing[3], None), filled * _float(existing[3]) * config.TAKER_FEE,
                     0.0, (cloid,), tuple([int(existing[1])] if existing[1] else []), existing[0], existing[4],
+                    leverage,
                 )
             # A durable row without a terminal result may have crossed the
             # network boundary before a crash. Never blind-resubmit it.
@@ -873,7 +875,7 @@ class LiveExecutor:
         fee = filled * _float(px) * config.TAKER_FEE
         return LiveExecutionResult(
             filled, px, fee, 0.0, (cloid,), tuple([int(result.oid)] if result.oid else []),
-            state, result.error_code,
+            state, result.error_code, leverage,
         )
 
     def execute(
@@ -912,6 +914,16 @@ class LiveExecutor:
                 if size <= 1e-12:
                     raise RuntimeError("live_reduce_not_proven_by_exchange")
             mark = self._mid(coin)
+            if not reduce_only:
+                # Tier leverage is a strategy ceiling. The official market
+                # spec is the executable ceiling and wins whenever it is
+                # lower. Preserve the planned margin while reducing notional.
+                requested_leverage = float(leverage)
+                venue_max = float(self.broker.market_spec(coin).max_leverage)
+                leverage = max(1.0, min(requested_leverage, venue_max))
+                if leverage + 1e-12 < requested_leverage:
+                    planned_margin = size * mark / requested_leverage
+                    size = planned_margin * leverage / mark
             economic_target_size = size
             dust_oversized_reduce = False
             if reduce_only and size >= reducible - max(1e-12, reducible * 1e-10):
@@ -1009,6 +1021,7 @@ class LiveExecutor:
                 tuple(oid for item in results for oid in item.oids),
                 "filled" if total + 1e-12 >= economic_target_size else "partial" if total > 0 else "unfilled",
                 next((item.error_code for item in reversed(results) if item.error_code), None),
+                leverage,
             )
 
     def cancel_managed_orders(self) -> dict:

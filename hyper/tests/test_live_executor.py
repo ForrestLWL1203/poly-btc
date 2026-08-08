@@ -31,9 +31,10 @@ class FakeLiveBroker:
         self.leverage_calls = []
         self.statuses = {}
         self.book_failures = 0
+        self.max_leverage = 50
 
     def market_spec(self, coin):
-        return MarketSpec(coin, "", 0 if coin == "BTC" else 1, 5, 50)
+        return MarketSpec(coin, "", 0 if coin == "BTC" else 1, 5, self.max_leverage)
 
     def prepare_order(self, intent):
         return prepare_ioc_order(intent, self.market_spec(intent.coin))
@@ -288,6 +289,22 @@ class LiveExecutorTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.filled_size, 8.0, places=5)
         self.assertEqual(broker.submit_calls, 1)
+
+    def test_increase_clips_tier_leverage_to_official_market_max_and_preserves_margin(self):
+        broker = FakeLiveBroker()
+        broker.max_leverage = 10
+        executor = LiveExecutor(self.db, self.session.copy(), broker)
+
+        result = self.execute(executor, size=0.24, leverage=12)
+
+        self.assertEqual(result.leverage, 10)
+        self.assertEqual(broker.leverage_calls[-1], ("BTC", 10))
+        self.assertAlmostEqual(result.filled_size, 0.20, places=8)
+        intent = self.db.execute(
+            "SELECT leverage,requested_size FROM execution_order_intent"
+        ).fetchone()
+        self.assertEqual(intent[0], 10)
+        self.assertAlmostEqual(intent[1], 0.20, places=8)
 
     def test_partial_ioc_requotes_once_and_partial_is_terminal(self):
         broker = FakeLiveBroker([

@@ -235,6 +235,9 @@ together. The current broad contract is:
   - BTC is always stable tier;
   - non-BTC Crypto and transparent `xyz:*` are mid below 9% sigma and high at/above 9%;
   - unresolved/young valid markets temporarily use the configured mid fallback.
+- Standard and HIP-3 market-context refreshes persist the official per-market maximum leverage beside volatility.
+  A partial refresh must never erase a previously proven cap, and Live execution independently clamps the planned
+  tier leverage to the broker's official market spec while preserving the planned margin.
 - Target-wallet leverage is display/audit metadata only. It must remain visible when captured, but must never
   reduce or increase our planned leverage, affect qualification, or gate tuning.
 - Existing positions are never retroactively rescaled by a revision. Adds remain tied to the position's opening
@@ -256,6 +259,8 @@ together. The current broad contract is:
   therefore complete a healthy round in roughly 50 seconds; copying does not require sub-ten-second latency.
 - Every Live fill is journaled in `execution_signal` before strategy mutation. Signals move through durable
   pending/processing/retryable/terminal states and survive worker or SQLite failures.
+- A retryable source open is skipped when a later durable source close/flip already proves that episode ended;
+  never create stale exposure solely to replay an obsolete signal before its queued close.
 - The ordered signal worker owns strategy and execution mutation. Do not spawn competing per-fill book writers.
 - While operator-paused or `reconcile_required`, new opens and exposure-increasing adds are blocked. Reductions,
   target full closes, and management of already-owned Live positions continue whenever exchange state is safe.

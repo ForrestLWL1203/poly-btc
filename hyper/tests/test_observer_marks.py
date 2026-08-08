@@ -416,6 +416,65 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_retryable_open_is_skipped_after_later_source_close_is_journalled(self):
+        async def run():
+            db = self._db()
+            session_id = self._activate_live(db)
+            obs = Observer(db, [], {})
+            stamp = now_iso()
+            open_payload = {
+                "tid": 128, "time": 200, "coin": "xyz:PLTR", "side": "A",
+                "dir": "Open Short", "px": "171", "sz": "58", "startPosition": "0",
+                "oid": 82,
+            }
+            close_payload = {
+                "tid": 129, "time": 201, "coin": "xyz:PLTR", "side": "B",
+                "dir": "Close Short", "px": "174", "sz": "58", "startPosition": "-58",
+                "oid": 83,
+            }
+            db.executemany(
+                "INSERT INTO execution_signal "
+                "(mode,session_id,addr,coin,tid,source_time_ms,source_order_id,payload_json,state,"
+                "next_attempt_ms,received_at,updated_at) "
+                "VALUES ('live',?,'0xsource','xyz:PLTR',?,?,?,?,?,0,?,?)",
+                [
+                    (session_id, 128, 200, 82, json.dumps(open_payload), "retryable", stamp, stamp),
+                    (session_id, 129, 201, 83, json.dumps(close_payload), "pending", stamp, stamp),
+                ],
+            )
+            db.commit()
+
+            task = asyncio.create_task(obs.signal_retry_loop())
+            for _ in range(30):
+                states = db.execute(
+                    "SELECT tid,state,decision_code FROM execution_signal ORDER BY tid"
+                ).fetchall()
+                if all(row["state"] not in {"pending", "retryable", "processing"} for row in states):
+                    break
+                await asyncio.sleep(0.02)
+            obs.stop = True
+            await task
+
+            rows = db.execute(
+                "SELECT tid,state,decision_code FROM execution_signal ORDER BY tid"
+            ).fetchall()
+            self.assertEqual(
+                (rows[0]["state"], rows[0]["decision_code"]),
+                ("policy_skipped", "SOURCE_EPISODE_ALREADY_FLAT"),
+            )
+            self.assertEqual(
+                (rows[1]["state"], rows[1]["decision_code"]),
+                ("completed", "NO_MANAGED_POSITION"),
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM live_copy_position WHERE coin='xyz:PLTR'"
+                ).fetchone()[0],
+                0,
+            )
+
+        asyncio.run(run())
+
     def test_retryable_live_signal_is_not_marked_completed(self):
         async def run():
             db = self._db()
@@ -662,6 +721,40 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertAlmostEqual(obs.vol["xyz:SP500"], 0.0095)
 
         asyncio.run(run())
+
+    def test_ensure_vol_refreshes_warm_sigma_when_builder_leverage_is_missing(self):
+        async def run():
+            db = self._db()
+            db.execute(
+                "INSERT INTO coin_vol (coin,sigma,max_leverage,updated_at) "
+                "VALUES ('xyz:PLTR',0.07,NULL,'now')"
+            )
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.vol["xyz:PLTR"] = 0.07
+
+            with patch("hyper.execution.observer.volatility.refresh", return_value=0.07) as refresh:
+                await obs._ensure_vol("xyz:PLTR")
+
+            refresh.assert_called_once()
+
+        asyncio.run(run())
+
+    def test_live_market_max_leverage_uses_broker_when_coin_cache_is_missing(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO coin_vol (coin,sigma,max_leverage,updated_at) "
+            "VALUES ('xyz:PLTR',0.07,NULL,'now')"
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+        obs.execution_mode = "live"
+        broker = Mock()
+        broker.market_spec.return_value = Mock(max_leverage=10)
+        obs.live_executor = Mock(broker=broker)
+
+        self.assertEqual(obs._market_max_leverage("xyz:PLTR"), 10)
+        broker.market_spec.assert_called_once_with("xyz:PLTR")
 
     def test_stats_snapshot_reuses_startup_lifetime_counters(self):
         db = self._db()
@@ -2019,8 +2112,8 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             db = self._db()
             db.execute(
                 "INSERT INTO coin_vol "
-                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,updated_at,market_ctx_updated_at) "
-                "VALUES ('VINE',0.12,0.12,0.10,30,1600000,60000000,0.0098,588000,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,max_leverage,updated_at,market_ctx_updated_at) "
+                "VALUES ('VINE',0.12,0.12,0.10,30,1600000,60000000,0.0098,588000,3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
             )
             db.commit()
             obs = Observer(db, [], {})

@@ -1810,6 +1810,29 @@ class Observer:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
         return self.vol.get(coin) or self.vol_fallback_sigma
 
+    def _market_max_leverage(self, coin: str):
+        """Return the most conservative proven Hyperliquid leverage cap.
+
+        ``coin_vol`` is the warm scanner/Observer cache. Live additionally has
+        the broker's official ``meta`` market spec, which is the final guard at
+        order time and covers a cold or temporarily incomplete cache.
+        """
+        caps = []
+        row = self.db.execute(
+            "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
+        ).fetchone()
+        cached = f(row[0]) if row and row[0] is not None else 0.0
+        if cached > 0.0:
+            caps.append(cached)
+        if self.execution_mode == "live" and self.live_executor is not None:
+            try:
+                official = f(self.live_executor.broker.market_spec(coin).max_leverage)
+            except Exception:  # broker submission still fails closed if unsupported
+                official = 0.0
+            if official > 0.0:
+                caps.append(official)
+        return min(caps) if caps else None
+
     def _tier(self, sigma: float, coin: str = None) -> str:
         """BTC alone may enter stable; every other market starts at mid and can rise to high by σ."""
         return tier_for_sigma(sigma, self.high_sigma_min, coin)
@@ -1931,17 +1954,21 @@ class Observer:
         if not coin:
             return
         self.vol_coins.add(coin)
-        needs_market_ctx = False
-        if self.low_liquidity_filter_enable and ":" not in coin:
-            row = self.db.execute(
-                "SELECT day_ntl_vlm,oi_notional FROM coin_vol WHERE coin=?",
-                (coin,),
-            ).fetchone()
-            needs_market_ctx = (not row) or row[0] is None or row[1] is None
+        row = self.db.execute(
+            "SELECT day_ntl_vlm,oi_notional,max_leverage FROM coin_vol WHERE coin=?",
+            (coin,),
+        ).fetchone()
+        needs_market_ctx = (
+            self.low_liquidity_filter_enable and ":" not in coin
+            and ((not row) or row[0] is None or row[1] is None)
+        )
+        # Every market, including HIP-3, must have the official leverage cap
+        # before sizing. A warm sigma alone is not enough.
+        needs_leverage = (not row) or row[2] is None or f(row[2]) <= 0.0
         # A coin_vol placeholder with NULL sigma is not warm.  This is common for builder/stock markets whose
         # market-context row was staged before candle volatility was collected; refresh it immediately instead
         # of sizing the first order with a temporary fallback (currently neutral 7% / mid tier).
-        if not self.vol.get(coin) or needs_market_ctx:
+        if not self.vol.get(coin) or needs_market_ctx or needs_leverage:
             self.vol[coin] = await asyncio.to_thread(self._refresh_vol_worker, coin)
 
     async def prewarm_vol(self):
@@ -1955,7 +1982,11 @@ class Observer:
                     return float((item[1] or {}).get("dayNtlVlm") or 0.0)
                 except (TypeError, ValueError):
                     return 0.0
-            for coin, ctx in sorted(ctxs.items(), key=_day_vlm, reverse=True)[:config.VOL_PREWARM_TOP]:
+            for raw_coin, ctx in sorted(ctxs.items(), key=_day_vlm, reverse=True)[:config.VOL_PREWARM_TOP]:
+                coin = (
+                    str(raw_coin) if dex is None or ":" in str(raw_coin)
+                    else f"{dex}:{raw_coin}"
+                )
                 if self.vol.get(coin) or self.stop:
                     continue
                 self.vol_coins.add(coin)
@@ -1970,7 +2001,15 @@ class Observer:
         sizing only ever reads the cache. Catches a calm→volatile regime change within VOL_REFRESH_S."""
         while not self.stop:
             await asyncio.sleep(config.VOL_REFRESH_S)
-            ctxs = await asyncio.to_thread(rest.asset_contexts)
+            ctxs = {}
+            for dex in (None, *rest.BUILDER_DEXES):
+                scoped = await asyncio.to_thread(rest.asset_contexts, dex)
+                for raw_coin, ctx in scoped.items():
+                    coin = (
+                        str(raw_coin) if dex is None or ":" in str(raw_coin)
+                        else f"{dex}:{raw_coin}"
+                    )
+                    ctxs[coin] = ctx
             for coin in list(self.vol_coins):
                 try:
                     self.vol[coin] = await asyncio.to_thread(
@@ -2842,6 +2881,37 @@ class Observer:
                     last_busy_log_ms = current_ms
                 await asyncio.sleep(0.25)
 
+    def _source_episode_already_superseded(
+        self, signal_id: int, addr: str, coin: str, source_time_ms: int,
+    ) -> bool:
+        """Whether a later journalled source fill already closed/flipped this episode.
+
+        Retrying an exposure-increasing open after the target has gone flat
+        creates a position the source no longer owns. The later close/flip is
+        durable evidence that the stale open must be skipped, not replayed.
+        """
+        later = self.db.execute(
+            "SELECT payload_json FROM execution_signal WHERE mode='live' AND session_id=? "
+            "AND lower(addr)=lower(?) AND coin=? AND "
+            "(source_time_ms>? OR (source_time_ms=? AND signal_id>?)) "
+            "ORDER BY source_time_ms,signal_id",
+            (
+                self.execution_session_id, addr, coin, int(source_time_ms),
+                int(source_time_ms), int(signal_id),
+            ),
+        ).fetchall()
+        for (payload_json,) in later:
+            try:
+                payload = json.loads(payload_json or "{}")
+                signed = f(payload.get("sz")) if payload.get("side") == "B" else -f(payload.get("sz"))
+                pos0 = f(payload.get("startPosition"))
+                transition = classify_fill_transition(pos0, pos0 + signed)
+            except Exception:  # malformed rows remain owned by normal durable-signal validation
+                continue
+            if transition in {"close", "flip"}:
+                return True
+        return False
+
     async def _signal_retry_once(self):
         """Process at most one durable signal; caller owns DB-contention retry."""
         self._assert_mode_binding()
@@ -2898,6 +2968,15 @@ class Observer:
                 pos0 = f(x.get("startPosition"))
                 pos1 = pos0 + signed
                 transition = classify_fill_transition(pos0, pos1)
+                if transition == "open" and self._source_episode_already_superseded(
+                    int(signal_id), addr, coin, int(x["time"]),
+                ):
+                    self._mark_signal(
+                        int(signal_id), "policy_skipped",
+                        code="SOURCE_EPISODE_ALREADY_FLAT",
+                        error="later_source_close_or_flip_journalled",
+                    )
+                    continue
                 terminal_action = (
                     (transition == "open" and "open" in actions)
                     or (transition == "add" and "add" in actions)
@@ -3573,10 +3652,11 @@ class Observer:
             )
             target_notl = abs(ep["master_peak"]) * master_px if master_px else 0.0
             master_notl = target_notl
-            margin_row = self.db.execute(
-                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
-            ).fetchone()
-            maintenance_leverage = margin_row[0] if margin_row and margin_row[0] else None
+            # The configured tier leverage is a product cap, never permission
+            # to exceed Hyperliquid's per-market maximum. Live also consults
+            # the broker's official meta cache so a missing warm-cache row
+            # cannot produce an impossible order.
+            maintenance_leverage = self._market_max_leverage(coin)
             plan = plan_open_sizing(
                 coin=coin,
                 side=ep["side"],
@@ -3689,6 +3769,8 @@ class Observer:
                     return
                 px = float(execution.average_px)
                 size = float(execution.filled_size)
+                if getattr(execution, "leverage", None):
+                    lev = float(execution.leverage)
                 notional = size * px
                 margin = notional / lev
                 liq_px = isolated_liq_px(px, ep["side"], size, margin, maintenance_leverage)
@@ -3969,13 +4051,14 @@ class Observer:
             l2_average_px = f(liquidity.get("average_px"))
             if forced_px is None and l2_average_px > 0.0:
                 px = l2_average_px
-            margin_row = self.db.execute(
-                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
-            ).fetchone()
+            venue_max_leverage = self._market_max_leverage(coin)
             maintenance_leverage = (
-                margin_row[0] if margin_row and margin_row[0]
+                venue_max_leverage
+                if venue_max_leverage is not None
                 else ep.get("maintenance_leverage")
             )
+            if venue_max_leverage is not None:
+                lev = min(lev, venue_max_leverage)
             live_add_size = None
             if self.execution_mode == "live":
                 requested_add_size = (add_margin * lev / px) if px else 0.0
@@ -4002,13 +4085,16 @@ class Observer:
                     return _observe_only(final=True)
                 px = float(execution.average_px)
                 live_add_size = float(execution.filled_size)
+                if getattr(execution, "leverage", None):
+                    lev = float(execution.leverage)
                 add_margin = live_add_size * px / lev
                 self._sync_live_account()
             basis = rebase_isolated_position(
-                ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+                ep["entry_px"], ep["side"], ep["rem_size"], lev,
                 maintenance_leverage,
             )
             ep.update(
+                leverage=lev,
                 size=basis["size"], margin=basis["margin"],
                 notional=basis["notional"], liq_px=basis["liq_px"],
                 maintenance_leverage=maintenance_leverage,
@@ -4052,10 +4138,10 @@ class Observer:
                 book.balance -= abs(add_size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.execute(
-                f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,"
+                f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,"
                 "add_count=?,master_open_px=?,smart_tp_armed=0,smart_tp_stage=0,smart_tp_peak_pnl=0,"
                 "smart_tp_base_size=NULL,smart_tp_master_anchor=NULL WHERE pos_id=?",
-                (ep["margin"], ep["notional"], ep["entry_px"], ep["size"], ep["rem_size"], ep["peak_size"],
+                (ep["leverage"], ep["margin"], ep["notional"], ep["entry_px"], ep["size"], ep["rem_size"], ep["peak_size"],
                  ep["liq_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in the action table
             return True
