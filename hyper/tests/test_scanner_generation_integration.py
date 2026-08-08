@@ -640,19 +640,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     promotion_universe={"0xnew"}, formation=formation,
                 )
 
-    def test_automatic_complete_and_daily_paths_do_not_use_exact_retune_closure(self):
+    def test_only_daily_membership_changes_use_exact_retune_closure(self):
         complete_source = inspect.getsource(scanner.scan)
         finalizer_source = inspect.getsource(scanner.finalize_profiled_generation)
         daily_source = inspect.getsource(scanner.refresh_challengers)
 
         self.assertNotIn("_retention_exact_formation(", complete_source)
         self.assertNotIn("_retention_exact_formation(", finalizer_source)
-        self.assertNotIn("_retention_exact_formation(", daily_source)
+        self.assertIn("_retention_exact_formation(", daily_source)
         self.assertIn("retention_addrs=pinned_core_order", complete_source)
         self.assertIn("retention_addrs=pinned_core_order", finalizer_source)
         self.assertEqual(daily_source.count("retention_addrs=formation_retention_order"), 3)
-        self.assertIn("retention_addrs=publish_core_order", daily_source)
-        self.assertIn("_fixed_membership_addrs=publish_core_order", daily_source)
         self.assertLess(
             daily_source.index("unavailable_core ="),
             daily_source.index("fixed_formation = form_quality_prefix("),
@@ -855,6 +853,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("automatic_retune = _automatic_formation_retune_enabled(db)", source)
         self.assertIn('elif fixed_decision["mode"] == "promote":', source)
         self.assertIn("if membership_changed and automatic_retune", source)
+        self.assertIn("_retention_exact_formation(", source)
         self.assertIn("fixed_surface_promotion = not automatic_retune", source)
         self.assertIn("challenger_daily_promotion_fixed_surface", source)
 

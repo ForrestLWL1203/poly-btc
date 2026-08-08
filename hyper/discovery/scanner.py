@@ -5928,6 +5928,11 @@ def _retention_exact_formation(
         "search": {
             "algorithm": "effective_incumbent_membership_v2",
             "selectedCount": len(desired_order),
+            "tunePoolCount": len(desired_order) if retune else 0,
+            "formationTuneEligible": bool(exact.get("eligible", True)),
+            "formationTuneReason": exact.get("reason") or (
+                "exact_membership_tuned" if retune else "retune_disabled"
+            ),
             "membershipChanged": bool(retune),
             "retuneApplied": bool(retune),
             "retentionHysteresis": True,
@@ -9060,7 +9065,9 @@ def _assert_daily_current_strict_portfolio(marginal, expected_order) -> dict:
     return validation
 
 
-def _formation_certifies_membership(formation, expected_order) -> bool:
+def _formation_certifies_membership(
+    formation, expected_order, *, required_entry_addrs=(),
+) -> bool:
     selected = tuple(dict.fromkeys(
         str(addr or "").lower()
         for addr in ((formation or {}).get("selected") or ()) if addr
@@ -9068,7 +9075,16 @@ def _formation_certifies_membership(formation, expected_order) -> bool:
     expected = tuple(dict.fromkeys(
         str(addr or "").lower() for addr in (expected_order or ()) if addr
     ))
-    return len(selected) == len(expected) and set(selected) == set(expected)
+    if len(selected) != len(expected) or set(selected) != set(expected):
+        return False
+    qualifications = {
+        str(addr or "").lower(): dict(value or {})
+        for addr, value in dict((formation or {}).get("qualifications") or {}).items()
+    }
+    return all(
+        _formation_core_permission(qualifications.get(str(addr or "").lower()))
+        for addr in (required_entry_addrs or ()) if addr
+    )
 
 
 def refresh_challengers(db, p) -> dict:
@@ -9646,15 +9662,33 @@ def refresh_challengers(db, p) -> dict:
             # which will not be executed.
             tuned_formation = None
             tune_error = None
+            promoted = tuple(
+                addr for addr in publish_core_order if addr not in previous_core
+            )
             try:
-                tuned_formation = form_quality_prefix(
-                    db, generation_id, stamp, now_ms,
-                    retune=True, force_retune=True,
-                    retention_addrs=publish_core_order,
-                    _fixed_membership_addrs=publish_core_order,
+                base_follow = params.load_follow(db)
+                scanner_values = params.load_category(db, "scanner")
+                base_follow.update({
+                    key: scanner_values[key] for key in COPY_POLICY_PARAM_KEYS
+                    if key in scanner_values
+                })
+                if "SMART_ADD" in base_follow:
+                    base_follow["ADD_STRATEGY"] = (
+                        "smart" if base_follow["SMART_ADD"] else "hardcap"
+                    )
+                tuned_formation = _retention_exact_formation(
+                    db, generation_id, stamp, now_ms, publish_core_order,
+                    base_follow=base_follow,
+                    replacement_gate={
+                        "eligible": True,
+                        "reason": "challenger_daily_exact_membership",
+                    },
+                    decisions=daily_retention_decisions,
+                    retune=True,
                 )
                 membership_retune_triggered = _formation_certifies_membership(
                     tuned_formation, publish_core_order,
+                    required_entry_addrs=promoted,
                 )
                 if membership_retune_triggered:
                     _assert_automatic_formation_tuned(
@@ -9669,9 +9703,6 @@ def refresh_challengers(db, p) -> dict:
                 retune_fallback_reason = (
                     "exact_membership_retune_failed"
                     if tune_error else "exact_membership_retune_not_certified"
-                )
-                promoted = tuple(
-                    addr for addr in publish_core_order if addr not in previous_core
                 )
                 if promoted:
                     promotion_blocked_reason = retune_fallback_reason

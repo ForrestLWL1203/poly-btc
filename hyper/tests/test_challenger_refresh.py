@@ -189,7 +189,11 @@ class ChallengerRefreshTests(unittest.TestCase):
             formation = {
                 "selected": ("0xchallenge", "0xcore"),
                 "params": {},
-                "qualifications": {}, "scores": {}, "policies": {},
+                "qualifications": {
+                    "0xcore": {"coreEligible": True},
+                    "0xchallenge": {"coreEligible": True},
+                },
+                "scores": {}, "policies": {},
                 "walletMetrics": {}, "scoreDetails": {},
                 "replayParamsHash": "fixed",
                 "search": {
@@ -265,6 +269,9 @@ class ChallengerRefreshTests(unittest.TestCase):
                 form = stack.enter_context(patch.object(
                     scanner, "form_quality_prefix", return_value=formation,
                 ))
+                exact_tune = stack.enter_context(patch.object(
+                    scanner, "_retention_exact_formation", return_value=formation,
+                ))
                 stack.enter_context(patch.object(
                     scanner, "_apply_formation_params", return_value=False,
                 ))
@@ -322,14 +329,13 @@ class ChallengerRefreshTests(unittest.TestCase):
         ])
         self.assertEqual(run, ("challenger_refresh", 1, 0, 1, 0, None))
         self.assertEqual(profile_one.call_count, 2)
-        self.assertEqual(form.call_count, 2)
-        self.assertFalse(form.call_args_list[0].kwargs["retune"])
-        self.assertTrue(form.call_args_list[1].kwargs["retune"])
-        self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
+        self.assertEqual(form.call_count, 1)
+        self.assertFalse(form.call_args.kwargs["retune"])
         self.assertEqual(
-            form.call_args_list[1].kwargs["_fixed_membership_addrs"],
+            exact_tune.call_args.args[4],
             ("0xcore", "0xchallenge"),
         )
+        self.assertTrue(exact_tune.call_args.kwargs["retune"])
         self.assertTrue(
             build_selection.call_args.kwargs[
                 "formation_meta"
@@ -372,12 +378,24 @@ class ChallengerRefreshTests(unittest.TestCase):
 
     def test_exact_retune_must_certify_the_complete_final_membership(self):
         self.assertTrue(scanner._formation_certifies_membership(
-            {"selected": ("0xnew", "0xcore")},
+            {
+                "selected": ("0xnew", "0xcore"),
+                "qualifications": {"0xnew": {"coreEligible": True}},
+            },
             ("0xcore", "0xnew"),
+            required_entry_addrs=("0xnew",),
         ))
         self.assertFalse(scanner._formation_certifies_membership(
             {"selected": ("0xcore",)},
             ("0xcore", "0xnew"),
+        ))
+        self.assertFalse(scanner._formation_certifies_membership(
+            {
+                "selected": ("0xcore", "0xnew"),
+                "qualifications": {"0xnew": {"coreEligible": False}},
+            },
+            ("0xcore", "0xnew"),
+            required_entry_addrs=("0xnew",),
         ))
 
     def test_degraded_shared_portfolio_blocks_promotion_but_keeps_fresh_replay(self):
@@ -554,7 +572,10 @@ class ChallengerRefreshTests(unittest.TestCase):
             formation = {
                 "selected": ("0xchallenge",),
                 "params": {},
-                "qualifications": {}, "scores": {}, "policies": {},
+                "qualifications": {
+                    "0xchallenge": {"coreEligible": True},
+                },
+                "scores": {}, "policies": {},
                 "walletMetrics": {}, "scoreDetails": {},
                 "replayParamsHash": "exact-replacement",
                 "search": {
@@ -634,6 +655,9 @@ class ChallengerRefreshTests(unittest.TestCase):
                 form = stack.enter_context(patch.object(
                     scanner, "form_quality_prefix", return_value=formation,
                 ))
+                exact_tune = stack.enter_context(patch.object(
+                    scanner, "_retention_exact_formation", return_value=formation,
+                ))
                 apply_params = stack.enter_context(patch.object(
                     scanner, "_apply_formation_params", return_value=True,
                 ))
@@ -688,9 +712,9 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(result["outcomeReason"], "challenger_daily_hard_safety_removal")
         self.assertEqual(selected, [("0xchallenge", "core")])
         self.assertEqual(run, (1, 1, "challenger_daily_hard_safety_removal"))
-        self.assertEqual(form.call_count, 2)
+        self.assertEqual(form.call_count, 1)
         self.assertEqual(
-            form.call_args_list[1].kwargs["_fixed_membership_addrs"],
+            exact_tune.call_args.args[4],
             ("0xchallenge",),
         )
         self.assertEqual(
