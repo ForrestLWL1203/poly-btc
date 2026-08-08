@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from hyper import params, storage
 from hyper.execution.observer import Observer
@@ -194,6 +195,97 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(db.execute(
             "SELECT state FROM execution_control WHERE id=1"
         ).fetchone()[0], "live_running")
+
+    def test_hot_reload_retries_lock_without_exposing_unbound_revision(self):
+        async def run():
+            db = self._db()
+            first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+            stamp = "2026-08-02T00:00:00Z"
+            db.execute(
+                "INSERT INTO execution_session "
+                "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+                "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+                "VALUES ('live-current','live','mainnet','live_running',?,?,?,200,1,200,0,NULL,?,?)",
+                ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+            )
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+                "VALUES (1,'live','live_running','live-current',?) "
+                "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+                "active_session_id='live-current',updated_at=excluded.updated_at",
+                (stamp,),
+            )
+            db.commit()
+            observer = Observer(db, [], {})
+            observer.live_executor = SimpleNamespace(session={
+                "session_id": "live-current",
+                "strategy_revision": first["revision"],
+                "margin_equity_pct": 1.0,
+            })
+            observer._reload_strategy()
+            second = strategy_revision.create_revision(db, "g1", source="daily", enqueue_reload=False)
+            db.commit()
+            calls = 0
+
+            def bind(revision):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                db.execute(
+                    "UPDATE execution_session SET strategy_revision=? WHERE session_id='live-current'",
+                    (revision,),
+                )
+                db.commit()
+                observer.live_executor.session["strategy_revision"] = revision
+
+            async def no_wait(_delay):
+                self.assertEqual(observer.strategy_revision_id, first["revision"])
+                self.assertTrue(observer._strategy_bind_pending)
+
+            with patch.object(observer, "_bind_live_strategy_revision", side_effect=bind), \
+                    patch("hyper.execution.observer.asyncio.sleep", side_effect=no_wait):
+                await observer._hot_reload_strategy()
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(observer.strategy_revision_id, second["revision"])
+            self.assertEqual(observer.live_executor.session["strategy_revision"], second["revision"])
+            self.assertFalse(observer._strategy_bind_pending)
+
+        asyncio.run(run())
+
+    def test_command_completion_retries_lock_without_redispatch(self):
+        async def run():
+            db = self._db()
+            observer = Observer(db, [], {})
+            db.close()
+            attempts = []
+
+            def execute(sql, values):
+                attempts.append((sql, values))
+                if len(attempts) == 1:
+                    raise sqlite3.OperationalError("database is locked")
+
+            fake = SimpleNamespace(
+                execute=execute,
+                commit=lambda: None,
+                rollback=lambda: None,
+            )
+            observer.db = fake
+
+            async def no_wait(_delay):
+                return None
+
+            with patch("hyper.execution.observer.asyncio.sleep", side_effect=no_wait):
+                await observer._persist_command_completion(
+                    7, status="done", result={"reloaded": True},
+                )
+
+            self.assertEqual(len(attempts), 2)
+            self.assertIn("status='done'", attempts[-1][0])
+            self.assertEqual(attempts[-1][1][-1], 7)
+
+        asyncio.run(run())
 
     def test_daily_core_revision_hot_switch_keeps_live_entries_running(self):
         db = self._db()

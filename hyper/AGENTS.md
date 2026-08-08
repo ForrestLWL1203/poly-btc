@@ -60,6 +60,9 @@ Repository ownership:
   calibration, and manual parameter publication all preserve this chain.
 - A valid descendant revision is hot-bound into a running Live session. Core or parameter publication must not
   pause entries, restart Observer, rescale existing positions, or require operator recovery.
+- Hot binding attaches the immutable revision to the durable Live session before exposing that bundle to
+  Observer signal handling. SQLite contention keeps source fills journalled, retries the bind in place, and
+  must not strand the owning `reload_params` command in `acked`.
 - Only the narrowly identified legacy parentless-publication repair may reconstruct lineage. It may auto-resume
   only after a fresh exchange reconcile and live-ledger projection prove zero unknown positions, unknown orders,
   and ambiguous intents. Real ambiguity, drift, or operator pause remains fail-closed.

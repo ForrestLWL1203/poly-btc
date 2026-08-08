@@ -230,6 +230,8 @@ class Observer:
         self.selection_generation = None
         self.ws = None
         self.stop = False
+        self._strategy_reload_lock = None
+        self._strategy_bind_pending = False
         self._background_tasks: dict[str, asyncio.Task] = {}
         self._signal_tasks: set[asyncio.Task] = set()
         self._critical_background_failure: BaseException | None = None
@@ -1574,8 +1576,8 @@ class Observer:
                 f"(+{len(new)} new, -{len(dropped)} dropped{extra}{probation})"
             )
 
-    def _reload_strategy(self, init=False):
-        """Load one immutable Core+params bundle from a single SQLite read snapshot."""
+    def _read_strategy_snapshot(self):
+        """Read one immutable Core+params bundle without changing process state."""
         try:
             if self.db.in_transaction:
                 self.db.commit()
@@ -1598,15 +1600,85 @@ class Observer:
             if self.db.in_transaction:
                 self.db.rollback()
             raise
+        return {
+            "follow": follow,
+            "targets": targets,
+            "revision": revision,
+            "published_generation": published_generation,
+        }
+
+    def _apply_strategy_snapshot(self, snapshot, *, init=False):
+        """Publish a previously read strategy snapshot to Observer memory."""
+        revision = snapshot["revision"]
         changed = revision != self.strategy_revision_id
         self.strategy_revision_id = revision
-        self.selection_generation = published_generation
-        self._reload_params(follow)
-        self._reload_targets(init=init, target_snapshot=targets)
+        self.selection_generation = snapshot["published_generation"]
+        self._reload_params(snapshot["follow"])
+        self._reload_targets(init=init, target_snapshot=snapshot["targets"])
         if changed:
             _log(f"strategy revision: {revision or 'legacy-fallback'}")
 
-    def _bind_live_strategy_revision(self):
+    def _reload_strategy(self, init=False):
+        """Load one immutable Core+params bundle from a single SQLite read snapshot."""
+        self._apply_strategy_snapshot(self._read_strategy_snapshot(), init=init)
+
+    async def _hot_reload_strategy(self, init=False):
+        """Bind a Live session before exposing a new immutable bundle to signal handling.
+
+        Scanner publication and Observer reconciliation share SQLite.  A temporary writer lock must
+        therefore delay the switch, not leave Observer memory ahead of the durable Live session.  Source
+        fills continue to be journalled while this waits; the ordered durable-signal worker resumes only
+        after the exact bound snapshot has been installed.
+        """
+        if self._strategy_reload_lock is None:
+            self._strategy_reload_lock = asyncio.Lock()
+        async with self._strategy_reload_lock:
+            self._strategy_bind_pending = True
+            applied = False
+            retry_delay = 0.25
+            last_log_ms = 0
+            try:
+                while not self.stop:
+                    snapshot = self._read_strategy_snapshot()
+                    try:
+                        if self.execution_mode == "live" and self.live_executor is not None:
+                            self._bind_live_strategy_revision(snapshot["revision"])
+                            # A narrowly allowed lineage repair can replace the revision while binding.
+                            # Re-read until the snapshot exactly matches the durable session binding.
+                            bound = str(self.live_executor.session.get("strategy_revision") or "")
+                            if bound != str(snapshot["revision"] or ""):
+                                continue
+                        self._apply_strategy_snapshot(snapshot, init=init)
+                        if self.db.in_transaction:
+                            self.db.commit()
+                        applied = True
+                        return True
+                    except Exception as exc:
+                        self._rollback_db()
+                        if self._is_db_contention(exc):
+                            current_ms = now_ms()
+                            if current_ms - last_log_ms >= 5_000:
+                                _log("strategy hot-bind database busy; retaining prior in-memory revision")
+                                last_log_ms = current_ms
+                            await asyncio.sleep(retry_delay)
+                            retry_delay = min(5.0, retry_delay * 2.0)
+                            continue
+                        if str(exc) in {
+                            "live_strategy_revision_not_active",
+                            "live_strategy_revision_changed",
+                        }:
+                            # A newer descendant won the publication race. Read and bind that exact bundle.
+                            await asyncio.sleep(0)
+                            continue
+                        raise
+                raise RuntimeError("observer_stopping_during_strategy_bind")
+            finally:
+                # An integrity/application failure must fail closed. A later periodic reload may repair it;
+                # until then the poller can journal fills but the signal worker cannot mutate strategy state.
+                if applied or self.stop:
+                    self._strategy_bind_pending = False
+
+    def _bind_live_strategy_revision(self, revision_override=None):
         """Advance the active Live session along the immutable revision chain.
 
         Core refreshes and operator parameter edits are deliberately hot-reloadable while Live is
@@ -1617,7 +1689,7 @@ class Observer:
         """
         if self.execution_mode != "live" or self.live_executor is None:
             return False
-        revision = self.strategy_revision_id
+        revision = revision_override or self.strategy_revision_id
         if not revision:
             raise RuntimeError("live_strategy_revision_missing")
         session_id = self.live_executor.session["session_id"]
@@ -1631,6 +1703,13 @@ class Observer:
         bundle = strategy_revision.load_revision(self.db, revision)
         if not bundle or strategy_revision.active_revision_id(self.db) != revision:
             raise RuntimeError("live_strategy_revision_not_active")
+        if previous == revision:
+            margin_pct = float(
+                (bundle.get("params") or {}).get("MARGIN_EQUITY_PCT", self.margin_equity_pct)
+            )
+            self.live_executor.session["strategy_revision"] = revision
+            self.live_executor.session["margin_equity_pct"] = margin_pct
+            return False
         if previous != revision:
             def _ancestor(bundle_row):
                 cursor = bundle_row
@@ -1661,8 +1740,11 @@ class Observer:
                     raise
                 if not repaired:
                     raise RuntimeError("live_strategy_revision_not_descendant")
-                self._reload_strategy()
-                revision = self.strategy_revision_id
+                if revision_override is None:
+                    self._reload_strategy()
+                    revision = self.strategy_revision_id
+                else:
+                    revision = repaired["revision"]
                 bundle = strategy_revision.load_revision(self.db, revision)
                 if not bundle or not _ancestor(bundle):
                     raise RuntimeError("live_strategy_revision_not_descendant")
@@ -2308,15 +2390,15 @@ class Observer:
                         result = await self._dispatch_command(
                             ctype, json.loads(payload_json or "{}"), command_id=cmd_id,
                         )
-                        self.db.execute(
-                            "UPDATE commands SET status='done',done_at=?,result_json=? WHERE id=?",
-                            (now_iso(), json.dumps(result), cmd_id))
-                        self.db.commit()
+                        await self._persist_command_completion(
+                            cmd_id, status="done", result=result,
+                        )
                         _log(f"command #{cmd_id} {ctype} -> done {result}")
                     except Exception as exc:  # noqa: BLE001 — a bad command must not kill the engine
-                        self.db.execute("UPDATE commands SET status='failed',done_at=?,error=? WHERE id=?",
-                                        (now_iso(), str(exc), cmd_id))
-                        self.db.commit()
+                        self._rollback_db()
+                        await self._persist_command_completion(
+                            cmd_id, status="failed", error=str(exc),
+                        )
                         _log(f"command #{cmd_id} {ctype} -> FAILED {exc}")
                 if time.time() - last_hb > 15:        # refresh liveness heartbeat (throttled)
                     self._write_proc_status(self._proc_state)
@@ -2325,6 +2407,36 @@ class Observer:
                 self._rollback_db()
                 _log(f"command loop error: {exc}")
             await asyncio.sleep(1.5)
+
+    async def _persist_command_completion(self, command_id, *, status, result=None, error=None):
+        """Finish an acknowledged command without redispatching its side effects on SQLite contention."""
+        delay = 0.25
+        last_log_ms = 0
+        while not self.stop:
+            try:
+                if status == "done":
+                    self.db.execute(
+                        "UPDATE commands SET status='done',done_at=?,result_json=?,error=NULL WHERE id=?",
+                        (now_iso(), json.dumps(result), command_id),
+                    )
+                else:
+                    self.db.execute(
+                        "UPDATE commands SET status='failed',done_at=?,error=? WHERE id=?",
+                        (now_iso(), error, command_id),
+                    )
+                self.db.commit()
+                return
+            except Exception as exc:
+                self._rollback_db()
+                if not self._is_db_contention(exc):
+                    raise
+                current_ms = now_ms()
+                if current_ms - last_log_ms >= 5_000:
+                    _log(f"command #{command_id} completion database busy; retrying")
+                    last_log_ms = current_ms
+                await asyncio.sleep(delay)
+                delay = min(5.0, delay * 2.0)
+        raise RuntimeError("observer_stopping_before_command_completion")
 
     async def _dispatch_command(self, ctype, payload, *, command_id=None):
         if ctype == "pause":
@@ -2401,13 +2513,23 @@ class Observer:
             self._finish_live_session_if_drained()
             return result
         if ctype == "wallet_toggle":
-            return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+            result = self._cmd_wallet_toggle(
+                payload["address"], bool(payload["enabled"]), reload_strategy=False,
+            )
+            await self._hot_reload_strategy()
+            return result
         if ctype == "wallet_exit_request":
-            return self._cmd_wallet_exit_request(payload["address"])
+            result = self._cmd_wallet_exit_request(payload["address"], reload_strategy=False)
+            await self._hot_reload_strategy()
+            return result
         if ctype == "wallet_exit_cancel":
-            return self._cmd_wallet_exit_cancel(payload["address"])
+            result = self._cmd_wallet_exit_cancel(payload["address"], reload_strategy=False)
+            await self._hot_reload_strategy()
+            return result
         if ctype == "wallet_star":
-            return self._cmd_wallet_star(payload["address"], bool(payload["starred"]))
+            result = self._cmd_wallet_star(payload["address"], bool(payload["starred"]))
+            await self._hot_reload_strategy()
+            return result
         if ctype == "reload_params":               # UI saved follow params or Core membership changed
             created = None
             if payload.get("createStrategyRevision"):
@@ -2425,8 +2547,7 @@ class Observer:
                 except Exception:
                     self.db.rollback()
                     raise
-            self._reload_strategy()
-            self._bind_live_strategy_revision()
+            await self._hot_reload_strategy()
             return {"reloaded": True, "source": "strategy_revision", "targets": len(self.addrs),
                     "revision": self.strategy_revision_id, "created": created}
         raise ValueError(f"unhandled command type {ctype}")
@@ -2572,7 +2693,7 @@ class Observer:
         self._interrupt_ws_for_stop()
         return True
 
-    def _cmd_wallet_exit_request(self, addr):
+    def _cmd_wallet_exit_request(self, addr, *, reload_strategy=True):
         """Capture the current execution ledger's cohort and start a conditional exit.
 
         Paper and Live positions are independent.  A position in the inactive
@@ -2605,14 +2726,15 @@ class Observer:
                 (addr, intent, ts, captured, ts),
             )
         self.db.commit()
-        self._reload_strategy()
+        if reload_strategy:
+            self._reload_strategy()
         return {
             "address": addr, "intent": intent, "enabled": False,
             "executionMode": self.execution_mode,
             "capturedPositionIds": position_ids,
         }
 
-    def _cmd_wallet_exit_cancel(self, addr):
+    def _cmd_wallet_exit_cancel(self, addr, *, reload_strategy=True):
         """Cancel an unresolved draining request and restore normal Core execution."""
         addr = (addr or "").lower()
         generation = selection.latest_published_generation(self.db)
@@ -2644,16 +2766,17 @@ class Observer:
             (ts, ts, addr),
         )
         self.db.commit()
-        self._reload_strategy()
+        if reload_strategy:
+            self._reload_strategy()
         return {
             "address": addr, "intent": "active", "enabled": True,
             "resolution": "operator_cancelled_exit",
         }
 
-    def _cmd_wallet_toggle(self, addr, enabled):
+    def _cmd_wallet_toggle(self, addr, enabled, *, reload_strategy=True):
         """Compatibility adapter for pre-migration Dashboard clients."""
         if not enabled:
-            return self._cmd_wallet_exit_request(addr)
+            return self._cmd_wallet_exit_request(addr, reload_strategy=reload_strategy)
         addr = addr.lower()
         blocked = self.db.execute(
             "SELECT risk_level,risk_block_reason FROM wallet_registry WHERE lower(addr)=lower(?)",
@@ -2676,7 +2799,8 @@ class Observer:
                 (addr, ts, ts),
             )
         self.db.commit()
-        self._reload_strategy()
+        if reload_strategy:
+            self._reload_strategy()
         return {"address": addr, "enabled": True, "intent": "active"}
 
     def _resolve_draining_intent(self, addr, *, reload_strategy=True):
@@ -2820,7 +2944,7 @@ class Observer:
         while not self.stop:
             self._assert_mode_binding()
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
-                self._reload_strategy()
+                await self._hot_reload_strategy()
                 last_reload = now_ms()
             addresses = list(self.addrs)
             if not addresses:
@@ -2915,6 +3039,11 @@ class Observer:
     async def _signal_retry_once(self):
         """Process at most one durable signal; caller owns DB-contention retry."""
         self._assert_mode_binding()
+        if self._strategy_bind_pending:
+            # The poller still journals fills. Ordered strategy mutation resumes only after the exact
+            # process bundle has been durably attached to the Live session.
+            await asyncio.sleep(0.05)
+            return
         if self._signal_tasks:
             await asyncio.sleep(0.05)
             return
