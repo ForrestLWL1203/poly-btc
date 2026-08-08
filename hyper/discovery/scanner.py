@@ -8971,48 +8971,118 @@ def _challenger_daily_membership_decision(previous_order, proposed_order) -> dic
     }
 
 
-def _carry_challenger_daily_core_rows(previous_rows, proposed_rows, previous_core_order):
-    """Publish fresh Challenger evidence while carrying the exact incumbent Core snapshot."""
-    previous_by_addr = {
-        str(row.addr or "").lower(): row for row in (previous_rows or ()) if row.addr
-    }
-    previous_order = tuple(
-        str(addr or "").lower() for addr in (previous_core_order or ()) if addr
+def _assert_daily_current_strict_core_rows(rows, expected_order, replay_stamp) -> tuple[str, ...]:
+    """Require exact, current-generation Strict evidence before a daily publication.
+
+    A new generation must never make stale evidence look current by copying the preceding SelectionRow.  The
+    replay stamp and parameter hash prove that the row came from this publication's formation surface; the
+    window fields are the minimum inputs required by the Dashboard's 30d/7d return projection.
+    """
+    core_rows = sorted(
+        (
+            row for row in (rows or ())
+            if row.role == selection.CORE and row.enabled
+        ),
+        key=lambda row: (int(row.selection_rank or 999999), row.addr),
     )
-    missing = [addr for addr in previous_order if addr not in previous_by_addr]
-    if missing:
-        raise RuntimeError(f"challenger_daily_previous_core_snapshot_missing:{len(missing)}")
-    previous_core = set(previous_order)
-    rows = []
-    for row in proposed_rows or ():
-        addr = str(row.addr or "").lower()
-        if addr in previous_core:
-            continue
-        if row.role == selection.CORE:
-            row = replace(
-                row,
-                role=selection.CHALLENGER,
-                reason="challenger_daily_promotion_not_published",
-            )
-        rows.append(row)
-    rows.extend(
-        replace(
-            previous_by_addr[addr],
-            role=selection.CORE,
-            reason="challenger_daily_core_carried",
-            selection_rank=rank,
+    actual_order = tuple(str(row.addr or "").lower() for row in core_rows)
+    expected = tuple(
+        str(addr or "").lower() for addr in (expected_order or ()) if addr
+    )
+    if actual_order != expected:
+        raise RuntimeError(
+            "challenger_daily_final_core_not_certified:"
+            f"{len(expected)}:{len(actual_order)}"
         )
-        for rank, addr in enumerate(previous_order, 1)
+    required = (
+        "replay_copy_bt_net_pnl",
+        "replay_copy_bt_closed_net_pnl",
+        "replay_copy_bt_window_start_equity",
+        "replay_copy_bt_win_rate",
+        "replay_copy_bt_closed_n",
+        "replay_copy_bt_7d_net_pnl",
+        "replay_copy_bt_7d_closed_net_pnl",
+        "replay_copy_bt_7d_window_start_equity",
+        "replay_copy_bt_7d_closed_n",
+        "replay_params_hash",
     )
-    return rows
+    incomplete = [
+        row.addr for row in core_rows
+        if row.replayed_at != replay_stamp
+        or any(getattr(row, field) is None for field in required)
+    ]
+    if incomplete:
+        raise RuntimeError(
+            f"challenger_daily_current_strict_evidence_missing:{len(incomplete)}"
+        )
+    return actual_order
+
+
+def _assert_daily_current_strict_portfolio(marginal, expected_order) -> dict:
+    """Require a complete shared Strict replay for the exact daily Core."""
+    validation = (
+        ((marginal.search_meta or {}).get("finalStrictCopy"))
+        if marginal else None
+    )
+    validation = dict(validation or {})
+    expected_count = len(tuple(expected_order or ()))
+    if int(validation.get("selectedCount") or 0) != expected_count:
+        raise RuntimeError(
+            "challenger_daily_strict_portfolio_membership_mismatch:"
+            f"{expected_count}:{int(validation.get('selectedCount') or 0)}"
+        )
+    if expected_count == 0:
+        if validation.get("status") != "empty":
+            raise RuntimeError("challenger_daily_empty_portfolio_not_certified")
+        return validation
+    if validation.get("status") not in {
+        "passed", "operator_review_degraded", "probation",
+    }:
+        raise RuntimeError("challenger_daily_strict_portfolio_missing")
+    required = (
+        "netPnl30d", "startEquity30d", "endEquity30d", "dynamicReturn30d",
+        "netPnl7d", "startEquity7d", "endEquity7d", "dynamicReturn7d",
+    )
+    invalid = []
+    for field in required:
+        value = validation.get(field)
+        try:
+            finite = value is not None and math.isfinite(float(value))
+        except (TypeError, ValueError):
+            finite = False
+        if not finite:
+            invalid.append(field)
+    if invalid or f(validation.get("startEquity30d")) <= 0.0 \
+            or f(validation.get("startEquity7d")) <= 0.0:
+        raise RuntimeError(
+            f"challenger_daily_strict_portfolio_incomplete:{len(invalid)}"
+        )
+    return validation
+
+
+def _formation_certifies_membership(formation, expected_order) -> bool:
+    selected = tuple(dict.fromkeys(
+        str(addr or "").lower()
+        for addr in ((formation or {}).get("selected") or ()) if addr
+    ))
+    expected = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (expected_order or ()) if addr
+    ))
+    return len(selected) == len(expected) and set(selected) == set(expected)
 
 
 def refresh_challengers(db, p) -> dict:
-    """Refresh frozen evidence and publish only strict-superset Core promotions."""
+    """Refresh the frozen pool and atomically recertify the effective daily Core.
+
+    Daily policy still forbids ordinary incumbent replacement: it may keep the current Core, append a
+    strict Challenger, or remove an immediate safety/unavailability failure.  The publication evidence is
+    never carried from the previous generation, however.  The exact effective membership is rebuilt from
+    current per-wallet Strict evidence and one current-generation shared Strict replay; a real membership
+    change also receives the same bounded parameter search used by complete formation when auto-tune is on.
+    """
     now_ms = int(time.time() * 1000)
     started, t0, stamp = now_iso(), time.time(), now_iso()
     previous_generation = selection.latest_published_generation(db)
-    previous_selection_rows = selection.current_selection_rows(db)
     previous_core_order = tuple(
         str(addr or "").lower()
         for addr in (selection.published_core_membership(db) or ())
@@ -9495,17 +9565,25 @@ def refresh_challengers(db, p) -> dict:
         retune_attempted = False
         fixed_surface_promotion = False
         promotion_blocked_reason = None
+        outcome_reason = None
+        retune_fallback_reason = None
+        membership_change_reason = None
         formation = fixed_formation
         publish_core_order = fixed_decision["selected"]
         if automatic_exit_core:
-            promotion_blocked_reason = (
-                "challenger_daily_hard_safety_removal"
+            outcome_reason = "challenger_daily_hard_safety_removal"
+            promoted_after_exit = tuple(fixed_decision.get("added") or ())
+            membership_change_reason = (
+                "hard_safety_reformation"
+                if promoted_after_exit else "hard_safety_removal"
             )
-            publish_core_order = fixed_core_order
+            # Exit and promotion decisions form one effective list.  A qualified Challenger may fill the
+            # newly-open seat in this same daily generation; the combined set is tuned and certified once.
+            publish_core_order = fixed_decision["selected"]
             pipeline_audit._insert_event(
                 db, stamp=stamp, source="challenger_daily",
-                stage="promotion_review", status="blocked",
-                reason=promotion_blocked_reason,
+                stage="promotion_review", status="ok",
+                reason=outcome_reason,
                 payload={
                     "previousCore": len(previous_core),
                     "hardSafetyRemoved": len(hard_safety_core),
@@ -9515,81 +9593,34 @@ def refresh_challengers(db, p) -> dict:
                     "unavailableRemoved": len(unavailable_core),
                     "protectedCore": len(daily_floor_order),
                     "fixedSurfaceCore": len(fixed_core),
-                    "promotionSuppressed": len(fixed_core - set(daily_floor_order)),
+                    "promotedAfterExit": len(promoted_after_exit),
                 },
             )
             db.commit()
         elif fixed_decision["mode"] == "promote":
-            if automatic_retune:
-                retune_attempted = True
-                _set_scan_progress(
-                    db, stage="challenger_membership_retune",
-                    candidates_scanned=len(workset), candidates_total=len(workset),
-                )
-                tuned_formation = form_quality_prefix(
-                    db, generation_id, stamp, now_ms,
-                    retune=True, force_retune=True,
-                    retention_addrs=formation_retention_order,
-                )
-                tuned_core_order = tuple(
-                    str(addr or "").lower()
-                    for addr in (tuned_formation.get("selected") or ())
-                    if addr
-                )
-                tuned_decision = _challenger_daily_membership_decision(
-                    daily_floor_order, tuned_core_order,
-                )
-                if tuned_decision["mode"] == "promote":
-                    formation = tuned_formation
-                    publish_core_order = tuned_decision["selected"]
-                    membership_retune_triggered = True
-                else:
-                    promotion_blocked_reason = (
-                        "retuned_proposal_not_strict_superset"
-                    )
-                    formation = fixed_formation
-                    publish_core_order = fixed_core_order
-                pipeline_audit._insert_event(
-                    db, stamp=stamp, source="challenger_daily",
-                    stage="membership_retune",
-                    status="ok" if membership_retune_triggered else "blocked",
-                    reason=(
-                        "challenger_promotion_retuned"
-                        if membership_retune_triggered
-                        else promotion_blocked_reason
-                    ),
-                    payload={
-                        "previousCore": len(previous_core),
-                        "fixedSurfaceCore": len(fixed_core),
-                        "added": len(fixed_core - previous_core),
-                        "removed": len(previous_core - fixed_core),
-                        "tunedCore": len(tuned_core_order),
-                    },
-                )
-            else:
-                # A disabled auto-tune switch is a hard fixed-surface contract.  The current parameters have
-                # already certified this strict profit prefix, so a membership/order change must not smuggle
-                # the expensive tuner back into the generation. Congestion is resolved by the fixed-surface
-                # prefix search shrinking Core, never by changing leverage, margin or add parameters.
-                fixed_surface_promotion = True
-                formation = fixed_formation
-                publish_core_order = fixed_decision["selected"]
-                pipeline_audit._insert_event(
-                    db, stamp=stamp, source="challenger_daily",
-                    stage="promotion_review", status="ok",
-                    reason="challenger_daily_promotion_fixed_surface",
-                    payload={
-                        "previousCore": len(previous_core),
-                        "fixedSurfaceCore": len(fixed_core),
-                        "added": len(fixed_core - previous_core),
-                        "removed": len(previous_core - fixed_core),
-                        "autoTuneEnabled": False,
-                    },
-                )
+            membership_change_reason = "promotion"
+            publish_core_order = fixed_decision["selected"]
+            fixed_surface_promotion = not automatic_retune
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="promotion_review", status="ok",
+                reason=(
+                    "challenger_daily_promotion_pending_exact_retune"
+                    if automatic_retune
+                    else "challenger_daily_promotion_fixed_surface"
+                ),
+                payload={
+                    "previousCore": len(previous_core),
+                    "fixedSurfaceCore": len(fixed_core),
+                    "added": len(set(publish_core_order) - previous_core),
+                    "removed": len(previous_core - set(publish_core_order)),
+                    "autoTuneEnabled": bool(automatic_retune),
+                },
+            )
             db.commit()
         elif fixed_decision["mode"] == "carry":
             promotion_blocked_reason = fixed_decision["reason"]
-            publish_core_order = fixed_core_order
+            publish_core_order = daily_floor_order
             pipeline_audit._insert_event(
                 db, stamp=stamp, source="challenger_daily",
                 stage="promotion_review", status="blocked",
@@ -9602,16 +9633,83 @@ def refresh_challengers(db, p) -> dict:
                 },
             )
             db.commit()
+
+        membership_changed = tuple(publish_core_order) != tuple(previous_core_order)
+        if membership_changed and automatic_retune and publish_core_order:
+            retune_attempted = True
+            _set_scan_progress(
+                db, stage="challenger_membership_retune",
+                candidates_scanned=len(workset), candidates_total=len(workset),
+            )
+            # The daily membership policy has already fixed the only set that is allowed to publish.  Tune
+            # that exact set instead of tuning a broader pool and then inheriting parameters from wallets
+            # which will not be executed.
+            tuned_formation = None
+            tune_error = None
+            try:
+                tuned_formation = form_quality_prefix(
+                    db, generation_id, stamp, now_ms,
+                    retune=True, force_retune=True,
+                    retention_addrs=publish_core_order,
+                    _fixed_membership_addrs=publish_core_order,
+                )
+                membership_retune_triggered = _formation_certifies_membership(
+                    tuned_formation, publish_core_order,
+                )
+                if membership_retune_triggered:
+                    _assert_automatic_formation_tuned(
+                        tuned_formation, required=True,
+                    )
+            except RuntimeError as exc:
+                tune_error = str(exc).split(":", 1)[0][:120]
+                membership_retune_triggered = False
+            if membership_retune_triggered:
+                formation = tuned_formation
+            else:
+                retune_fallback_reason = (
+                    "exact_membership_retune_failed"
+                    if tune_error else "exact_membership_retune_not_certified"
+                )
+                promoted = tuple(
+                    addr for addr in publish_core_order if addr not in previous_core
+                )
+                if promoted:
+                    promotion_blocked_reason = retune_fallback_reason
+                publish_core_order = (
+                    daily_floor_order if automatic_exit_core else previous_core_order
+                )
+                membership_changed = (
+                    tuple(publish_core_order) != tuple(previous_core_order)
+                )
+                fixed_surface_promotion = False
+                formation = fixed_formation
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="membership_retune",
+                status="ok" if membership_retune_triggered else "blocked",
+                reason=(
+                    "challenger_daily_exact_membership_retuned"
+                    if membership_retune_triggered else retune_fallback_reason
+                ),
+                payload={
+                    "changeReason": membership_change_reason,
+                    "previousCore": len(previous_core),
+                    "effectiveCore": len(publish_core_order),
+                    "fixedSurfaceCore": len(fixed_core),
+                    "tunedCandidateCount": len(
+                        (tuned_formation or {}).get("selected") or ()
+                    ),
+                    "tuneError": tune_error,
+                },
+            )
+            db.commit()
         _assert_automatic_formation_tuned(
             formation, required=membership_retune_triggered,
-        )
-        effective_publish_order = (
-            daily_floor_order if promotion_blocked_reason else publish_core_order
         )
         promotion_parity = _assert_daily_promotion_parity(
             db, generation_id,
             previous_core=previous_core_order,
-            proposed_core=effective_publish_order,
+            proposed_core=publish_core_order,
             promotion_universe=base_promotion_universe,
             formation=formation,
         )
@@ -9621,7 +9719,7 @@ def refresh_challengers(db, p) -> dict:
             db, publication_stamp,
             leaderboard_generation=generation_id, commit=False,
         )
-        proposed_selection_rows, marginal = _build_explicit_selection(
+        selection_rows, marginal = _build_explicit_selection(
             db, generation_id, publication_stamp, now_ms,
             forced_core_order=publish_core_order,
             formation_meta={
@@ -9642,43 +9740,72 @@ def refresh_challengers(db, p) -> dict:
             allow_loo=False,
         )
         shared_economics_degraded = _shared_portfolio_release_degraded(marginal)
-        if shared_economics_degraded:
+        _assert_daily_current_strict_core_rows(
+            selection_rows, publish_core_order, publication_stamp,
+        )
+
+        # A promotion may not publish on degraded shared economics.  A mandatory safety removal still must
+        # publish, but a tuned surface which fails the final shared check is rejected and the reduced exact
+        # membership is replayed again on the current active surface.  Either way, the generation receives
+        # fresh evidence for its actual Core instead of copying the previous generation's replay columns.
+        if shared_economics_degraded and membership_change_reason == "promotion":
             promotion_blocked_reason = "shared_economics_operator_review"
+            publish_core_order = previous_core_order
+            membership_changed = False
             membership_retune_triggered = False
             fixed_surface_promotion = False
-        if promotion_blocked_reason:
-            selection_rows = _carry_challenger_daily_core_rows(
-                previous_selection_rows,
-                proposed_selection_rows,
-                daily_floor_order,
+            formation = fixed_formation
+            selection_rows, marginal = _build_explicit_selection(
+                db, generation_id, publication_stamp, now_ms,
+                forced_core_order=publish_core_order,
+                formation_meta={
+                    **dict(formation.get("search") or {}),
+                    "retentionHysteresis": True,
+                },
+                effective_qualifications=formation.get("qualifications") or {},
+                effective_scores=formation.get("scores") or {},
+                effective_policies=formation.get("policies") or {},
+                effective_metrics=formation.get("walletMetrics") or {},
+                effective_score_details=formation.get("scoreDetails") or {},
+                effective_replay_params_hash=formation.get("replayParamsHash"),
+                effective_param_overrides=formation.get("params") or {},
+                allow_loo=False,
             )
-            marginal = None
-            affected = previous_core | {
-                row.addr for row in proposed_selection_rows
-                if row.role == selection.CORE
-            }
-            final_by_addr = {row.addr: row for row in selection_rows}
-            last_open = {
-                str(addr or "").lower(): value
-                for addr, value in db.execute(
-                    "SELECT addr,last_copyable_open_ms FROM profile"
-                ).fetchall()
-            }
-            for addr in sorted(affected):
-                row = final_by_addr.get(addr)
-                if not row:
-                    continue
-                upsert_wallet_registry(
-                    db, addr, generation=generation_id, seen_at=publication_stamp,
-                    state=row.role, role=row.role,
-                    data_status=row.data_status, reason=row.reason,
-                    last_actionable_open_ms=last_open.get(addr),
-                )
-            if not shared_economics_degraded:
-                marginal = None
-        else:
+            shared_economics_degraded = _shared_portfolio_release_degraded(marginal)
+        elif shared_economics_degraded and automatic_exit_core and membership_retune_triggered:
+            promoted_after_exit = tuple(
+                addr for addr in publish_core_order if addr not in set(daily_floor_order)
+            )
+            if promoted_after_exit:
+                promotion_blocked_reason = "shared_economics_operator_review"
+                publish_core_order = daily_floor_order
+            membership_retune_triggered = False
+            fixed_surface_promotion = False
+            formation = fixed_formation
+            selection_rows, marginal = _build_explicit_selection(
+                db, generation_id, publication_stamp, now_ms,
+                forced_core_order=publish_core_order,
+                formation_meta={
+                    **dict(formation.get("search") or {}),
+                    "retentionHysteresis": True,
+                },
+                effective_qualifications=formation.get("qualifications") or {},
+                effective_scores=formation.get("scores") or {},
+                effective_policies=formation.get("policies") or {},
+                effective_metrics=formation.get("walletMetrics") or {},
+                effective_score_details=formation.get("scoreDetails") or {},
+                effective_replay_params_hash=formation.get("replayParamsHash"),
+                effective_param_overrides=formation.get("params") or {},
+                allow_loo=False,
+            )
+            shared_economics_degraded = _shared_portfolio_release_degraded(marginal)
+
+        _assert_daily_current_strict_core_rows(
+            selection_rows, publish_core_order, publication_stamp,
+        )
+        _assert_daily_current_strict_portfolio(marginal, publish_core_order)
+        if membership_retune_triggered:
             _apply_formation_params(db, formation, publication_stamp)
-            selection_rows = proposed_selection_rows
         selection_rows = _decorate_retention_rows(
             selection_rows, previous_core, daily_retention_decisions,
         )
@@ -9743,8 +9870,10 @@ def refresh_challengers(db, p) -> dict:
                 "effectiveCore": list(current_core),
                 "marketSnapshot": market_validation,
                 "baseFullGeneration": base_generation,
-                "promotionOnly": True,
+                "dailyRefresh": True,
+                "promotionOnly": not bool(automatic_exit_core),
                 "promotionBlockedReason": promotion_blocked_reason,
+                "retuneFallbackReason": retune_fallback_reason,
                 "promotionParity": promotion_parity,
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
@@ -9752,9 +9881,7 @@ def refresh_challengers(db, p) -> dict:
                 "structuralCoreRemoved": len(structural_core),
                 "actualCatastropheCoreRemoved": len(actual_catastrophic_core),
                 "unavailableCoreRemoved": len(unavailable_core),
-                "carriedCoreEvidenceGeneration": (
-                    previous_generation if promotion_blocked_reason else None
-                ),
+                "replayEvidenceGeneration": generation_id,
             },
             stamp=publication_stamp,
         )
@@ -9788,8 +9915,10 @@ def refresh_challengers(db, p) -> dict:
                 "membershipRetuneTriggered": membership_retune_triggered,
                 "retuneAttempted": retune_attempted,
                 "fixedSurfacePromotion": fixed_surface_promotion,
-                "promotionOnly": True,
+                "dailyRefresh": True,
+                "promotionOnly": not bool(automatic_exit_core),
                 "promotionBlockedReason": promotion_blocked_reason,
+                "retuneFallbackReason": retune_fallback_reason,
                 "promotionParity": promotion_parity,
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
@@ -9814,8 +9943,10 @@ def refresh_challengers(db, p) -> dict:
             "retuned": membership_retune_triggered,
             "membershipRetuneTriggered": membership_retune_triggered,
             "retuneAttempted": retune_attempted,
-            "promotionOnly": True,
+            "dailyRefresh": True,
+            "promotionOnly": not bool(automatic_exit_core),
             "promotionBlockedReason": promotion_blocked_reason,
+            "retuneFallbackReason": retune_fallback_reason,
             "promotionParity": promotion_parity,
             "verifiedSourceBlowups": len(verified_source_blowups),
             "severeCopyLiquidations": len(severe_copy_liquidations),
@@ -9831,8 +9962,7 @@ def refresh_challengers(db, p) -> dict:
             (json.dumps(metrics_json, sort_keys=True), generation_id),
         )
         portfolio_replay, selection_replay = _store_final_copy_summary(
-            db, generation_id,
-            None if shared_economics_degraded else marginal,
+            db, generation_id, marginal,
         )
         auto_tune.bind_active_tune_rollback_core(db, current_core)
         _record_run(
@@ -9841,7 +9971,7 @@ def refresh_challengers(db, p) -> dict:
             len(set(current_core) & previous_core), rejected, len(current_core),
             full=False, failed=0, complete=True, kind="challenger_refresh",
             generation_id=generation_id, api_stats=rest.request_stats(),
-            reason=promotion_blocked_reason,
+            reason=outcome_reason or promotion_blocked_reason,
             retention_metrics={
                 "coreAdded": len(added_core),
                 "coreRemoved": len(removed_core),
@@ -9869,8 +9999,11 @@ def refresh_challengers(db, p) -> dict:
                 1 for row in selection_rows if row.role == selection.CHALLENGER
             ),
             "coreAdded": len(added_core), "coreRemoved": len(removed_core),
-            "promotionOnly": True,
+            "dailyRefresh": True,
+            "promotionOnly": not bool(automatic_exit_core),
+            "outcomeReason": outcome_reason,
             "promotionBlockedReason": promotion_blocked_reason,
+            "retuneFallbackReason": retune_fallback_reason,
             "verifiedSourceBlowups": len(verified_source_blowups),
             "severeCopyLiquidations": len(severe_copy_liquidations),
             "hardSafetyCoreRemoved": len(hard_safety_core),

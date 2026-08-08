@@ -650,7 +650,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("_retention_exact_formation(", daily_source)
         self.assertIn("retention_addrs=pinned_core_order", complete_source)
         self.assertIn("retention_addrs=pinned_core_order", finalizer_source)
-        self.assertEqual(daily_source.count("retention_addrs=formation_retention_order"), 4)
+        self.assertEqual(daily_source.count("retention_addrs=formation_retention_order"), 3)
+        self.assertIn("retention_addrs=publish_core_order", daily_source)
+        self.assertIn("_fixed_membership_addrs=publish_core_order", daily_source)
         self.assertLess(
             daily_source.index("unavailable_core ="),
             daily_source.index("fixed_formation = form_quality_prefix("),
@@ -852,8 +854,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertIn("automatic_retune = _automatic_formation_retune_enabled(db)", source)
         self.assertIn('elif fixed_decision["mode"] == "promote":', source)
-        self.assertIn("if automatic_retune:", source)
-        self.assertIn("fixed_surface_promotion = True", source)
+        self.assertIn("if membership_changed and automatic_retune", source)
+        self.assertIn("fixed_surface_promotion = not automatic_retune", source)
         self.assertIn("challenger_daily_promotion_fixed_surface", source)
 
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
@@ -2667,6 +2669,43 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(per_wallet, {
                 "status": "skipped", "reason": "portfolio_strict_only", "refreshed": 0,
             })
+
+    def test_final_copy_summary_persists_degraded_but_complete_certification(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            marginal = SimpleNamespace(search_meta={"finalStrictCopy": {
+                "status": "operator_review_degraded",
+                "failures": ["open_follow_rate"],
+                "selectedCount": 6,
+                "netPnl30d": 900,
+                "dynamicReturn30d": .09,
+                "dynamicReturn7d": .02,
+                "startEquity30d": 10_000,
+                "endEquity30d": 10_900,
+                "netPnl7d": 200,
+                "startEquity7d": 10_000,
+                "endEquity7d": 10_200,
+                "maxDrawdown30d": .12,
+                "liquidations30d": 0,
+                "actionableOpenRate30d": .65,
+                "capacityFit30d": .9,
+                "pricePathCoverage30d": .99,
+                "maintenanceMarginCoverage30d": 1.0,
+            }})
+
+            portfolio, _per_wallet = scanner._store_final_copy_summary(
+                db, "g-degraded", marginal,
+            )
+
+            persisted = json.loads(db.execute(
+                "SELECT value FROM auto_tune_state WHERE key='effective_portfolio_replay'"
+            ).fetchone()[0])
+            self.assertEqual(portfolio["status"], "ok")
+            self.assertEqual(portfolio["validationStatus"], "operator_review_degraded")
+            self.assertEqual(portfolio["validationFailures"], ["open_follow_rate"])
+            self.assertEqual(persisted["generation"], "g-degraded")
+            self.assertEqual(persisted["dynamicReturn30d"], .09)
 
     def test_final_parameter_qualification_overrides_scan_time_core_signal(self):
         with tempfile.TemporaryDirectory() as td:

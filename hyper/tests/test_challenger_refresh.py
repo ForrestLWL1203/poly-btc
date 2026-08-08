@@ -201,8 +201,12 @@ class ChallengerRefreshTests(unittest.TestCase):
                 },
             }
             rows = [
-                selection.SelectionRow("0xchallenge", "core", follow_score=.9),
-                selection.SelectionRow("0xcore", "core", follow_score=.8),
+                selection.SelectionRow(
+                    "0xcore", "core", follow_score=.8, selection_rank=1,
+                ),
+                selection.SelectionRow(
+                    "0xchallenge", "core", follow_score=.9, selection_rank=2,
+                ),
             ]
             marginal = SimpleNamespace(search_meta={})
             resolver = SimpleNamespace()
@@ -268,6 +272,14 @@ class ChallengerRefreshTests(unittest.TestCase):
                     scanner, "_build_explicit_selection",
                     return_value=(rows, marginal),
                 ))
+                strict_rows = stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_core_rows",
+                    return_value=("0xcore", "0xchallenge"),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_portfolio",
+                    return_value={"status": "passed"},
+                ))
                 stack.enter_context(patch.object(
                     scanner, "_selection_market_snapshot_validation",
                     return_value={"status": "ok"},
@@ -314,11 +326,16 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertFalse(form.call_args_list[0].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
+        self.assertEqual(
+            form.call_args_list[1].kwargs["_fixed_membership_addrs"],
+            ("0xcore", "0xchallenge"),
+        )
         self.assertTrue(
             build_selection.call_args.kwargs[
                 "formation_meta"
             ]["retentionHysteresis"]
         )
+        self.assertEqual(strict_rows.call_count, 2)
 
     def test_daily_replacement_proposal_fills_an_open_seat_without_removing_incumbent(self):
         previous = [
@@ -339,24 +356,10 @@ class ChallengerRefreshTests(unittest.TestCase):
         decision = scanner._challenger_daily_membership_decision(
             ("0xcore",), ("0xchallenge",),
         )
-        carried = scanner._carry_challenger_daily_core_rows(
-            previous, proposed, ("0xcore",),
-        )
-        roles = {row.addr: row.role for row in carried}
-        reasons = {row.addr: row.reason for row in carried}
-
         self.assertEqual(decision["mode"], "promote")
         self.assertEqual(decision["selected"], ("0xcore", "0xchallenge"))
         self.assertEqual(decision["removed"], ("0xcore",))
         self.assertEqual(decision["added"], ("0xchallenge",))
-        self.assertEqual(roles["0xcore"], "core")
-        self.assertEqual(roles["0xchallenge"], "challenger")
-        self.assertEqual(
-            reasons["0xcore"], "challenger_daily_core_carried",
-        )
-        self.assertEqual(
-            reasons["0xchallenge"], "challenger_daily_promotion_not_published",
-        )
 
     def test_daily_same_membership_preserves_incumbent_order(self):
         decision = scanner._challenger_daily_membership_decision(
@@ -367,7 +370,17 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(decision["mode"], "refresh")
         self.assertEqual(decision["selected"], ("0xcoreb", "0xcorea"))
 
-    def test_degraded_shared_portfolio_blocks_release(self):
+    def test_exact_retune_must_certify_the_complete_final_membership(self):
+        self.assertTrue(scanner._formation_certifies_membership(
+            {"selected": ("0xnew", "0xcore")},
+            ("0xcore", "0xnew"),
+        ))
+        self.assertFalse(scanner._formation_certifies_membership(
+            {"selected": ("0xcore",)},
+            ("0xcore", "0xnew"),
+        ))
+
+    def test_degraded_shared_portfolio_blocks_promotion_but_keeps_fresh_replay(self):
         degraded = SimpleNamespace(search_meta={
             "finalStrictCopy": {
                 "status": "operator_review_degraded",
@@ -383,14 +396,73 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertFalse(scanner._shared_portfolio_release_degraded(None))
 
         source = inspect.getsource(scanner.refresh_challengers)
-        build_at = source.index("proposed_selection_rows, marginal =")
+        build_at = source.index("selection_rows, marginal =")
         release_at = source.index("shared_economics_degraded =", build_at)
         apply_at = source.index("_apply_formation_params(", release_at)
         self.assertLess(build_at, release_at)
         self.assertLess(release_at, apply_at)
         self.assertIn(
-            "None if shared_economics_degraded else marginal", source,
+            'membership_change_reason == "promotion"', source,
         )
+        self.assertIn("db, generation_id, marginal", source)
+        self.assertNotIn("_carry_challenger_daily_core_rows", source)
+
+    def test_daily_current_strict_rows_reject_stale_or_incomplete_evidence(self):
+        complete = selection.SelectionRow(
+            "0xcore", "core", enabled=True, selection_rank=1,
+            replay_copy_bt_net_pnl=100,
+            replay_copy_bt_closed_net_pnl=90,
+            replay_copy_bt_window_start_equity=10_000,
+            replay_copy_bt_win_rate=.75,
+            replay_copy_bt_closed_n=12,
+            replay_copy_bt_7d_net_pnl=25,
+            replay_copy_bt_7d_closed_net_pnl=20,
+            replay_copy_bt_7d_window_start_equity=10_050,
+            replay_copy_bt_7d_closed_n=4,
+            replay_params_hash="current",
+            replayed_at="now",
+        )
+        self.assertEqual(
+            scanner._assert_daily_current_strict_core_rows(
+                [complete], ("0xcore",), "now",
+            ),
+            ("0xcore",),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "current_strict_evidence_missing:1",
+        ):
+            scanner._assert_daily_current_strict_core_rows(
+                [complete], ("0xcore",), "later",
+            )
+        with self.assertRaisesRegex(RuntimeError, "final_core_not_certified:1:1"):
+            scanner._assert_daily_current_strict_core_rows(
+                [complete], ("0xother",), "now",
+            )
+
+    def test_daily_current_strict_portfolio_requires_exact_complete_windows(self):
+        complete = SimpleNamespace(search_meta={"finalStrictCopy": {
+            "status": "passed", "selectedCount": 1,
+            "netPnl30d": 100, "startEquity30d": 1000, "endEquity30d": 1100,
+            "dynamicReturn30d": .1,
+            "netPnl7d": 20, "startEquity7d": 1050, "endEquity7d": 1070,
+            "dynamicReturn7d": .019,
+        }})
+        validation = scanner._assert_daily_current_strict_portfolio(
+            complete, ("0xcore",),
+        )
+        self.assertEqual(validation["selectedCount"], 1)
+
+        with self.assertRaisesRegex(RuntimeError, "membership_mismatch:2:1"):
+            scanner._assert_daily_current_strict_portfolio(
+                complete, ("0xcore", "0xother"),
+            )
+        incomplete = SimpleNamespace(search_meta={"finalStrictCopy": {
+            **complete.search_meta["finalStrictCopy"], "dynamicReturn7d": None,
+        }})
+        with self.assertRaisesRegex(RuntimeError, "portfolio_incomplete:1"):
+            scanner._assert_daily_current_strict_portfolio(
+                incomplete, ("0xcore",),
+            )
 
     def test_unavailable_core_is_removed_before_daily_formation(self):
         source = inspect.getsource(scanner.refresh_challengers)
@@ -469,28 +541,164 @@ class ChallengerRefreshTests(unittest.TestCase):
 
         self.assertEqual(result, {})
 
-    def test_severe_copy_liquidation_wallet_is_not_carried_with_promotion_floor(self):
-        previous = [
-            selection.SelectionRow("0xkeep", "core", selection_rank=1),
-            selection.SelectionRow("0xblown", "core", selection_rank=2),
-        ]
-        proposed = [
-            selection.SelectionRow("0xkeep", "challenger", selection_rank=3),
-            selection.SelectionRow(
-                "0xblown", "exit_only",
-                reason="copy_single_liquidation_loss_over_8pct:exit_pending",
-            ),
-            selection.SelectionRow("0xnew", "core", selection_rank=1),
-        ]
+    def test_hard_safety_exit_and_qualified_promotion_publish_one_exact_membership(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            passed = perp_prefilter.Result("passed", "passed", {})
 
-        carried = scanner._carry_challenger_daily_core_rows(
-            previous, proposed, ("0xkeep",),
+            def profile(_db, _addr, *_args, **_kwargs):
+                return "active", "source_quality_passed", {
+                    "data_status": "valid", "evidence_status": "source_qualified",
+                }, False
+
+            formation = {
+                "selected": ("0xchallenge",),
+                "params": {},
+                "qualifications": {}, "scores": {}, "policies": {},
+                "walletMetrics": {}, "scoreDetails": {},
+                "replayParamsHash": "exact-replacement",
+                "search": {
+                    "retuned": True,
+                    "robustAllowedMemberships": [["0xchallenge"]],
+                    "tunePoolCount": 1,
+                    "formationTuneEligible": True,
+                    "formationTuneReason": "proposal_selected",
+                },
+            }
+            rows = [
+                selection.SelectionRow(
+                    "0xchallenge", "core", follow_score=.9, selection_rank=1,
+                ),
+            ]
+            marginal = SimpleNamespace(search_meta={})
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(
+                    scanner.rest, "copyable_universe", return_value={"BTC"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner.generation_market, "fetch_context_snapshot", return_value={},
+                ))
+                stack.enter_context(patch.object(
+                    scanner.generation_market, "Resolver", return_value=SimpleNamespace(),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_run_perp_prefilter",
+                    return_value={"0xcore": passed, "0xchallenge": passed},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_incomplete_fill_cache_addrs", return_value=[],
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_profile_one", side_effect=profile,
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_verified_zero_equity_source_liquidations",
+                    return_value={
+                        "0xcore": {
+                            "latestLiquidationMs": 1,
+                            "liquidationFills": 1,
+                            "coins": ["BTC"],
+                            "maxAccountValue": 0,
+                            "openPositions": 0,
+                        },
+                    },
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_source_quality_pool",
+                    return_value=(["0xchallenge"], []),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_rough_replay_source_pool",
+                    return_value={"qualified": ["0xchallenge"], "failed": []},
+                ))
+                stack.enter_context(patch.object(
+                    scanner.generation_market, "seal", return_value={"sealed": True},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_scoped_fill_cache",
+                    return_value={"audited": 2, "invalid": 0},
+                ))
+                stack.enter_context(patch.object(
+                    scanner.pipeline_audit, "record_profile_snapshot",
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "refresh_watchlist", return_value=2,
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_prefetch_selection_paths", return_value={"status": "ok"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_promotion_parity",
+                    return_value={"checked": 1, "passed": 1},
+                ))
+                form = stack.enter_context(patch.object(
+                    scanner, "form_quality_prefix", return_value=formation,
+                ))
+                apply_params = stack.enter_context(patch.object(
+                    scanner, "_apply_formation_params", return_value=True,
+                ))
+                build_selection = stack.enter_context(patch.object(
+                    scanner, "_build_explicit_selection",
+                    return_value=(rows, marginal),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_core_rows",
+                    return_value=("0xchallenge",),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_portfolio",
+                    return_value={"status": "passed"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_selection_market_snapshot_validation",
+                    return_value={"status": "ok"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_record_explicit_follow_history",
+                    return_value={"0xchallenge"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner.strategy_revision, "create_revision",
+                    return_value={"revision": 2, "source": "challenger_daily"},
+                ))
+                store_summary = stack.enter_context(patch.object(
+                    scanner, "_store_final_copy_summary",
+                    return_value=({"status": "ok"}, {"status": "ok"}),
+                ))
+                stack.enter_context(patch.object(
+                    scanner.auto_tune, "bind_active_tune_rollback_core",
+                ))
+                result = scanner.refresh_challengers(db, self.ns())
+
+            current = db.execute(
+                "SELECT generation FROM scan_generation WHERE is_current=1"
+            ).fetchone()[0]
+            selected = db.execute(
+                "SELECT addr,role FROM follow_selection WHERE generation=?",
+                (current,),
+            ).fetchall()
+            run = db.execute(
+                "SELECT core_added,core_removed,outcome_reason FROM scan_runs "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["coreAdded"], 1)
+        self.assertEqual(result["coreRemoved"], 1)
+        self.assertEqual(result["outcomeReason"], "challenger_daily_hard_safety_removal")
+        self.assertEqual(selected, [("0xchallenge", "core")])
+        self.assertEqual(run, (1, 1, "challenger_daily_hard_safety_removal"))
+        self.assertEqual(form.call_count, 2)
+        self.assertEqual(
+            form.call_args_list[1].kwargs["_fixed_membership_addrs"],
+            ("0xchallenge",),
         )
-        roles = {row.addr: row.role for row in carried}
-
-        self.assertEqual(roles["0xkeep"], "core")
-        self.assertEqual(roles["0xblown"], "exit_only")
-        self.assertEqual(roles["0xnew"], "challenger")
+        self.assertEqual(
+            build_selection.call_args.kwargs["forced_core_order"],
+            ("0xchallenge",),
+        )
+        apply_params.assert_called_once()
+        store_summary.assert_called_once_with(db, current, marginal)
 
     def test_current_core_delta_error_after_zero_equity_gate_aborts_and_retains_generation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -612,6 +820,14 @@ class ChallengerRefreshTests(unittest.TestCase):
                 stack.enter_context(patch.object(
                     scanner, "_build_explicit_selection",
                     return_value=(rows, marginal),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_core_rows",
+                    return_value=("0xcore",),
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_assert_daily_current_strict_portfolio",
+                    return_value={"status": "passed"},
                 ))
                 stack.enter_context(patch.object(
                     scanner, "_selection_market_snapshot_validation",

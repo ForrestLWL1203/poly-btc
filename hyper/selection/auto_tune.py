@@ -1012,7 +1012,8 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
         _state_set(db, "effective_portfolio_replay", summary)
         db.commit()
         return summary
-    if strict.get("status") != "passed":
+    validation_status = str(strict.get("status") or "")
+    if validation_status not in {"passed", "operator_review_degraded", "probation"}:
         return {
             "generation": generation_id, "coreCount": core_count,
             "status": "unavailable", "reason": "final_strict_copy_missing",
@@ -1039,6 +1040,8 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
     summary = {
         "generation": generation_id,
         "status": "ok",
+        "validationStatus": validation_status,
+        "validationFailures": list(strict.get("failures") or ()),
         "coreCount": core_count,
         "paramsHash": params_hash,
         "replayedAt": now_iso(),
