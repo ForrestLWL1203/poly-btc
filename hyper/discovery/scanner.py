@@ -5658,10 +5658,10 @@ def _active_pinned_core_order(db) -> tuple[str, ...]:
     )
 
 
-def _assert_daily_promotion_parity(
+def _daily_promotion_parity_evidence(
     db, generation_id, *, previous_core, proposed_core, promotion_universe, formation,
 ) -> dict:
-    """Fail closed unless every daily entrant satisfies the full-scan admission contract."""
+    """Classify daily entrants against the complete full-scan admission contract."""
     previous = {
         str(addr or "").lower() for addr in (previous_core or ()) if addr
     }
@@ -5676,6 +5676,7 @@ def _assert_daily_promotion_parity(
         for addr, value in dict((formation or {}).get("qualifications") or {}).items()
     }
     added = tuple(addr for addr in proposed if addr not in previous)
+    passed = []
     failures = []
     for addr in added:
         evidence = db.execute(
@@ -5699,15 +5700,38 @@ def _assert_daily_promotion_parity(
             and not qualification.get("deferred")
             and qualification.get("role") != "quarantine"
         )
-        if not valid:
+        if valid:
+            passed.append(addr)
+        else:
             failures.append(addr)
+    return {
+        "checked": len(added),
+        "passed": len(passed),
+        "failed": len(failures),
+        "passedAddrs": tuple(passed),
+        "failedAddrs": tuple(failures),
+        "policyVersion": pre_strict.POLICY_VERSION,
+        "modelVersion": pre_strict.SELECTION_MODEL_VERSION,
+    }
+
+
+def _assert_daily_promotion_parity(
+    db, generation_id, *, previous_core, proposed_core, promotion_universe, formation,
+) -> dict:
+    """Fail closed unless every daily entrant satisfies the full-scan admission contract."""
+    audit = _daily_promotion_parity_evidence(
+        db, generation_id,
+        previous_core=previous_core,
+        proposed_core=proposed_core,
+        promotion_universe=promotion_universe,
+        formation=formation,
+    )
+    failures = tuple(audit.get("failedAddrs") or ())
     if failures:
         raise RuntimeError(f"challenger_daily_promotion_parity_failed:{len(failures)}")
     return {
-        "checked": len(added),
-        "passed": len(added),
-        "policyVersion": pre_strict.POLICY_VERSION,
-        "modelVersion": pre_strict.SELECTION_MODEL_VERSION,
+        key: value for key, value in audit.items()
+        if key not in {"passedAddrs", "failedAddrs"}
     }
 
 
@@ -5895,6 +5919,23 @@ def _retention_exact_formation(
     policies = {}
     for addr, effective in zip(desired_order, exact_results):
         qualification = dict(effective.get("qualification") or {})
+        formation_entry = _formation_entry_eligibility(
+            effective.get("metrics") or {}, effective.get("score"),
+            policy_values=exact["follow"],
+        )
+        qualification["individualCoreEligible"] = bool(
+            formation_entry.get("individualCoreEligible")
+        )
+        qualification["formationEligible"] = bool(
+            formation_entry.get("eligible")
+        )
+        qualification["formationStatus"] = (
+            "formation_eligible"
+            if formation_entry.get("eligible") else "formation_entry_rejected"
+        )
+        qualification["formationChecks"] = dict(
+            formation_entry.get("checks") or {}
+        )
         classification, _classification_reason = (
             core_retention.qualification_failure(qualification)
         )
@@ -8936,7 +8977,7 @@ def _verified_zero_equity_source_liquidations(
 
 
 def _challenger_daily_membership_decision(previous_order, proposed_order) -> dict:
-    """Fill empty seats from strict proposals without replacing incumbents."""
+    """Accept only an unchanged Core or the proposal's exact strict superset."""
     previous = tuple(dict.fromkeys(
         str(addr or "").lower() for addr in (previous_order or ()) if addr
     ))
@@ -8947,24 +8988,21 @@ def _challenger_daily_membership_decision(previous_order, proposed_order) -> dic
     proposed_set = set(proposed)
     removed = tuple(addr for addr in previous if addr not in proposed_set)
     proposed_added = tuple(addr for addr in proposed if addr not in previous_set)
-    cap = max(1, min(
-        int(config.MAX_TARGETS),
-        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
-        int(getattr(config, "CORE_INITIAL_MAX_N", 16)),
-    ))
-    added = proposed_added[:max(0, cap - len(previous))]
-    if added:
-        mode = "promote"
-        selected = previous + added
-        reason = "daily_fill_open_core_seats"
-    elif removed:
+    if removed:
         mode = "carry"
         selected = previous
         reason = "daily_proposal_would_remove_core"
+        added = ()
+    elif proposed_added:
+        mode = "promote"
+        selected = proposed
+        reason = "daily_strict_superset_promotion"
+        added = proposed_added
     else:
         mode = "refresh"
         selected = previous
         reason = "daily_evidence_refresh_membership_unchanged"
+        added = ()
     return {
         "mode": mode,
         "reason": reason,
@@ -9090,11 +9128,11 @@ def _formation_certifies_membership(
 def refresh_challengers(db, p) -> dict:
     """Refresh the frozen pool and atomically recertify the effective daily Core.
 
-    Daily policy still forbids ordinary incumbent replacement: it may keep the current Core, append a
-    strict Challenger, or remove an immediate safety/unavailability failure.  The publication evidence is
-    never carried from the previous generation, however.  The exact effective membership is rebuilt from
-    current per-wallet Strict evidence and one current-generation shared Strict replay; a real membership
-    change also receives the same bounded parameter search used by complete formation when auto-tune is on.
+    Daily policy first removes immediate safety/unavailability failures, then independently admits only
+    Challengers which pass the current full Strict contract, and finally tunes that exact combined set.
+    Ordinary incumbent replacement remains forbidden.  Publication evidence is never carried from the
+    previous generation: the effective membership receives current per-wallet Strict evidence and one
+    same-generation shared Strict replay.
     """
     now_ms = int(time.time() * 1000)
     started, t0, stamp = now_iso(), time.time(), now_iso()
@@ -9574,8 +9612,43 @@ def refresh_challengers(db, p) -> dict:
         daily_floor_order = tuple(
             addr for addr in previous_core_order if addr not in automatic_exit_core
         )
+        # Daily admission has three deliberately separate phases.  First retain every incumbent which did
+        # not hit an immediate exit; then classify each frozen Challenger from its own current-generation
+        # full Strict evidence; only after that may the exact resulting membership enter portfolio tuning.
+        # The formation prefix is not itself the promotion list: using it here previously mixed one failed
+        # Challenger into the parameter search and then unioned two independently selected sets.
+        strict_candidate_order = tuple(
+            addr for addr in (
+                str(value or "").lower()
+                for value in (fixed_formation.get("ranked") or ())
+            )
+            if addr and addr not in previous_core
+        )
+        preliminary_order = tuple(dict.fromkeys((
+            *previous_core_order, *strict_candidate_order,
+        )))
+        preliminary_parity = _daily_promotion_parity_evidence(
+            db, generation_id,
+            previous_core=previous_core_order,
+            proposed_core=preliminary_order,
+            promotion_universe=base_promotion_universe,
+            formation=fixed_formation,
+        )
+        strict_promotions = tuple(preliminary_parity.get("passedAddrs") or ())
+        rejected_promotions = tuple(preliminary_parity.get("failedAddrs") or ())
+        core_cap = max(1, min(
+            int(config.MAX_TARGETS),
+            int(getattr(config, "CORE_TARGET_MAX_N", 16)),
+            int(getattr(config, "CORE_INITIAL_MAX_N", 16)),
+        ))
+        accepted_promotions = strict_promotions[:max(
+            0, core_cap - len(daily_floor_order),
+        )]
+        daily_candidate_order = tuple(dict.fromkeys((
+            *daily_floor_order, *accepted_promotions,
+        )))
         fixed_decision = _challenger_daily_membership_decision(
-            daily_floor_order, fixed_core_order,
+            daily_floor_order, daily_candidate_order,
         )
         membership_retune_triggered = False
         retune_attempted = False
@@ -9586,9 +9659,21 @@ def refresh_challengers(db, p) -> dict:
         membership_change_reason = None
         formation = fixed_formation
         publish_core_order = fixed_decision["selected"]
+        for addr in rejected_promotions:
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="promotion_review", addr=addr, status="blocked",
+                reason="challenger_daily_strict_admission_failed",
+                payload={
+                    "generation": generation_id,
+                    "keptAs": selection.CHALLENGER,
+                    "policyVersion": pre_strict.POLICY_VERSION,
+                    "modelVersion": pre_strict.SELECTION_MODEL_VERSION,
+                },
+            )
         if automatic_exit_core:
             outcome_reason = "challenger_daily_hard_safety_removal"
-            promoted_after_exit = tuple(fixed_decision.get("added") or ())
+            promoted_after_exit = accepted_promotions
             membership_change_reason = (
                 "hard_safety_reformation"
                 if promoted_after_exit else "hard_safety_removal"
@@ -9610,6 +9695,9 @@ def refresh_challengers(db, p) -> dict:
                     "protectedCore": len(daily_floor_order),
                     "fixedSurfaceCore": len(fixed_core),
                     "promotedAfterExit": len(promoted_after_exit),
+                    "strictCandidates": len(strict_candidate_order),
+                    "strictPromotions": len(accepted_promotions),
+                    "strictRejected": len(rejected_promotions),
                 },
             )
             db.commit()
@@ -9630,6 +9718,8 @@ def refresh_challengers(db, p) -> dict:
                     "fixedSurfaceCore": len(fixed_core),
                     "added": len(set(publish_core_order) - previous_core),
                     "removed": len(previous_core - set(publish_core_order)),
+                    "strictCandidates": len(strict_candidate_order),
+                    "strictRejected": len(rejected_promotions),
                     "autoTuneEnabled": bool(automatic_retune),
                 },
             )

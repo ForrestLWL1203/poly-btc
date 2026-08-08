@@ -626,11 +626,26 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(audit["passed"], 1)
 
+            evidence = scanner._daily_promotion_parity_evidence(
+                db, "g-daily", previous_core=("0xold",),
+                proposed_core=("0xold", "0xnew"),
+                promotion_universe={"0xnew"}, formation=formation,
+            )
+            self.assertEqual(evidence["passedAddrs"], ("0xnew",))
+            self.assertEqual(evidence["failedAddrs"], ())
+
             db.execute(
                 "UPDATE pre_strict_evidence SET strict_status='rejected' "
                 "WHERE generation='g-daily' AND addr='0xnew'"
             )
             db.commit()
+            evidence = scanner._daily_promotion_parity_evidence(
+                db, "g-daily", previous_core=("0xold",),
+                proposed_core=("0xold", "0xnew"),
+                promotion_universe={"0xnew"}, formation=formation,
+            )
+            self.assertEqual(evidence["passedAddrs"], ())
+            self.assertEqual(evidence["failedAddrs"], ("0xnew",))
             with self.assertRaisesRegex(
                 RuntimeError, "challenger_daily_promotion_parity_failed:1",
             ):
@@ -654,6 +669,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertLess(
             daily_source.index("unavailable_core ="),
             daily_source.index("fixed_formation = form_quality_prefix("),
+        )
+        self.assertLess(
+            daily_source.index("_daily_promotion_parity_evidence("),
+            daily_source.index("_retention_exact_formation("),
         )
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 

@@ -263,6 +263,13 @@ class ChallengerRefreshTests(unittest.TestCase):
                     scanner, "_prefetch_selection_paths", return_value={"status": "ok"},
                 ))
                 stack.enter_context(patch.object(
+                    scanner, "_daily_promotion_parity_evidence",
+                    return_value={
+                        "checked": 1, "passed": 1, "failed": 0,
+                        "passedAddrs": ("0xchallenge",), "failedAddrs": (),
+                    },
+                ))
+                stack.enter_context(patch.object(
                     scanner, "_assert_daily_promotion_parity",
                     return_value={"checked": 1, "passed": 1},
                 ))
@@ -343,7 +350,7 @@ class ChallengerRefreshTests(unittest.TestCase):
         )
         self.assertEqual(strict_rows.call_count, 2)
 
-    def test_daily_replacement_proposal_fills_an_open_seat_without_removing_incumbent(self):
+    def test_daily_replacement_proposal_cannot_be_unioned_with_incumbents(self):
         previous = [
             selection.SelectionRow(
                 "0xcore", "core", follow_score=.8, selection_rank=1,
@@ -362,10 +369,37 @@ class ChallengerRefreshTests(unittest.TestCase):
         decision = scanner._challenger_daily_membership_decision(
             ("0xcore",), ("0xchallenge",),
         )
-        self.assertEqual(decision["mode"], "promote")
-        self.assertEqual(decision["selected"], ("0xcore", "0xchallenge"))
+        self.assertEqual(decision["mode"], "carry")
+        self.assertEqual(decision["selected"], ("0xcore",))
         self.assertEqual(decision["removed"], ("0xcore",))
-        self.assertEqual(decision["added"], ("0xchallenge",))
+        self.assertEqual(decision["added"], ())
+
+    def test_daily_strict_superset_is_used_exactly_without_a_second_union(self):
+        decision = scanner._challenger_daily_membership_decision(
+            ("0xcore1", "0xcore2"),
+            ("0xcore1", "0xcore2", "0xnew1", "0xnew2"),
+        )
+
+        self.assertEqual(decision["mode"], "promote")
+        self.assertEqual(
+            decision["selected"],
+            ("0xcore1", "0xcore2", "0xnew1", "0xnew2"),
+        )
+        self.assertEqual(decision["added"], ("0xnew1", "0xnew2"))
+
+    def test_daily_safety_exit_then_two_strict_promotions_forms_exactly_seven(self):
+        original = tuple(f"0xcore{index}" for index in range(1, 7))
+        surviving = original[:-1]
+        exact_candidate = (*surviving, "0xnew1", "0xnew2")
+
+        decision = scanner._challenger_daily_membership_decision(
+            surviving, exact_candidate,
+        )
+
+        self.assertEqual(decision["mode"], "promote")
+        self.assertEqual(decision["selected"], exact_candidate)
+        self.assertEqual(len(decision["selected"]), 7)
+        self.assertEqual(decision["added"], ("0xnew1", "0xnew2"))
 
     def test_daily_same_membership_preserves_incumbent_order(self):
         decision = scanner._challenger_daily_membership_decision(
@@ -647,6 +681,13 @@ class ChallengerRefreshTests(unittest.TestCase):
                 ))
                 stack.enter_context(patch.object(
                     scanner, "_prefetch_selection_paths", return_value={"status": "ok"},
+                ))
+                stack.enter_context(patch.object(
+                    scanner, "_daily_promotion_parity_evidence",
+                    return_value={
+                        "checked": 1, "passed": 1, "failed": 0,
+                        "passedAddrs": ("0xchallenge",), "failedAddrs": (),
+                    },
                 ))
                 stack.enter_context(patch.object(
                     scanner, "_assert_daily_promotion_parity",

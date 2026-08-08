@@ -197,11 +197,13 @@ together. The current broad contract is:
   operator-starred Core can use the bounded retention lane, and hard/incomplete evidence still revokes it.
 - Daily Challenger refresh may keep the same Core or publish a strict superset; it cannot silently remove or
   replace Core. Immediate safety/unavailability failures are the exception and leave Core before formation.
-  Safety exits and qualified Challenger promotions are resolved together into one effective daily Core; an
-  exit does not suppress a valid same-run promotion or create an intermediate published membership.
+  Each frozen Challenger must first pass the same-generation Pre-strict and individual Strict contract used
+  by a complete scan; failures remain Challenger and never enter portfolio tuning. Safety exits and the
+  remaining qualified promotions are then combined exactly once (`surviving Core + qualified Challenger`);
+  an exit does not suppress a valid same-run promotion or create an intermediate published membership.
   Every successful daily publication certifies its exact effective Core with fresh per-wallet Strict evidence
   and one same-generation shared Strict replay. If membership changes and automatic tuning is enabled, the
-  exact final membership receives the bounded parameter search before parameters, selection, replay summary,
+  exact combined membership receives the bounded parameter search before parameters, selection, replay summary,
   and immutable revision publish atomically. A rejected tuned surface falls back to current parameters and is
   replayed again; previous-generation replay columns are never copied into a new daily generation. Manual
   Exit-only remains mode-specific for held-position completion.
